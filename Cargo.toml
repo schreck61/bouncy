@@ -1,0 +1,18 @@
+[package]
+name = "bouncy"
+version = "0.1.0"
+edition = "2021"
+authors = ["James O. Schreckengast"]
+license = "MIT"
+description = "GPU-accelerated particle simulation with elastic collisions, gravity, and explosive chain reactions"
+repository = "https://github.com/yourusername/bouncy"
+keywords = ["simulation", "particles", "physics", "graphics", "game"]
+categories = ["games", "graphics", "simulation"]
+
+[dependencies]
+pixels = "0.15"
+winit = "0.30"
+rand = "0.8"
+pollster = "0.4"
+rodio = "0.19"
+ouroboros = "0.18"
