@@ -320,7 +320,11 @@ fn try_elastic_collision(p1: &mut Particle, p2: &mut Particle) -> Option<Collisi
         p2.y += sep * ny;
     }
 
-    Some(CollisionResult { energy, mid_x, mid_y })
+    Some(CollisionResult {
+        energy,
+        mid_x,
+        mid_y,
+    })
 }
 
 /// Generate a ping sound with exponential decay at the given frequency.
@@ -565,7 +569,9 @@ impl App {
                 let frame = pixels.frame_mut();
                 frame.fill(0);
                 render_particles(frame, &self.particles, width, height);
-                pixels.render().expect("Failed to render frame during warmup");
+                pixels
+                    .render()
+                    .expect("Failed to render frame during warmup");
             });
             render.borrow_window().request_redraw();
             return;
