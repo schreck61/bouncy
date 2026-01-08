@@ -440,10 +440,7 @@ fn update_physics(particles: &mut [Particle], dt: f64, width: u32, height: u32) 
 
 /// Process all particle-particle collisions.
 /// Returns the maximum collision energy and populates collision_positions.
-fn handle_collisions(
-    particles: &mut Vec<Particle>,
-    collision_positions: &mut Vec<(f64, f64)>,
-) -> f64 {
+fn handle_collisions(particles: &mut [Particle], collision_positions: &mut Vec<(f64, f64)>) -> f64 {
     collision_positions.clear();
     let mut max_energy = 0.0f64;
     let n = particles.len();
@@ -607,7 +604,7 @@ impl App {
 
         // Spawn rate tracking
         let cutoff = now - std::time::Duration::from_secs_f64(SPAWN_RATE_WINDOW);
-        while self.spawn_times.front().map_or(false, |&t| t < cutoff) {
+        while self.spawn_times.front().is_some_and(|&t| t < cutoff) {
             self.spawn_times.pop_front();
         }
 
@@ -720,6 +717,7 @@ impl ApplicationHandler for App {
             window,
             width,
             height,
+            #[allow(clippy::borrowed_box)]
             pixels_builder: |window: &Box<Window>| {
                 let size = window.inner_size();
                 let surface_texture = SurfaceTexture::new(size.width, size.height, window.as_ref());
