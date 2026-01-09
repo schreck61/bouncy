@@ -23,6 +23,7 @@ use pixels::{Pixels, SurfaceTexture};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rodio::{OutputStream, OutputStreamHandle, Source};
+use rusttype::{Font, Scale};
 use std::collections::VecDeque;
 use std::env;
 use std::time::Instant;
@@ -60,6 +61,10 @@ const EXPLOSION_DURATION_MS: u64 = 800;
 const COLLISION_ENERGY_NORMALIZER: f64 = 800.0;
 const SEPARATION_PADDING: f64 = 0.5;
 const PARTICLE_MARGIN: f64 = 10.0;
+
+// Motion detection constants
+const MOTION_VELOCITY_THRESHOLD: f64 = 1.0; // Minimum velocity to be considered "moving"
+const MOTION_STOPPED_FRAMES: u32 = 60; // Frames of no motion before declaring stopped
 
 /// Result of a collision between two particles.
 struct CollisionResult {
@@ -127,25 +132,34 @@ impl Particle {
     }
 
     /// Update particle position with gravity and wall bouncing.
-    fn update(&mut self, dt: f64, width: u32, height: u32) {
-        self.vy += GRAVITY * dt;
+    /// gravity_multiplier: 1.0 = 100% gravity, negative = upward gravity
+    /// wall_elasticity: 1.0 = fully elastic, 0.0 = completely inelastic (sticks)
+    fn update(
+        &mut self,
+        dt: f64,
+        width: u32,
+        height: u32,
+        gravity_multiplier: f64,
+        wall_elasticity: f64,
+    ) {
+        self.vy += GRAVITY * gravity_multiplier * dt;
         self.x += self.vx * dt;
         self.y += self.vy * dt;
 
         if self.x <= PARTICLE_RADIUS {
             self.x = PARTICLE_RADIUS;
-            self.vx = -self.vx;
+            self.vx = -self.vx * wall_elasticity;
         } else if self.x >= width as f64 - PARTICLE_RADIUS {
             self.x = width as f64 - PARTICLE_RADIUS;
-            self.vx = -self.vx;
+            self.vx = -self.vx * wall_elasticity;
         }
 
         if self.y <= PARTICLE_RADIUS {
             self.y = PARTICLE_RADIUS;
-            self.vy = -self.vy;
+            self.vy = -self.vy * wall_elasticity;
         } else if self.y >= height as f64 - PARTICLE_RADIUS {
             self.y = height as f64 - PARTICLE_RADIUS;
-            self.vy = -self.vy;
+            self.vy = -self.vy * wall_elasticity;
         }
     }
 
@@ -280,7 +294,12 @@ fn random_bright_color() -> [u8; 4] {
 
 /// Attempt elastic collision between two particles.
 /// Returns collision result if particles are touching and approaching.
-fn try_elastic_collision(p1: &mut Particle, p2: &mut Particle) -> Option<CollisionResult> {
+/// particle_elasticity: 1.0 = fully elastic, 0.0 = completely inelastic (stick together)
+fn try_elastic_collision(
+    p1: &mut Particle,
+    p2: &mut Particle,
+    particle_elasticity: f64,
+) -> Option<CollisionResult> {
     let dx = p2.x - p1.x;
     let dy = p2.y - p1.y;
     let dist_sq = dx * dx + dy * dy;
@@ -306,10 +325,12 @@ fn try_elastic_collision(p1: &mut Particle, p2: &mut Particle) -> Option<Collisi
 
     let energy = dvn;
 
-    p1.vx -= dvn * nx;
-    p1.vy -= dvn * ny;
-    p2.vx += dvn * nx;
-    p2.vy += dvn * ny;
+    // Apply elasticity: 1.0 = full momentum exchange, 0.0 = no bounce
+    let impulse = dvn * particle_elasticity;
+    p1.vx -= impulse * nx;
+    p1.vy -= impulse * ny;
+    p2.vx += impulse * nx;
+    p2.vy += impulse * ny;
 
     let overlap = PARTICLE_DIAMETER - dist;
     if overlap > 0.0 {
@@ -431,16 +452,93 @@ fn render_explosion(frame: &mut [u8], exp: &Explosion, width: u32, height: u32) 
     }
 }
 
-/// Update all particle positions with physics simulation.
-fn update_physics(particles: &mut [Particle], dt: f64, width: u32, height: u32) {
+/// Check if any particles have significant motion.
+fn has_motion(particles: &[Particle]) -> bool {
     for particle in particles {
-        particle.update(dt, width, height);
+        let speed_sq = particle.vx * particle.vx + particle.vy * particle.vy;
+        if speed_sq > MOTION_VELOCITY_THRESHOLD * MOTION_VELOCITY_THRESHOLD {
+            return true;
+        }
+    }
+    false
+}
+
+/// Render centered text on the frame using an embedded font.
+fn render_text(frame: &mut [u8], width: u32, height: u32, text: &str, font_size: f32) {
+    // Embedded font: Liberation Sans (SIL Open Font License, compatible with MIT)
+    // This is a metrically-compatible Helvetica/Arial alternative
+    const FONT_DATA: &[u8] = include_bytes!("../assets/LiberationSans-Bold.ttf");
+    let font = Font::try_from_bytes(FONT_DATA).expect("Failed to load embedded font");
+
+    let scale = Scale::uniform(font_size);
+    let v_metrics = font.v_metrics(scale);
+    let glyphs: Vec<_> = font
+        .layout(text, scale, rusttype::point(0.0, 0.0))
+        .collect();
+
+    // Calculate text dimensions
+    let text_width = glyphs
+        .last()
+        .map(|g| g.position().x + g.unpositioned().h_metrics().advance_width)
+        .unwrap_or(0.0);
+    let text_height = v_metrics.ascent - v_metrics.descent;
+
+    // Center the text
+    let start_x = ((width as f32 - text_width) / 2.0).max(0.0);
+    let start_y = ((height as f32 - text_height) / 2.0 + v_metrics.ascent).max(0.0);
+
+    // Re-layout with correct position
+    let glyphs: Vec<_> = font
+        .layout(text, scale, rusttype::point(start_x, start_y))
+        .collect();
+
+    // Render each glyph
+    let color = [255u8, 100, 100, 255]; // Light red
+    for glyph in glyphs {
+        if let Some(bounding_box) = glyph.pixel_bounding_box() {
+            glyph.draw(|x, y, v| {
+                let px = (bounding_box.min.x + x as i32) as u32;
+                let py = (bounding_box.min.y + y as i32) as u32;
+                if px < width && py < height && v > 0.1 {
+                    let idx = (py * width + px) as usize * 4;
+                    // Blend with coverage
+                    let alpha = (v * 255.0) as u8;
+                    frame[idx] = ((color[0] as u16 * alpha as u16) / 255) as u8;
+                    frame[idx + 1] = ((color[1] as u16 * alpha as u16) / 255) as u8;
+                    frame[idx + 2] = ((color[2] as u16 * alpha as u16) / 255) as u8;
+                    frame[idx + 3] = alpha;
+                }
+            });
+        }
+    }
+}
+
+/// Render a large "STOPPED" message in the center of the screen.
+fn render_stopped_message(frame: &mut [u8], width: u32, height: u32) {
+    render_text(frame, width, height, "STOPPED", 72.0);
+}
+
+/// Update all particle positions with physics simulation.
+fn update_physics(
+    particles: &mut [Particle],
+    dt: f64,
+    width: u32,
+    height: u32,
+    gravity_multiplier: f64,
+    wall_elasticity: f64,
+) {
+    for particle in particles {
+        particle.update(dt, width, height, gravity_multiplier, wall_elasticity);
     }
 }
 
 /// Process all particle-particle collisions.
 /// Returns the maximum collision energy and populates collision_positions.
-fn handle_collisions(particles: &mut [Particle], collision_positions: &mut Vec<(f64, f64)>) -> f64 {
+fn handle_collisions(
+    particles: &mut [Particle],
+    collision_positions: &mut Vec<(f64, f64)>,
+    particle_elasticity: f64,
+) -> f64 {
     collision_positions.clear();
     let mut max_energy = 0.0f64;
     let n = particles.len();
@@ -451,7 +549,7 @@ fn handle_collisions(particles: &mut [Particle], collision_positions: &mut Vec<(
             let p1 = &mut left[i];
             let p2 = &mut right[0];
 
-            if let Some(result) = try_elastic_collision(p1, p2) {
+            if let Some(result) = try_elastic_collision(p1, p2, particle_elasticity) {
                 max_energy = max_energy.max(result.energy);
                 collision_positions.push((result.mid_x, result.mid_y));
             }
@@ -466,13 +564,27 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!(
-        "  --spawn-at-collision      Spawn new particles at collision points instead of center"
+        "  --spawn-at-collision        Spawn new particles at collision points instead of center"
     );
-    println!("  --min-particles <N>       Set starting/minimum particle count (2-100)");
-    println!("  --help                    Show this help message");
+    println!("  --min-particles <N>         Set starting/minimum particle count (2-100)");
+    println!("  --gravity <PERCENT>         Set gravity as percentage of standard (default: 100)");
+    println!("                              Negative values cause upward gravity");
+    println!("  --wall-elasticity <VALUE>   Set wall bounce elasticity 0.0-1.5 (default: 1.0)");
+    println!("                              0.0 = no bounce (sticks), 1.0 = fully elastic,");
+    println!("                              >1.0 = walls add energy to particles");
+    println!("  --particle-elasticity <VALUE>");
+    println!(
+        "                              Set particle collision elasticity 0.0-1.5 (default: 1.0)"
+    );
+    println!("                              0.0 = no bounce, 1.0 = fully elastic,");
+    println!("                              >1.0 = collisions add energy to particles");
+    println!("  --help, -h                  Show this help message");
     println!();
     println!("Controls:");
-    println!("  Space, Escape, Q          Exit the program");
+    println!("  Space, Escape, Q            Exit the program");
+    println!();
+    println!("Motion Detection:");
+    println!("  When all particles stop moving, a STOPPED message is displayed.");
 }
 
 /// Self-referential struct: pixels borrows from window
@@ -491,6 +603,9 @@ struct App {
     // Configuration
     spawn_at_collision: bool,
     min_particles_override: Option<usize>,
+    gravity_percent: i32,
+    wall_elasticity: f64,
+    particle_elasticity: f64,
 
     // Audio (must be stored to keep stream alive)
     _audio_stream: OutputStream,
@@ -516,17 +631,30 @@ struct App {
     frame_count: u64,
     fps_timer: Instant,
     warmup_frames: u32,
+
+    // Motion detection
+    stopped: bool,
+    frames_without_motion: u32,
 }
 
 impl App {
     /// Create a new App with the given configuration.
-    fn new(spawn_at_collision: bool, min_particles_override: Option<usize>) -> Self {
+    fn new(
+        spawn_at_collision: bool,
+        min_particles_override: Option<usize>,
+        gravity_percent: i32,
+        wall_elasticity: f64,
+        particle_elasticity: f64,
+    ) -> Self {
         let (audio_stream, stream_handle) =
             OutputStream::try_default().expect("Failed to create audio output stream");
 
         App {
             spawn_at_collision,
             min_particles_override,
+            gravity_percent,
+            wall_elasticity,
+            particle_elasticity,
             _audio_stream: audio_stream,
             stream_handle,
             render: None,
@@ -542,6 +670,8 @@ impl App {
             frame_count: 0,
             fps_timer: Instant::now(),
             warmup_frames: 3,
+            stopped: false,
+            frames_without_motion: 0,
         }
     }
 
@@ -582,6 +712,20 @@ impl App {
         let dt = now.duration_since(self.last_time).as_secs_f64().min(0.05);
         self.last_time = now;
 
+        // If simulation has stopped, just render the stopped message
+        if self.stopped {
+            let particles = &self.particles;
+            render.with_pixels_mut(|pixels| {
+                let frame = pixels.frame_mut();
+                frame.fill(0);
+                render_particles(frame, particles, width, height);
+                render_stopped_message(frame, width, height);
+                pixels.render().expect("Failed to render frame");
+            });
+            render.borrow_window().request_redraw();
+            return;
+        }
+
         // Update explosion
         if let Some(ref mut exp) = self.explosion {
             exp.update(dt);
@@ -597,11 +741,25 @@ impl App {
             }
         }
 
+        // Calculate gravity multiplier from percentage
+        let gravity_multiplier = self.gravity_percent as f64 / 100.0;
+
         // Physics
-        update_physics(&mut self.particles, dt, width, height);
+        update_physics(
+            &mut self.particles,
+            dt,
+            width,
+            height,
+            gravity_multiplier,
+            self.wall_elasticity,
+        );
 
         // Collisions
-        let max_energy = handle_collisions(&mut self.particles, &mut self.collision_positions);
+        let max_energy = handle_collisions(
+            &mut self.particles,
+            &mut self.collision_positions,
+            self.particle_elasticity,
+        );
 
         if max_energy > 0.0 {
             play_collision_sound(&self.stream_handle, max_energy);
@@ -642,8 +800,22 @@ impl App {
             }
         }
 
+        // Motion detection - only check when there's no active explosion
+        if self.explosion.is_none() {
+            if has_motion(&self.particles) {
+                self.frames_without_motion = 0;
+            } else {
+                self.frames_without_motion += 1;
+                if self.frames_without_motion >= MOTION_STOPPED_FRAMES {
+                    println!("All motion has stopped");
+                    self.stopped = true;
+                }
+            }
+        }
+
         // Render
         let explosion_ref = self.explosion.as_ref();
+        let stopped = self.stopped;
         render.with_pixels_mut(|pixels| {
             let frame = pixels.frame_mut();
             frame.fill(0);
@@ -653,6 +825,11 @@ impl App {
             }
 
             render_particles(frame, &self.particles, width, height);
+
+            if stopped {
+                render_stopped_message(frame, width, height);
+            }
+
             pixels.render().expect("Failed to render frame");
         });
 
@@ -801,6 +978,9 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut spawn_at_collision = false;
     let mut min_particles_override: Option<usize> = None;
+    let mut gravity_percent: i32 = 100;
+    let mut wall_elasticity: f64 = 1.0;
+    let mut particle_elasticity: f64 = 1.0;
 
     let mut i = 1;
     while i < args.len() {
@@ -827,6 +1007,64 @@ fn main() {
                     }
                 }
             }
+            "--gravity" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --gravity requires an integer argument");
+                    print_usage();
+                    return;
+                }
+                match args[i].parse::<i32>() {
+                    Ok(n) => gravity_percent = n,
+                    Err(_) => {
+                        eprintln!("Error: --gravity requires a valid integer");
+                        print_usage();
+                        return;
+                    }
+                }
+            }
+            "--wall-elasticity" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --wall-elasticity requires a number argument");
+                    print_usage();
+                    return;
+                }
+                match args[i].parse::<f64>() {
+                    Ok(n) if (0.0..=1.5).contains(&n) => wall_elasticity = n,
+                    Ok(_) => {
+                        eprintln!("Error: --wall-elasticity must be between 0.0 and 1.5");
+                        print_usage();
+                        return;
+                    }
+                    Err(_) => {
+                        eprintln!("Error: --wall-elasticity requires a valid number");
+                        print_usage();
+                        return;
+                    }
+                }
+            }
+            "--particle-elasticity" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --particle-elasticity requires a number argument");
+                    print_usage();
+                    return;
+                }
+                match args[i].parse::<f64>() {
+                    Ok(n) if (0.0..=1.5).contains(&n) => particle_elasticity = n,
+                    Ok(_) => {
+                        eprintln!("Error: --particle-elasticity must be between 0.0 and 1.5");
+                        print_usage();
+                        return;
+                    }
+                    Err(_) => {
+                        eprintln!("Error: --particle-elasticity requires a valid number");
+                        print_usage();
+                        return;
+                    }
+                }
+            }
             "--help" | "-h" => {
                 print_usage();
                 return;
@@ -846,9 +1084,25 @@ fn main() {
         println!("Mode: Spawning particles at center");
     }
 
+    if gravity_percent != 100 {
+        println!("Gravity: {}%", gravity_percent);
+    }
+    if wall_elasticity != 1.0 {
+        println!("Wall elasticity: {}", wall_elasticity);
+    }
+    if particle_elasticity != 1.0 {
+        println!("Particle elasticity: {}", particle_elasticity);
+    }
+
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::new(spawn_at_collision, min_particles_override);
+    let mut app = App::new(
+        spawn_at_collision,
+        min_particles_override,
+        gravity_percent,
+        wall_elasticity,
+        particle_elasticity,
+    );
     event_loop.run_app(&mut app).expect("Event loop error");
 }

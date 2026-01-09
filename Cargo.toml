@@ -1,6 +1,6 @@
 [package]
 name = "bouncy"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["James O. Schreckengast"]
 license = "MIT"
@@ -16,3 +16,4 @@ rand = "0.8"
 pollster = "0.4"
 rodio = "0.19"
 ouroboros = "0.18"
+rusttype = "0.9"

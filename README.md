@@ -47,11 +47,14 @@ cargo run --release -- --spawn-at-collision
 
 ### Command Line Options
 
-| Option | Description |
-|--------|-------------|
-| `--spawn-at-collision` | Spawn new particles at collision points instead of screen center |
-| `--min-particles <N>` | Override the starting/minimum particle count (2-100) |
-| `--help`, `-h` | Display help information |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--spawn-at-collision` | Spawn new particles at collision points instead of screen center | Off |
+| `--min-particles <N>` | Override the starting/minimum particle count (2-100) | Screen-based |
+| `--gravity <PERCENT>` | Set gravity as percentage of standard; negative values cause upward gravity | 100 |
+| `--wall-elasticity <VALUE>` | Set wall bounce elasticity (0.0-1.5); 0.0 = sticks, 1.0 = elastic, >1.0 = adds energy | 1.0 |
+| `--particle-elasticity <VALUE>` | Set particle collision elasticity (0.0-1.5); 0.0 = sticks, 1.0 = elastic, >1.0 = adds energy | 1.0 |
+| `--help`, `-h` | Display help information | |
 
 ### Controls
 
@@ -60,6 +63,10 @@ cargo run --release -- --spawn-at-collision
 | `Space` | Exit |
 | `Escape` | Exit |
 | `Q` | Exit |
+
+### Motion Detection
+
+When all particles stop moving (velocity below threshold for ~1 second), a "STOPPED" message is displayed and the simulation halts. This can happen when using low elasticity values where particles eventually lose all energy.
 
 ## How It Works
 
@@ -131,6 +138,10 @@ const PIXELS_PER_PARTICLE: u64 = 375_000;
 // Audio constants
 const PING_MIN_FREQ: f32 = 300.0;
 const PING_MAX_FREQ: f32 = 1500.0;
+
+// Motion detection constants
+const MOTION_VELOCITY_THRESHOLD: f64 = 1.0;  // Minimum velocity to be "moving"
+const MOTION_STOPPED_FRAMES: u32 = 60;       // ~1 second at 60fps
 ```
 
 ## Dependencies
@@ -141,6 +152,7 @@ const PING_MAX_FREQ: f32 = 1500.0;
 - [`rand`](https://crates.io/crates/rand) - Random number generation
 - [`pollster`](https://crates.io/crates/pollster) - Minimal async executor
 - [`ouroboros`](https://crates.io/crates/ouroboros) - Self-referential struct support
+- [`rusttype`](https://crates.io/crates/rusttype) - Font rendering
 
 ## Platform Support
 
@@ -197,3 +209,5 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for gu
 ## Acknowledgments
 
 Built with Rust and its excellent ecosystem of graphics and audio crates.
+
+This software includes Liberation Sans Bold font, licensed under the [SIL Open Font License](https://scripts.sil.org/OFL).
