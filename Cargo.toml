@@ -1,11 +1,11 @@
 [package]
 name = "bouncy"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["James O. Schreckengast"]
 license = "MIT"
 description = "GPU-accelerated particle simulation with elastic collisions, gravity, and explosive chain reactions"
-repository = "https://github.com/yourusername/bouncy"
+repository = "https://github.com/schreck61/bouncy"
 keywords = ["simulation", "particles", "physics", "graphics", "game"]
 categories = ["games", "graphics", "simulation"]
 

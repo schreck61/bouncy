@@ -50,6 +50,7 @@ cargo run --release -- --spawn-at-collision
 | Option | Description |
 |--------|-------------|
 | `--spawn-at-collision` | Spawn new particles at collision points instead of screen center |
+| `--min-particles <N>` | Override the starting/minimum particle count (2-100) |
 | `--help`, `-h` | Display help information |
 
 ### Controls
@@ -102,6 +103,8 @@ With `PIXELS_PER_PARTICLE = 375,000`:
 | 4K (scale 1.0) | 3840×2160 | 8,294,400 | 22 |
 
 This ensures the simulation feels consistent across different display sizes. Retina/HiDPI displays use their logical resolution, not the physical pixel count.
+
+Use `--min-particles <N>` to override this with a fixed count between 2 and 100.
 
 ### Audio Synthesis
 

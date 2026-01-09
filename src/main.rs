@@ -465,11 +465,14 @@ fn print_usage() {
     println!("Usage: bouncy [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  --spawn-at-collision  Spawn new particles at collision points instead of center");
-    println!("  --help                Show this help message");
+    println!(
+        "  --spawn-at-collision      Spawn new particles at collision points instead of center"
+    );
+    println!("  --min-particles <N>       Set starting/minimum particle count (2-100)");
+    println!("  --help                    Show this help message");
     println!();
     println!("Controls:");
-    println!("  Space, Escape, Q      Exit the program");
+    println!("  Space, Escape, Q          Exit the program");
 }
 
 /// Self-referential struct: pixels borrows from window
@@ -487,6 +490,7 @@ struct RenderContext {
 struct App {
     // Configuration
     spawn_at_collision: bool,
+    min_particles_override: Option<usize>,
 
     // Audio (must be stored to keep stream alive)
     _audio_stream: OutputStream,
@@ -516,12 +520,13 @@ struct App {
 
 impl App {
     /// Create a new App with the given configuration.
-    fn new(spawn_at_collision: bool) -> Self {
+    fn new(spawn_at_collision: bool, min_particles_override: Option<usize>) -> Self {
         let (audio_stream, stream_handle) =
             OutputStream::try_default().expect("Failed to create audio output stream");
 
         App {
             spawn_at_collision,
+            min_particles_override,
             _audio_stream: audio_stream,
             stream_handle,
             render: None,
@@ -695,9 +700,16 @@ impl ApplicationHandler for App {
             physical_size.width, physical_size.height, width, height, scale_factor
         );
 
-        self.base_particle_count = calculate_particle_count(width, height);
+        self.base_particle_count = self
+            .min_particles_override
+            .unwrap_or_else(|| calculate_particle_count(width, height));
         println!(
-            "Base particle count for this screen: {}",
+            "Base particle count{}: {}",
+            if self.min_particles_override.is_some() {
+                " (override)"
+            } else {
+                " for this screen"
+            },
             self.base_particle_count
         );
 
@@ -788,10 +800,33 @@ fn main() {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
     let mut spawn_at_collision = false;
+    let mut min_particles_override: Option<usize> = None;
 
-    for arg in &args[1..] {
-        match arg.as_str() {
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
             "--spawn-at-collision" => spawn_at_collision = true,
+            "--min-particles" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --min-particles requires a number argument");
+                    print_usage();
+                    return;
+                }
+                match args[i].parse::<usize>() {
+                    Ok(n) if (2..=100).contains(&n) => min_particles_override = Some(n),
+                    Ok(_) => {
+                        eprintln!("Error: --min-particles must be between 2 and 100");
+                        print_usage();
+                        return;
+                    }
+                    Err(_) => {
+                        eprintln!("Error: --min-particles requires a valid number");
+                        print_usage();
+                        return;
+                    }
+                }
+            }
             "--help" | "-h" => {
                 print_usage();
                 return;
@@ -802,6 +837,7 @@ fn main() {
                 return;
             }
         }
+        i += 1;
     }
 
     if spawn_at_collision {
@@ -813,6 +849,6 @@ fn main() {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::new(spawn_at_collision);
+    let mut app = App::new(spawn_at_collision, min_particles_override);
     event_loop.run_app(&mut app).expect("Event loop error");
 }
