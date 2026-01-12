@@ -825,10 +825,12 @@ struct GpuRenderContext {
 /// CPU render context using softbuffer (no self-reference needed).
 struct CpuRenderContext {
     window: Rc<Window>,
-    width: u32,
-    height: u32,
+    width: u32,           // Logical width (for simulation/rendering)
+    height: u32,          // Logical height (for simulation/rendering)
+    physical_width: u32,  // Physical width (for softbuffer surface)
+    physical_height: u32, // Physical height (for softbuffer surface)
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
-    buffer: Vec<u8>, // RGBA buffer for rendering functions
+    buffer: Vec<u8>, // RGBA buffer for rendering functions (logical size)
 }
 
 /// Render context abstraction supporting both GPU and CPU backends.
@@ -881,16 +883,31 @@ impl RenderContext {
             }
             RenderContext::Cpu(ctx) => {
                 let mut sb_buffer = ctx.surface.buffer_mut().map_err(|e| e.to_string())?;
-                // Convert RGBA to softbuffer's 0x00RRGGBB format
-                for (i, pixel) in sb_buffer.iter_mut().enumerate() {
-                    let idx = i * 4;
-                    if idx + 2 < ctx.buffer.len() {
-                        let r = u32::from(ctx.buffer[idx]);
-                        let g = u32::from(ctx.buffer[idx + 1]);
-                        let b = u32::from(ctx.buffer[idx + 2]);
-                        *pixel = (r << 16) | (g << 8) | b;
+
+                // Scale from logical to physical dimensions using nearest-neighbor
+                let logical_width = ctx.width as usize;
+                let logical_height = ctx.height as usize;
+                let physical_width = ctx.physical_width as usize;
+                let physical_height = ctx.physical_height as usize;
+
+                for py in 0..physical_height {
+                    for px in 0..physical_width {
+                        // Map physical pixel to logical pixel (nearest-neighbor)
+                        let lx = px * logical_width / physical_width;
+                        let ly = py * logical_height / physical_height;
+
+                        let src_idx = (ly * logical_width + lx) * 4;
+                        let dst_idx = py * physical_width + px;
+
+                        if src_idx + 2 < ctx.buffer.len() {
+                            let r = u32::from(ctx.buffer[src_idx]);
+                            let g = u32::from(ctx.buffer[src_idx + 1]);
+                            let b = u32::from(ctx.buffer[src_idx + 2]);
+                            sb_buffer[dst_idx] = (r << 16) | (g << 8) | b;
+                        }
                     }
                 }
+
                 sb_buffer.present().map_err(|e| e.to_string())?;
                 Ok(())
             }
@@ -1220,37 +1237,59 @@ fn try_create_gpu_context(
 }
 
 /// Create a CPU render context using softbuffer as fallback.
-fn create_cpu_context(window: Rc<Window>, width: u32, height: u32) -> CpuRenderContext {
+/// `width` and `height` are logical dimensions for the simulation.
+/// `physical_width` and `physical_height` are the actual surface dimensions.
+fn create_cpu_context(
+    window: Rc<Window>,
+    width: u32,
+    height: u32,
+    physical_width: u32,
+    physical_height: u32,
+) -> CpuRenderContext {
     let context =
         softbuffer::Context::new(Rc::clone(&window)).expect("Failed to create softbuffer context");
     let mut surface = softbuffer::Surface::new(&context, Rc::clone(&window))
         .expect("Failed to create softbuffer surface");
+    // Resize to physical dimensions - softbuffer works with actual pixels
     surface
         .resize(
-            NonZeroU32::new(width).expect("Width must be > 0"),
-            NonZeroU32::new(height).expect("Height must be > 0"),
+            NonZeroU32::new(physical_width).expect("Width must be > 0"),
+            NonZeroU32::new(physical_height).expect("Height must be > 0"),
         )
         .expect("Failed to resize softbuffer surface");
+    // Render buffer uses logical dimensions
     let buffer = vec![0u8; (width as usize) * (height as usize) * 4];
     CpuRenderContext {
         window,
         width,
         height,
+        physical_width,
+        physical_height,
         surface,
         buffer,
     }
 }
 
-/// Create render context, trying GPU first with CPU fallback (unless force_cpu is set).
+/// Create render context, trying GPU first with CPU fallback (unless `force_cpu` is set).
+/// `width` and `height` are logical dimensions.
+/// `physical_width` and `physical_height` are the actual surface dimensions.
 fn create_render_context(
     window: &Rc<Window>,
     width: u32,
     height: u32,
+    physical_width: u32,
+    physical_height: u32,
     force_cpu: bool,
 ) -> RenderContext {
     if force_cpu {
         println!("Rendering: CPU (softbuffer) [forced]");
-        let cpu_ctx = create_cpu_context(Rc::clone(window), width, height);
+        let cpu_ctx = create_cpu_context(
+            Rc::clone(window),
+            width,
+            height,
+            physical_width,
+            physical_height,
+        );
         window.request_redraw();
         return RenderContext::Cpu(cpu_ctx);
     }
@@ -1263,7 +1302,13 @@ fn create_render_context(
         }
         Err(_gpu_error) => {
             println!("GPU unavailable, using CPU rendering");
-            let cpu_ctx = create_cpu_context(Rc::clone(window), width, height);
+            let cpu_ctx = create_cpu_context(
+                Rc::clone(window),
+                width,
+                height,
+                physical_width,
+                physical_height,
+            );
             println!("Rendering: CPU (softbuffer)");
             window.request_redraw();
             RenderContext::Cpu(cpu_ctx)
@@ -1327,6 +1372,8 @@ impl ApplicationHandler for App {
             &window,
             width,
             height,
+            physical_size.width,
+            physical_size.height,
             self.force_cpu,
         ));
     }
