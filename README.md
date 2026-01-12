@@ -4,12 +4,12 @@ A GPU-accelerated particle simulation written in Rust featuring elastic collisio
 
 ## Features
 
-- **GPU-Accelerated Rendering**: Uses the `pixels` crate with wgpu backend for smooth, hardware-accelerated 2D rendering
+- **GPU-Accelerated Rendering**: Uses the `pixels` crate with wgpu backend for smooth, hardware-accelerated 2D rendering, with automatic CPU fallback via `softbuffer` when GPU is unavailable
 - **Realistic Physics**: Elastic particle-particle collisions and wall bounces with configurable gravity
 - **Dynamic Spawning**: New particles spawn on collision, creating organic growth patterns
 - **Explosion Mechanics**: When spawn rate exceeds threshold, a dramatic explosion kills 99% of particles
 - **Synthesized Audio**: Real-time audio synthesis for collision pings (pitch based on impact energy) and explosion rumbles
-- **Fullscreen Display**: Runs in borderless fullscreen mode
+- **Flexible Display Modes**: Runs in borderless fullscreen by default, or use `--width` and `--height` for fixed-size windowed mode
 - **Adaptive Particle Count**: Initial particle count scales based on screen resolution
 
 ## Demo
@@ -54,6 +54,9 @@ cargo run --release -- --spawn-at-collision
 | `--gravity <PERCENT>` | Set gravity as percentage of standard; negative values cause upward gravity | 100 |
 | `--wall-elasticity <VALUE>` | Set wall bounce elasticity (0.0-1.5); 0.0 = sticks, 1.0 = elastic, >1.0 = adds energy | 1.0 |
 | `--particle-elasticity <VALUE>` | Set particle collision elasticity (0.0-1.5); 0.0 = sticks, 1.0 = elastic, >1.0 = adds energy | 1.0 |
+| `--width <N>` | Set window width in pixels (100-7680); must be used with `--height` | Fullscreen |
+| `--height <N>` | Set window height in pixels (100-4320); must be used with `--width` | Fullscreen |
+| `--cpu` | Force CPU rendering (softbuffer) instead of GPU | Off |
 | `--help`, `-h` | Display help information | |
 
 ### Controls
@@ -146,12 +149,13 @@ const MOTION_STOPPED_FRAMES: u32 = 60;       // ~1 second at 60fps
 
 ## Dependencies
 
-- [`pixels`](https://crates.io/crates/pixels) - Hardware-accelerated pixel buffer
+- [`pixels`](https://crates.io/crates/pixels) - Hardware-accelerated pixel buffer (GPU rendering)
+- [`softbuffer`](https://crates.io/crates/softbuffer) - Software pixel buffer (CPU fallback)
 - [`winit`](https://crates.io/crates/winit) - Cross-platform window management
 - [`rodio`](https://crates.io/crates/rodio) - Audio playback
 - [`rand`](https://crates.io/crates/rand) - Random number generation
 - [`pollster`](https://crates.io/crates/pollster) - Minimal async executor
-- [`ouroboros`](https://crates.io/crates/ouroboros) - Self-referential struct support
+- [`ouroboros`](https://crates.io/crates/ouroboros) - Safe self-referential struct support
 - [`rusttype`](https://crates.io/crates/rusttype) - Font rendering
 
 ## Platform Support
@@ -168,7 +172,9 @@ Should work on:
 The application uses the modern `winit` 0.30 `ApplicationHandler` pattern:
 
 - `App` struct holds all simulation state
-- `RenderContext` uses `ouroboros` for safe self-referential lifetime management (Pixels borrows from Window)
+- `RenderContext` enum abstracts rendering, supporting GPU (pixels/wgpu) or CPU (softbuffer) backends
+- GPU backend uses `ouroboros` for safe self-referential struct (Pixels borrows from Window)
+- Automatic GPU-to-CPU fallback when GPU is unavailable; use `--cpu` to force CPU rendering
 - Physics and rendering run in the main event loop, synchronized to VSync
 
 ## Performance

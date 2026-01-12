@@ -26,14 +26,27 @@ use rodio::{OutputStream, OutputStreamHandle, Source};
 use rusttype::{Font, Scale};
 use std::collections::VecDeque;
 use std::env;
+use std::num::NonZeroU32;
+use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::Instant;
 use winit::{
     application::ApplicationHandler,
+    dpi::LogicalSize,
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Fullscreen, Window, WindowId},
 };
+
+/// Embedded font data (Liberation Sans Bold - SIL Open Font License).
+const FONT_DATA: &[u8] = include_bytes!("../assets/LiberationSans-Bold.ttf");
+
+/// Lazily-initialized cached font to avoid loading on every render.
+fn get_font() -> &'static Font<'static> {
+    static FONT: OnceLock<Font<'static>> = OnceLock::new();
+    FONT.get_or_init(|| Font::try_from_bytes(FONT_DATA).expect("Failed to load embedded font"))
+}
 
 // Physics constants
 const GRAVITY: f64 = 100.0;
@@ -66,6 +79,61 @@ const PARTICLE_MARGIN: f64 = 10.0;
 const MOTION_VELOCITY_THRESHOLD: f64 = 1.0; // Minimum velocity to be considered "moving"
 const MOTION_STOPPED_FRAMES: u32 = 60; // Frames of no motion before declaring stopped
 
+// Float comparison constants
+const DISTANCE_SQ_EPSILON: f64 = 1e-10; // Minimum distance squared for collision normal
+
+// =============================================================================
+// Type conversion helpers for graphics code
+// =============================================================================
+// These functions document the intent of narrowing conversions that are
+// inherent to graphics programming (float coords -> integer pixels, etc.)
+
+/// Convert f64 coordinate to signed pixel position (truncates toward zero).
+/// Used for particle rendering where we need signed coords for offset math.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+fn coord_to_pixel(v: f64) -> i32 {
+    v as i32
+}
+
+/// Convert f64 to unsigned dimension, clamping negative values to 0.
+/// Used for pixel buffer indexing where negative values are invalid.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn coord_to_pixel_unsigned(v: f64) -> u32 {
+    v.max(0.0) as u32
+}
+
+/// Convert f64 color component (0.0-255.0) to u8.
+/// Values are clamped to valid range.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn color_component(v: f64) -> u8 {
+    v.clamp(0.0, 255.0) as u8
+}
+
+/// Convert f32 color component (0.0-255.0) to u8.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn color_component_f32(v: f32) -> u8 {
+    v.clamp(0.0, 255.0) as u8
+}
+
+/// Convert HSV hue sector (0-5) for color calculation.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn hue_sector(hue: f64) -> u32 {
+    (hue / 60.0) as u32
+}
+
+/// Convert physical pixels to logical pixels given a scale factor.
+/// Used for display size calculations where we need logical dimensions.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn physical_to_logical(physical: u32, scale_factor: f64) -> u32 {
+    (f64::from(physical) / scale_factor) as u32
+}
+
 /// Result of a collision between two particles.
 struct CollisionResult {
     /// Energy of the collision (relative velocity along collision normal).
@@ -78,9 +146,10 @@ struct CollisionResult {
 
 /// Calculate the initial/minimum particle count based on screen size.
 fn calculate_particle_count(width: u32, height: u32) -> usize {
-    let total_pixels = width as u64 * height as u64;
+    let total_pixels = u64::from(width) * u64::from(height);
     let count = (total_pixels + PIXELS_PER_PARTICLE / 2) / PIXELS_PER_PARTICLE;
-    count.max(2) as usize
+    // Safe: count is always small (screen pixels / 375000)
+    usize::try_from(count.max(2)).unwrap_or(2)
 }
 
 /// A particle in the simulation with position, velocity, and color.
@@ -93,7 +162,7 @@ struct Particle {
 }
 
 impl Particle {
-    /// Generate a random velocity vector with speed between 50-100% of INITIAL_VELOCITY.
+    /// Generate a random velocity vector with speed between 50-100% of `INITIAL_VELOCITY`.
     fn random_velocity() -> (f64, f64) {
         let mut rng = rand::thread_rng();
         let angle: f64 = rng.gen_range(0.0..std::f64::consts::TAU);
@@ -106,8 +175,8 @@ impl Particle {
         let mut rng = rand::thread_rng();
         let (vx, vy) = Self::random_velocity();
         Particle {
-            x: rng.gen_range(PARTICLE_MARGIN..(width as f64 - PARTICLE_MARGIN)),
-            y: rng.gen_range(PARTICLE_MARGIN..(height as f64 - PARTICLE_MARGIN)),
+            x: rng.gen_range(PARTICLE_MARGIN..(f64::from(width) - PARTICLE_MARGIN)),
+            y: rng.gen_range(PARTICLE_MARGIN..(f64::from(height) - PARTICLE_MARGIN)),
             vx,
             vy,
             color: random_bright_color(),
@@ -116,7 +185,7 @@ impl Particle {
 
     /// Create a particle at the center of the screen.
     fn new_at_center(width: u32, height: u32) -> Self {
-        Self::new_at_position(width as f64 / 2.0, height as f64 / 2.0)
+        Self::new_at_position(f64::from(width) / 2.0, f64::from(height) / 2.0)
     }
 
     /// Create a particle at a specific position.
@@ -132,8 +201,8 @@ impl Particle {
     }
 
     /// Update particle position with gravity and wall bouncing.
-    /// gravity_multiplier: 1.0 = 100% gravity, negative = upward gravity
-    /// wall_elasticity: 1.0 = fully elastic, 0.0 = completely inelastic (sticks)
+    /// `gravity_multiplier`: 1.0 = 100% gravity, negative = upward gravity
+    /// `wall_elasticity`: 1.0 = fully elastic, 0.0 = completely inelastic (sticks)
     fn update(
         &mut self,
         dt: f64,
@@ -146,19 +215,22 @@ impl Particle {
         self.x += self.vx * dt;
         self.y += self.vy * dt;
 
+        let width_f = f64::from(width);
+        let height_f = f64::from(height);
+
         if self.x <= PARTICLE_RADIUS {
             self.x = PARTICLE_RADIUS;
             self.vx = -self.vx * wall_elasticity;
-        } else if self.x >= width as f64 - PARTICLE_RADIUS {
-            self.x = width as f64 - PARTICLE_RADIUS;
+        } else if self.x >= width_f - PARTICLE_RADIUS {
+            self.x = width_f - PARTICLE_RADIUS;
             self.vx = -self.vx * wall_elasticity;
         }
 
         if self.y <= PARTICLE_RADIUS {
             self.y = PARTICLE_RADIUS;
             self.vy = -self.vy * wall_elasticity;
-        } else if self.y >= height as f64 - PARTICLE_RADIUS {
-            self.y = height as f64 - PARTICLE_RADIUS;
+        } else if self.y >= height_f - PARTICLE_RADIUS {
+            self.y = height_f - PARTICLE_RADIUS;
             self.vy = -self.vy * wall_elasticity;
         }
     }
@@ -188,6 +260,13 @@ impl Explosion {
     /// Create a new explosion that will kill a percentage of particles.
     fn new(x: f64, y: f64, max_radius: f64, particle_count: usize, min_survivors: usize) -> Self {
         let mut rng = rand::thread_rng();
+        // Calculate kill count: truncation is intentional (we want floor, not round)
+        // Precision loss acceptable: particle_count is small relative to f64 mantissa
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
         let kill_count = ((particle_count as f64 * EXPLOSION_KILL_RATIO) as usize)
             .min(particle_count.saturating_sub(min_survivors));
 
@@ -267,34 +346,34 @@ impl Explosion {
 /// Generate a random bright color using HSV color space.
 fn random_bright_color() -> [u8; 4] {
     let mut rng = rand::thread_rng();
-    let h: f64 = rng.gen_range(0.0..360.0);
-    let s: f64 = 0.4;
-    let v: f64 = 1.0;
+    let hue: f64 = rng.gen_range(0.0..360.0);
+    let saturation: f64 = 0.4;
+    let value: f64 = 1.0;
 
-    let c = v * s;
-    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
-    let m = v - c;
+    let chroma = value * saturation;
+    let secondary = chroma * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let match_value = value - chroma;
 
-    let (r, g, b) = match (h / 60.0) as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
+    let (red, green, blue) = match hue_sector(hue) {
+        0 => (chroma, secondary, 0.0),
+        1 => (secondary, chroma, 0.0),
+        2 => (0.0, chroma, secondary),
+        3 => (0.0, secondary, chroma),
+        4 => (secondary, 0.0, chroma),
+        _ => (chroma, 0.0, secondary),
     };
 
     [
-        ((r + m) * 255.0) as u8,
-        ((g + m) * 255.0) as u8,
-        ((b + m) * 255.0) as u8,
+        color_component((red + match_value) * 255.0),
+        color_component((green + match_value) * 255.0),
+        color_component((blue + match_value) * 255.0),
         255,
     ]
 }
 
 /// Attempt elastic collision between two particles.
 /// Returns collision result if particles are touching and approaching.
-/// particle_elasticity: 1.0 = fully elastic, 0.0 = completely inelastic (stick together)
+/// `particle_elasticity`: 1.0 = fully elastic, 0.0 = completely inelastic (stick together)
 fn try_elastic_collision(
     p1: &mut Particle,
     p2: &mut Particle,
@@ -304,12 +383,12 @@ fn try_elastic_collision(
     let dy = p2.y - p1.y;
     let dist_sq = dx * dx + dy * dy;
 
-    if dist_sq > PARTICLE_DIAMETER_SQ || dist_sq == 0.0 {
+    if !(DISTANCE_SQ_EPSILON..=PARTICLE_DIAMETER_SQ).contains(&dist_sq) {
         return None;
     }
 
-    let mid_x = (p1.x + p2.x) / 2.0;
-    let mid_y = (p1.y + p2.y) / 2.0;
+    let mid_x = p1.x.midpoint(p2.x);
+    let mid_y = p1.y.midpoint(p2.y);
 
     let dist = dist_sq.sqrt();
     let nx = dx / dist;
@@ -350,11 +429,16 @@ fn try_elastic_collision(
 
 /// Generate a ping sound with exponential decay at the given frequency.
 fn generate_ping(frequency: f32) -> impl Source<Item = f32> + Send {
-    let duration_samples = (AUDIO_SAMPLE_RATE as u64 * PING_DURATION_MS / 1000) as usize;
+    let duration_samples = (u64::from(AUDIO_SAMPLE_RATE) * PING_DURATION_MS / 1000) as usize;
+    // u32 sample rate fits in f32 mantissa (44100 << 2^23)
+    #[allow(clippy::cast_precision_loss)]
+    let sample_rate_f = AUDIO_SAMPLE_RATE as f32;
 
     let samples: Vec<f32> = (0..duration_samples)
         .map(|i| {
-            let t = i as f32 / AUDIO_SAMPLE_RATE as f32;
+            // Precision loss from usize->f32 is acceptable for audio timing
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f32 / sample_rate_f;
             let envelope = (-t * 20.0).exp();
             let wave = (2.0 * std::f32::consts::PI * frequency * t).sin();
             wave * envelope * 0.3
@@ -366,12 +450,17 @@ fn generate_ping(frequency: f32) -> impl Source<Item = f32> + Send {
 
 /// Generate a low-frequency rumble sound for explosions.
 fn generate_explosion() -> impl Source<Item = f32> + Send {
-    let duration_samples = (AUDIO_SAMPLE_RATE as u64 * EXPLOSION_DURATION_MS / 1000) as usize;
+    let duration_samples = (u64::from(AUDIO_SAMPLE_RATE) * EXPLOSION_DURATION_MS / 1000) as usize;
+    // u32 sample rate fits in f32 mantissa (44100 << 2^23)
+    #[allow(clippy::cast_precision_loss)]
+    let sample_rate_f = AUDIO_SAMPLE_RATE as f32;
     let mut rng = rand::thread_rng();
 
     let samples: Vec<f32> = (0..duration_samples)
         .map(|i| {
-            let t = i as f32 / AUDIO_SAMPLE_RATE as f32;
+            // Precision loss from usize->f32 is acceptable for audio timing
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f32 / sample_rate_f;
             let envelope = if t < 0.05 {
                 t / 0.05
             } else {
@@ -393,6 +482,8 @@ fn generate_explosion() -> impl Source<Item = f32> + Send {
 
 /// Play a collision sound with pitch based on collision energy.
 fn play_collision_sound(stream_handle: &OutputStreamHandle, energy: f64) {
+    // f64->f32 truncation is acceptable for audio frequency calculation
+    #[allow(clippy::cast_possible_truncation)]
     let energy_normalized = (energy / COLLISION_ENERGY_NORMALIZER).clamp(0.0, 1.0) as f32;
     let frequency = PING_MIN_FREQ + energy_normalized * (PING_MAX_FREQ - PING_MIN_FREQ);
     let _ = stream_handle.play_raw(generate_ping(frequency).convert_samples());
@@ -406,14 +497,16 @@ fn play_explosion_sound(stream_handle: &OutputStreamHandle) {
 /// Render all particles as 3x3 pixel squares.
 fn render_particles(frame: &mut [u8], particles: &[Particle], width: u32, height: u32) {
     for particle in particles {
-        let cx = particle.x as i32;
-        let cy = particle.y as i32;
+        let cx = coord_to_pixel(particle.x);
+        let cy = coord_to_pixel(particle.y);
 
         for dy in -1..=1 {
             for dx in -1..=1 {
                 let px = cx + dx;
                 let py = cy + dy;
 
+                // Bounds check: px/py are valid pixel coordinates after this check
+                #[allow(clippy::cast_sign_loss)]
                 if px >= 0 && (px as u32) < width && py >= 0 && (py as u32) < height {
                     let idx = ((py as u32) * width + (px as u32)) as usize * 4;
                     frame[idx..idx + 4].copy_from_slice(&particle.color);
@@ -428,24 +521,25 @@ fn render_explosion(frame: &mut [u8], exp: &Explosion, width: u32, height: u32) 
     let inner_radius = (exp.radius - EXPLOSION_RING_WIDTH).max(0.0);
     let outer_radius = exp.radius;
 
-    let min_x = (exp.x - outer_radius).max(0.0) as u32;
-    let max_x = ((exp.x + outer_radius).ceil() as u32).min(width);
-    let min_y = (exp.y - outer_radius).max(0.0) as u32;
-    let max_y = ((exp.y + outer_radius).ceil() as u32).min(height);
+    // Calculate bounding box for the ring (clamped to screen bounds)
+    let min_x = coord_to_pixel_unsigned(exp.x - outer_radius);
+    let max_x = coord_to_pixel_unsigned((exp.x + outer_radius).ceil()).min(width);
+    let min_y = coord_to_pixel_unsigned(exp.y - outer_radius);
+    let max_y = coord_to_pixel_unsigned((exp.y + outer_radius).ceil()).min(height);
 
     for y in min_y..max_y {
         for x in min_x..max_x {
-            let dx = x as f64 - exp.x;
-            let dy = y as f64 - exp.y;
+            let dx = f64::from(x) - exp.x;
+            let dy = f64::from(y) - exp.y;
             let dist = (dx * dx + dy * dy).sqrt();
 
             if dist >= inner_radius && dist <= outer_radius {
                 let intensity = 1.0 - ((dist - inner_radius) / EXPLOSION_RING_WIDTH).abs();
-                let brightness = (intensity * 255.0) as u8;
-                let idx = (y * width + x) as usize * 4;
+                let brightness = color_component(intensity * 255.0);
+                let idx = usize::try_from(y * width + x).unwrap_or(0) * 4;
                 frame[idx] = brightness;
-                frame[idx + 1] = (brightness as f32 * 0.6) as u8;
-                frame[idx + 2] = (brightness as f32 * 0.2) as u8;
+                frame[idx + 1] = color_component_f32(f32::from(brightness) * 0.6);
+                frame[idx + 2] = color_component_f32(f32::from(brightness) * 0.2);
                 frame[idx + 3] = 255;
             }
         }
@@ -454,22 +548,16 @@ fn render_explosion(frame: &mut [u8], exp: &Explosion, width: u32, height: u32) 
 
 /// Check if any particles have significant motion.
 fn has_motion(particles: &[Particle]) -> bool {
-    for particle in particles {
-        let speed_sq = particle.vx * particle.vx + particle.vy * particle.vy;
-        if speed_sq > MOTION_VELOCITY_THRESHOLD * MOTION_VELOCITY_THRESHOLD {
-            return true;
-        }
-    }
-    false
+    const THRESHOLD_SQ: f64 = MOTION_VELOCITY_THRESHOLD * MOTION_VELOCITY_THRESHOLD;
+    particles
+        .iter()
+        .any(|p| p.vx * p.vx + p.vy * p.vy > THRESHOLD_SQ)
 }
 
-/// Render centered text on the frame using an embedded font.
+/// Render centered text on the frame using the cached embedded font.
+#[allow(clippy::cast_precision_loss)] // width/height fit in f32 mantissa for reasonable screens
 fn render_text(frame: &mut [u8], width: u32, height: u32, text: &str, font_size: f32) {
-    // Embedded font: Liberation Sans (SIL Open Font License, compatible with MIT)
-    // This is a metrically-compatible Helvetica/Arial alternative
-    const FONT_DATA: &[u8] = include_bytes!("../assets/LiberationSans-Bold.ttf");
-    let font = Font::try_from_bytes(FONT_DATA).expect("Failed to load embedded font");
-
+    let font = get_font();
     let scale = Scale::uniform(font_size);
     let v_metrics = font.v_metrics(scale);
     let glyphs: Vec<_> = font
@@ -477,15 +565,16 @@ fn render_text(frame: &mut [u8], width: u32, height: u32, text: &str, font_size:
         .collect();
 
     // Calculate text dimensions
-    let text_width = glyphs
-        .last()
-        .map(|g| g.position().x + g.unpositioned().h_metrics().advance_width)
-        .unwrap_or(0.0);
+    let text_width = glyphs.last().map_or(0.0, |g| {
+        g.position().x + g.unpositioned().h_metrics().advance_width
+    });
     let text_height = v_metrics.ascent - v_metrics.descent;
 
     // Center the text
-    let start_x = ((width as f32 - text_width) / 2.0).max(0.0);
-    let start_y = ((height as f32 - text_height) / 2.0 + v_metrics.ascent).max(0.0);
+    let width_f = width as f32;
+    let height_f = height as f32;
+    let start_x = ((width_f - text_width) / 2.0).max(0.0);
+    let start_y = ((height_f - text_height) / 2.0 + v_metrics.ascent).max(0.0);
 
     // Re-layout with correct position
     let glyphs: Vec<_> = font
@@ -496,16 +585,30 @@ fn render_text(frame: &mut [u8], width: u32, height: u32, text: &str, font_size:
     let color = [255u8, 100, 100, 255]; // Light red
     for glyph in glyphs {
         if let Some(bounding_box) = glyph.pixel_bounding_box() {
-            glyph.draw(|x, y, v| {
-                let px = (bounding_box.min.x + x as i32) as u32;
-                let py = (bounding_box.min.y + y as i32) as u32;
-                if px < width && py < height && v > 0.1 {
-                    let idx = (py * width + px) as usize * 4;
-                    // Blend with coverage
-                    let alpha = (v * 255.0) as u8;
-                    frame[idx] = ((color[0] as u16 * alpha as u16) / 255) as u8;
-                    frame[idx + 1] = ((color[1] as u16 * alpha as u16) / 255) as u8;
-                    frame[idx + 2] = ((color[2] as u16 * alpha as u16) / 255) as u8;
+            glyph.draw(|glyph_x, glyph_y, coverage| {
+                // Font library provides u32 glyph coords, bounding box has i32 positions
+                #[allow(clippy::cast_possible_wrap)]
+                let px = bounding_box.min.x + glyph_x as i32;
+                #[allow(clippy::cast_possible_wrap)]
+                let py = bounding_box.min.y + glyph_y as i32;
+
+                // Only render if within bounds and coverage is significant
+                #[allow(clippy::cast_sign_loss)]
+                if px >= 0
+                    && (px as u32) < width
+                    && py >= 0
+                    && (py as u32) < height
+                    && coverage > 0.1
+                {
+                    let idx = (py as u32 * width + px as u32) as usize * 4;
+                    let alpha = color_component_f32(coverage * 255.0);
+                    // Blend color with coverage alpha (result always fits in u8: max = 255*255/255 = 255)
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        frame[idx] = (u16::from(color[0]) * u16::from(alpha) / 255) as u8;
+                        frame[idx + 1] = (u16::from(color[1]) * u16::from(alpha) / 255) as u8;
+                        frame[idx + 2] = (u16::from(color[2]) * u16::from(alpha) / 255) as u8;
+                    }
                     frame[idx + 3] = alpha;
                 }
             });
@@ -533,7 +636,7 @@ fn update_physics(
 }
 
 /// Process all particle-particle collisions.
-/// Returns the maximum collision energy and populates collision_positions.
+/// Returns the maximum collision energy and populates `collision_positions`.
 fn handle_collisions(
     particles: &mut [Particle],
     collision_positions: &mut Vec<(f64, f64)>,
@@ -560,42 +663,248 @@ fn handle_collisions(
 }
 
 fn print_usage() {
-    println!("Usage: bouncy [OPTIONS]");
-    println!();
-    println!("Options:");
     println!(
-        "  --spawn-at-collision        Spawn new particles at collision points instead of center"
+        r"Usage: bouncy [OPTIONS]
+
+Options:
+  --spawn-at-collision        Spawn new particles at collision points instead of center
+  --min-particles <N>         Set starting/minimum particle count (2-100)
+  --gravity <PERCENT>         Set gravity as percentage of standard (default: 100)
+                              Negative values cause upward gravity
+  --wall-elasticity <VALUE>   Set wall bounce elasticity 0.0-1.5 (default: 1.0)
+                              0.0 = no bounce (sticks), 1.0 = fully elastic,
+                              >1.0 = walls add energy to particles
+  --particle-elasticity <VALUE>
+                              Set particle collision elasticity 0.0-1.5 (default: 1.0)
+                              0.0 = no bounce, 1.0 = fully elastic,
+                              >1.0 = collisions add energy to particles
+  --width <N>                 Set window width in pixels (100-7680)
+  --height <N>                Set window height in pixels (100-4320)
+                              Both --width and --height must be specified together.
+                              Omit both for fullscreen mode (default).
+  --cpu                       Force CPU rendering (softbuffer) instead of GPU
+  --help, -h                  Show this help message
+
+Controls:
+  Space, Escape, Q            Exit the program
+
+Motion Detection:
+  When all particles stop moving, a STOPPED message is displayed.
+
+Rendering:
+  Uses GPU rendering (wgpu) by default. Falls back to CPU rendering
+  (softbuffer) if GPU is unavailable. Use --cpu to force CPU rendering."
     );
-    println!("  --min-particles <N>         Set starting/minimum particle count (2-100)");
-    println!("  --gravity <PERCENT>         Set gravity as percentage of standard (default: 100)");
-    println!("                              Negative values cause upward gravity");
-    println!("  --wall-elasticity <VALUE>   Set wall bounce elasticity 0.0-1.5 (default: 1.0)");
-    println!("                              0.0 = no bounce (sticks), 1.0 = fully elastic,");
-    println!("                              >1.0 = walls add energy to particles");
-    println!("  --particle-elasticity <VALUE>");
-    println!(
-        "                              Set particle collision elasticity 0.0-1.5 (default: 1.0)"
-    );
-    println!("                              0.0 = no bounce, 1.0 = fully elastic,");
-    println!("                              >1.0 = collisions add energy to particles");
-    println!("  --help, -h                  Show this help message");
-    println!();
-    println!("Controls:");
-    println!("  Space, Escape, Q            Exit the program");
-    println!();
-    println!("Motion Detection:");
-    println!("  When all particles stop moving, a STOPPED message is displayed.");
 }
 
-/// Self-referential struct: pixels borrows from window
+/// Configuration parsed from command line arguments.
+#[derive(Clone, Copy, Default)]
+struct Config {
+    spawn_at_collision: bool,
+    min_particles: Option<usize>,
+    gravity_percent: i32,
+    wall_elasticity: f64,
+    particle_elasticity: f64,
+    width: Option<u32>,
+    height: Option<u32>,
+    force_cpu: bool,
+}
+
+impl Config {
+    fn new() -> Self {
+        Self {
+            gravity_percent: 100,
+            wall_elasticity: 1.0,
+            particle_elasticity: 1.0,
+            ..Default::default()
+        }
+    }
+}
+
+/// Parse a required argument value, returning None with error message if missing or invalid.
+fn parse_arg<T: std::str::FromStr>(args: &[String], i: &mut usize, opt_name: &str) -> Option<T> {
+    *i += 1;
+    if *i >= args.len() {
+        eprintln!("Error: {opt_name} requires an argument");
+        return None;
+    }
+    args[*i].parse().ok().or_else(|| {
+        eprintln!("Error: {opt_name} requires a valid value");
+        None
+    })
+}
+
+/// Parse a required argument with range validation.
+fn parse_arg_range<T>(args: &[String], i: &mut usize, opt_name: &str, min: T, max: T) -> Option<T>
+where
+    T: std::str::FromStr + PartialOrd + std::fmt::Display + Copy,
+{
+    let value: T = parse_arg(args, i, opt_name)?;
+    if value < min || value > max {
+        eprintln!("Error: {opt_name} must be between {min} and {max}");
+        return None;
+    }
+    Some(value)
+}
+
+/// Parse command line arguments into a Config, or None if invalid/help requested.
+fn parse_args() -> Option<Config> {
+    let args: Vec<String> = env::args().collect();
+    let mut config = Config::new();
+    let mut i = 1;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--spawn-at-collision" => config.spawn_at_collision = true,
+            "--min-particles" => {
+                config.min_particles =
+                    Some(parse_arg_range(&args, &mut i, "--min-particles", 2, 100)?);
+            }
+            "--gravity" => {
+                config.gravity_percent = parse_arg(&args, &mut i, "--gravity")?;
+            }
+            "--wall-elasticity" => {
+                config.wall_elasticity =
+                    parse_arg_range(&args, &mut i, "--wall-elasticity", 0.0, 1.5)?;
+            }
+            "--particle-elasticity" => {
+                config.particle_elasticity =
+                    parse_arg_range(&args, &mut i, "--particle-elasticity", 0.0, 1.5)?;
+            }
+            "--width" => {
+                config.width = Some(parse_arg_range(&args, &mut i, "--width", 100, 7680)?);
+            }
+            "--height" => {
+                config.height = Some(parse_arg_range(&args, &mut i, "--height", 100, 4320)?);
+            }
+            "--cpu" => config.force_cpu = true,
+            "--help" | "-h" => {
+                print_usage();
+                return None;
+            }
+            other => {
+                eprintln!("Unknown option: {other}");
+                print_usage();
+                return None;
+            }
+        }
+        i += 1;
+    }
+
+    // Validate width/height pairing
+    match (config.width, config.height) {
+        (Some(_), None) => {
+            eprintln!("Error: --width requires --height to also be specified");
+            print_usage();
+            return None;
+        }
+        (None, Some(_)) => {
+            eprintln!("Error: --height requires --width to also be specified");
+            print_usage();
+            return None;
+        }
+        _ => {}
+    }
+
+    Some(config)
+}
+
+/// GPU render context using ouroboros for safe self-referential struct.
+/// Pixels borrows from Window, so they must be in the same struct.
+/// Uses Rc<Window> to allow sharing the window with fallback logic.
 #[self_referencing]
-struct RenderContext {
-    window: Box<Window>,
+struct GpuRenderContext {
+    window: Rc<Window>,
     width: u32,
     height: u32,
     #[borrows(window)]
     #[covariant]
     pixels: Pixels<'this>,
+}
+
+/// CPU render context using softbuffer (no self-reference needed).
+struct CpuRenderContext {
+    window: Rc<Window>,
+    width: u32,
+    height: u32,
+    surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
+    buffer: Vec<u8>, // RGBA buffer for rendering functions
+}
+
+/// Render context abstraction supporting both GPU and CPU backends.
+enum RenderContext {
+    Gpu(Box<GpuRenderContext>),
+    Cpu(CpuRenderContext),
+}
+
+impl RenderContext {
+    /// Get the window reference for requesting redraws.
+    fn window(&self) -> &Window {
+        match self {
+            RenderContext::Gpu(ctx) => ctx.borrow_window(),
+            RenderContext::Cpu(ctx) => &ctx.window,
+        }
+    }
+
+    /// Get the logical width.
+    fn width(&self) -> u32 {
+        match self {
+            RenderContext::Gpu(ctx) => *ctx.borrow_width(),
+            RenderContext::Cpu(ctx) => ctx.width,
+        }
+    }
+
+    /// Get the logical height.
+    fn height(&self) -> u32 {
+        match self {
+            RenderContext::Gpu(ctx) => *ctx.borrow_height(),
+            RenderContext::Cpu(ctx) => ctx.height,
+        }
+    }
+
+    /// Get a mutable reference to the RGBA frame buffer and call a function with it.
+    fn with_frame<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        match self {
+            RenderContext::Gpu(ctx) => ctx.with_pixels_mut(|pixels| f(pixels.frame_mut())),
+            RenderContext::Cpu(ctx) => f(ctx.buffer.as_mut_slice()),
+        }
+    }
+
+    /// Present the frame to the screen.
+    fn present(&mut self) -> Result<(), String> {
+        match self {
+            RenderContext::Gpu(ctx) => {
+                ctx.with_pixels_mut(|pixels| pixels.render().map_err(|e| e.to_string()))
+            }
+            RenderContext::Cpu(ctx) => {
+                let mut sb_buffer = ctx.surface.buffer_mut().map_err(|e| e.to_string())?;
+                // Convert RGBA to softbuffer's 0x00RRGGBB format
+                for (i, pixel) in sb_buffer.iter_mut().enumerate() {
+                    let idx = i * 4;
+                    if idx + 2 < ctx.buffer.len() {
+                        let r = u32::from(ctx.buffer[idx]);
+                        let g = u32::from(ctx.buffer[idx + 1]);
+                        let b = u32::from(ctx.buffer[idx + 2]);
+                        *pixel = (r << 16) | (g << 8) | b;
+                    }
+                }
+                sb_buffer.present().map_err(|e| e.to_string())?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Resize the surface (for GPU backend only, when window size changes).
+    fn resize_surface(&mut self, width: u32, height: u32) {
+        if let RenderContext::Gpu(ctx) = self {
+            ctx.with_pixels_mut(|pixels| {
+                let _ = pixels.resize_surface(width, height);
+            });
+        }
+    }
 }
 
 /// Main application state for the particle simulation.
@@ -606,6 +915,9 @@ struct App {
     gravity_percent: i32,
     wall_elasticity: f64,
     particle_elasticity: f64,
+    requested_width: Option<u32>,
+    requested_height: Option<u32>,
+    force_cpu: bool,
 
     // Audio (must be stored to keep stream alive)
     _audio_stream: OutputStream,
@@ -637,24 +949,28 @@ struct App {
     frames_without_motion: u32,
 }
 
+/// Handle keyboard input for exit keys.
+fn handle_key(key_code: KeyCode, event_loop: &ActiveEventLoop) {
+    if matches!(key_code, KeyCode::Space | KeyCode::Escape | KeyCode::KeyQ) {
+        event_loop.exit();
+    }
+}
+
 impl App {
     /// Create a new App with the given configuration.
-    fn new(
-        spawn_at_collision: bool,
-        min_particles_override: Option<usize>,
-        gravity_percent: i32,
-        wall_elasticity: f64,
-        particle_elasticity: f64,
-    ) -> Self {
+    fn new(config: Config) -> Self {
         let (audio_stream, stream_handle) =
             OutputStream::try_default().expect("Failed to create audio output stream");
 
         App {
-            spawn_at_collision,
-            min_particles_override,
-            gravity_percent,
-            wall_elasticity,
-            particle_elasticity,
+            spawn_at_collision: config.spawn_at_collision,
+            min_particles_override: config.min_particles,
+            gravity_percent: config.gravity_percent,
+            wall_elasticity: config.wall_elasticity,
+            particle_elasticity: config.particle_elasticity,
+            requested_width: config.width,
+            requested_height: config.height,
+            force_cpu: config.force_cpu,
             _audio_stream: audio_stream,
             stream_handle,
             render: None,
@@ -675,58 +991,8 @@ impl App {
         }
     }
 
-    fn handle_key(&self, key_code: KeyCode, event_loop: &ActiveEventLoop) {
-        if matches!(key_code, KeyCode::Space | KeyCode::Escape | KeyCode::KeyQ) {
-            event_loop.exit();
-        }
-    }
-
-    fn update_and_render(&mut self) {
-        let Some(ref mut render) = self.render else {
-            return;
-        };
-
-        let width = *render.borrow_width();
-        let height = *render.borrow_height();
-        let now = Instant::now();
-
-        // Warmup frames for GPU initialization
-        if self.warmup_frames > 0 {
-            self.warmup_frames -= 1;
-            self.last_time = now;
-            self.fps_timer = now;
-            self.frame_count = 0;
-
-            render.with_pixels_mut(|pixels| {
-                let frame = pixels.frame_mut();
-                frame.fill(0);
-                render_particles(frame, &self.particles, width, height);
-                pixels
-                    .render()
-                    .expect("Failed to render frame during warmup");
-            });
-            render.borrow_window().request_redraw();
-            return;
-        }
-
-        let dt = now.duration_since(self.last_time).as_secs_f64().min(0.05);
-        self.last_time = now;
-
-        // If simulation has stopped, just render the stopped message
-        if self.stopped {
-            let particles = &self.particles;
-            render.with_pixels_mut(|pixels| {
-                let frame = pixels.frame_mut();
-                frame.fill(0);
-                render_particles(frame, particles, width, height);
-                render_stopped_message(frame, width, height);
-                pixels.render().expect("Failed to render frame");
-            });
-            render.borrow_window().request_redraw();
-            return;
-        }
-
-        // Update explosion
+    /// Update explosion state, processing kills and checking completion.
+    fn update_explosion(&mut self, dt: f64) {
         if let Some(ref mut exp) = self.explosion {
             exp.update(dt);
             exp.process_kills(&mut self.particles);
@@ -740,38 +1006,19 @@ impl App {
                 self.explosion = None;
             }
         }
+    }
 
-        // Calculate gravity multiplier from percentage
-        let gravity_multiplier = self.gravity_percent as f64 / 100.0;
-
-        // Physics
-        update_physics(
-            &mut self.particles,
-            dt,
-            width,
-            height,
-            gravity_multiplier,
-            self.wall_elasticity,
-        );
-
-        // Collisions
-        let max_energy = handle_collisions(
-            &mut self.particles,
-            &mut self.collision_positions,
-            self.particle_elasticity,
-        );
-
-        if max_energy > 0.0 {
-            play_collision_sound(&self.stream_handle, max_energy);
+    /// Handle particle spawning from collisions, potentially triggering explosions.
+    fn handle_spawning(&mut self, now: Instant, width: u32, height: u32) {
+        // Track spawn rate over sliding window
+        let spawn_window = std::time::Duration::from_secs_f64(SPAWN_RATE_WINDOW);
+        if let Some(cutoff) = now.checked_sub(spawn_window) {
+            while self.spawn_times.front().is_some_and(|&t| t < cutoff) {
+                self.spawn_times.pop_front();
+            }
         }
 
-        // Spawn rate tracking
-        let cutoff = now - std::time::Duration::from_secs_f64(SPAWN_RATE_WINDOW);
-        while self.spawn_times.front().is_some_and(|&t| t < cutoff) {
-            self.spawn_times.pop_front();
-        }
-
-        // Spawning
+        // Spawn new particles or trigger explosion
         if !self.collision_positions.is_empty() && self.explosion.is_none() {
             if self.spawn_times.len() >= SPAWN_RATE_THRESHOLD {
                 println!(
@@ -799,8 +1046,10 @@ impl App {
                 }
             }
         }
+    }
 
-        // Motion detection - only check when there's no active explosion
+    /// Check if all particles have stopped moving.
+    fn check_motion(&mut self) {
         if self.explosion.is_none() {
             if has_motion(&self.particles) {
                 self.frames_without_motion = 0;
@@ -812,71 +1061,118 @@ impl App {
                 }
             }
         }
+    }
 
-        // Render
-        let explosion_ref = self.explosion.as_ref();
-        let stopped = self.stopped;
-        render.with_pixels_mut(|pixels| {
-            let frame = pixels.frame_mut();
-            frame.fill(0);
-
-            if let Some(exp) = explosion_ref {
-                render_explosion(frame, exp, width, height);
-            }
-
-            render_particles(frame, &self.particles, width, height);
-
-            if stopped {
-                render_stopped_message(frame, width, height);
-            }
-
-            pixels.render().expect("Failed to render frame");
-        });
-
-        // FPS counter
+    /// Update FPS counter and print statistics.
+    fn update_fps_counter(&mut self) {
         self.frame_count += 1;
         let elapsed = self.fps_timer.elapsed().as_secs_f64();
         if elapsed >= 1.0 {
-            println!(
-                "FPS: {:.1}, Particles: {}",
-                self.frame_count as f64 / elapsed,
-                self.particles.len()
-            );
+            // Precision loss acceptable: frame_count is small relative to f64 mantissa
+            #[allow(clippy::cast_precision_loss)]
+            let fps = self.frame_count as f64 / elapsed;
+            println!("FPS: {fps:.1}, Particles: {}", self.particles.len());
             self.frame_count = 0;
             self.fps_timer = Instant::now();
         }
-
-        render.borrow_window().request_redraw();
     }
-}
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.render.is_some() {
-            return; // Already initialized
+    fn update_and_render(&mut self) {
+        // Get dimensions from render context (if available)
+        let Some((width, height)) = self.render.as_ref().map(|r| (r.width(), r.height())) else {
+            return;
+        };
+        let now = Instant::now();
+
+        // Warmup frames for GPU initialization
+        if self.warmup_frames > 0 {
+            self.warmup_frames -= 1;
+            self.last_time = now;
+            self.fps_timer = now;
+            self.frame_count = 0;
+
+            if let Some(ref mut render) = self.render {
+                let particles = &self.particles;
+                render.with_frame(|frame| {
+                    frame.fill(0);
+                    render_particles(frame, particles, width, height);
+                });
+                render
+                    .present()
+                    .expect("Failed to render frame during warmup");
+                render.window().request_redraw();
+            }
+            return;
         }
 
-        let window = Box::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("Bouncy Particles - Press SPACE to exit")
-                        .with_fullscreen(Some(Fullscreen::Borderless(None))),
-                )
-                .expect("Failed to create window"),
+        let dt = now.duration_since(self.last_time).as_secs_f64().min(0.05);
+        self.last_time = now;
+
+        // If simulation has stopped, just render the stopped message
+        if self.stopped {
+            if let Some(ref mut render) = self.render {
+                let particles = &self.particles;
+                render.with_frame(|frame| {
+                    frame.fill(0);
+                    render_particles(frame, particles, width, height);
+                    render_stopped_message(frame, width, height);
+                });
+                render.present().expect("Failed to render frame");
+                render.window().request_redraw();
+            }
+            return;
+        }
+
+        // Update simulation (no render borrow needed here)
+        self.update_explosion(dt);
+
+        let gravity_multiplier = f64::from(self.gravity_percent) / 100.0;
+        update_physics(
+            &mut self.particles,
+            dt,
+            width,
+            height,
+            gravity_multiplier,
+            self.wall_elasticity,
         );
 
-        let physical_size = window.inner_size();
-        let scale_factor = window.scale_factor();
-
-        let width = (physical_size.width as f64 / scale_factor) as u32;
-        let height = (physical_size.height as f64 / scale_factor) as u32;
-
-        println!(
-            "Window: {}x{} physical, {}x{} logical, scale={}",
-            physical_size.width, physical_size.height, width, height, scale_factor
+        let max_energy = handle_collisions(
+            &mut self.particles,
+            &mut self.collision_positions,
+            self.particle_elasticity,
         );
 
+        if max_energy > 0.0 {
+            play_collision_sound(&self.stream_handle, max_energy);
+        }
+
+        self.handle_spawning(now, width, height);
+        self.check_motion();
+
+        // Render current state (borrow render only for this section)
+        if let Some(ref mut render) = self.render {
+            let explosion_ref = self.explosion.as_ref();
+            let particles = &self.particles;
+            let stopped = self.stopped;
+            render.with_frame(|frame| {
+                frame.fill(0);
+                if let Some(exp) = explosion_ref {
+                    render_explosion(frame, exp, width, height);
+                }
+                render_particles(frame, particles, width, height);
+                if stopped {
+                    render_stopped_message(frame, width, height);
+                }
+            });
+            render.present().expect("Failed to render frame");
+            render.window().request_redraw();
+        }
+
+        self.update_fps_counter();
+    }
+
+    /// Initialize simulation state: particles, geometry, and timers.
+    fn init_simulation_state(&mut self, width: u32, height: u32) {
         self.base_particle_count = self
             .min_particles_override
             .unwrap_or_else(|| calculate_particle_count(width, height));
@@ -894,29 +1190,145 @@ impl ApplicationHandler for App {
             .map(|_| Particle::new_random(width, height))
             .collect();
 
-        self.center_x = width as f64 / 2.0;
-        self.center_y = height as f64 / 2.0;
-        self.max_explosion_radius = ((width * width + height * height) as f64).sqrt();
+        self.center_x = f64::from(width) / 2.0;
+        self.center_y = f64::from(height) / 2.0;
+        self.max_explosion_radius = f64::from(width * width + height * height).sqrt();
 
         self.last_time = Instant::now();
         self.fps_timer = Instant::now();
+    }
+}
 
-        // Use ouroboros builder to create self-referential struct
-        let render = RenderContextBuilder {
-            window,
+/// Create a GPU render context using ouroboros for safe self-referential struct.
+fn try_create_gpu_context(
+    window: &Rc<Window>,
+    width: u32,
+    height: u32,
+) -> Result<GpuRenderContext, pixels::Error> {
+    GpuRenderContextTryBuilder {
+        window: Rc::clone(window),
+        width,
+        height,
+        #[allow(clippy::borrowed_box)]
+        pixels_builder: |win: &Rc<Window>| {
+            let size = win.inner_size();
+            let surface_texture = SurfaceTexture::new(size.width, size.height, win.as_ref());
+            Pixels::new(width, height, surface_texture)
+        },
+    }
+    .try_build()
+}
+
+/// Create a CPU render context using softbuffer as fallback.
+fn create_cpu_context(window: Rc<Window>, width: u32, height: u32) -> CpuRenderContext {
+    let context =
+        softbuffer::Context::new(Rc::clone(&window)).expect("Failed to create softbuffer context");
+    let mut surface = softbuffer::Surface::new(&context, Rc::clone(&window))
+        .expect("Failed to create softbuffer surface");
+    surface
+        .resize(
+            NonZeroU32::new(width).expect("Width must be > 0"),
+            NonZeroU32::new(height).expect("Height must be > 0"),
+        )
+        .expect("Failed to resize softbuffer surface");
+    let buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+    CpuRenderContext {
+        window,
+        width,
+        height,
+        surface,
+        buffer,
+    }
+}
+
+/// Create render context, trying GPU first with CPU fallback (unless force_cpu is set).
+fn create_render_context(
+    window: &Rc<Window>,
+    width: u32,
+    height: u32,
+    force_cpu: bool,
+) -> RenderContext {
+    if force_cpu {
+        println!("Rendering: CPU (softbuffer) [forced]");
+        let cpu_ctx = create_cpu_context(Rc::clone(window), width, height);
+        window.request_redraw();
+        return RenderContext::Cpu(cpu_ctx);
+    }
+
+    match try_create_gpu_context(window, width, height) {
+        Ok(gpu_ctx) => {
+            println!("Rendering: GPU (pixels/wgpu)");
+            gpu_ctx.borrow_window().request_redraw();
+            RenderContext::Gpu(Box::new(gpu_ctx))
+        }
+        Err(_gpu_error) => {
+            println!("GPU unavailable, using CPU rendering");
+            let cpu_ctx = create_cpu_context(Rc::clone(window), width, height);
+            println!("Rendering: CPU (softbuffer)");
+            window.request_redraw();
+            RenderContext::Cpu(cpu_ctx)
+        }
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.render.is_some() {
+            return; // Already initialized
+        }
+
+        // Build window attributes based on requested size or fullscreen
+        let window_attrs = Window::default_attributes()
+            .with_title("Bouncy Particles - Press SPACE to exit")
+            .with_resizable(false);
+
+        let window_attrs = if let (Some(w), Some(h)) = (self.requested_width, self.requested_height)
+        {
+            // Validate against actual display size
+            if let Some(monitor) = event_loop.available_monitors().next() {
+                let monitor_size = monitor.size();
+                let scale = monitor.scale_factor();
+                let max_width = physical_to_logical(monitor_size.width, scale);
+                let max_height = physical_to_logical(monitor_size.height, scale);
+
+                if w > max_width || h > max_height {
+                    eprintln!(
+                        "Error: Requested size {w}x{h} exceeds display size {max_width}x{max_height}"
+                    );
+                    event_loop.exit();
+                    return;
+                }
+            }
+            println!("Window mode: {w}x{h} (fixed size)");
+            window_attrs.with_inner_size(LogicalSize::new(w, h))
+        } else {
+            println!("Window mode: fullscreen");
+            window_attrs.with_fullscreen(Some(Fullscreen::Borderless(None)))
+        };
+
+        let window = event_loop
+            .create_window(window_attrs)
+            .expect("Failed to create window");
+
+        let physical_size = window.inner_size();
+        let scale_factor = window.scale_factor();
+        let width = physical_to_logical(physical_size.width, scale_factor);
+        let height = physical_to_logical(physical_size.height, scale_factor);
+
+        println!(
+            "Window: {}x{} physical, {}x{} logical, scale={}",
+            physical_size.width, physical_size.height, width, height, scale_factor
+        );
+
+        self.init_simulation_state(width, height);
+
+        let window = Rc::new(window);
+        self.render = Some(create_render_context(
+            &window,
             width,
             height,
-            #[allow(clippy::borrowed_box)]
-            pixels_builder: |window: &Box<Window>| {
-                let size = window.inner_size();
-                let surface_texture = SurfaceTexture::new(size.width, size.height, window.as_ref());
-                Pixels::new(width, height, surface_texture).expect("Failed to create pixels")
-            },
-        }
-        .build();
-
-        render.borrow_window().request_redraw();
-        self.render = Some(render);
+            self.force_cpu,
+        ));
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -933,15 +1345,11 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
-                self.handle_key(key_code, event_loop);
+                handle_key(key_code, event_loop);
             }
             WindowEvent::Resized(new_size) => {
                 if let Some(ref mut render) = self.render {
-                    render.with_pixels_mut(|pixels| {
-                        pixels
-                            .resize_surface(new_size.width, new_size.height)
-                            .expect("Failed to resize surface");
-                    });
+                    render.resize_surface(new_size.width, new_size.height);
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -962,147 +1370,41 @@ impl ApplicationHandler for App {
             state: ElementState::Pressed,
         }) = event
         {
-            self.handle_key(key_code, event_loop);
+            handle_key(key_code, event_loop);
         }
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(ref render) = self.render {
-            render.borrow_window().request_redraw();
+            render.window().request_redraw();
         }
     }
 }
 
 fn main() {
-    // Parse command line arguments
-    let args: Vec<String> = env::args().collect();
-    let mut spawn_at_collision = false;
-    let mut min_particles_override: Option<usize> = None;
-    let mut gravity_percent: i32 = 100;
-    let mut wall_elasticity: f64 = 1.0;
-    let mut particle_elasticity: f64 = 1.0;
+    let Some(config) = parse_args() else {
+        return; // Help was shown or error occurred
+    };
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--spawn-at-collision" => spawn_at_collision = true,
-            "--min-particles" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --min-particles requires a number argument");
-                    print_usage();
-                    return;
-                }
-                match args[i].parse::<usize>() {
-                    Ok(n) if (2..=100).contains(&n) => min_particles_override = Some(n),
-                    Ok(_) => {
-                        eprintln!("Error: --min-particles must be between 2 and 100");
-                        print_usage();
-                        return;
-                    }
-                    Err(_) => {
-                        eprintln!("Error: --min-particles requires a valid number");
-                        print_usage();
-                        return;
-                    }
-                }
-            }
-            "--gravity" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --gravity requires an integer argument");
-                    print_usage();
-                    return;
-                }
-                match args[i].parse::<i32>() {
-                    Ok(n) => gravity_percent = n,
-                    Err(_) => {
-                        eprintln!("Error: --gravity requires a valid integer");
-                        print_usage();
-                        return;
-                    }
-                }
-            }
-            "--wall-elasticity" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --wall-elasticity requires a number argument");
-                    print_usage();
-                    return;
-                }
-                match args[i].parse::<f64>() {
-                    Ok(n) if (0.0..=1.5).contains(&n) => wall_elasticity = n,
-                    Ok(_) => {
-                        eprintln!("Error: --wall-elasticity must be between 0.0 and 1.5");
-                        print_usage();
-                        return;
-                    }
-                    Err(_) => {
-                        eprintln!("Error: --wall-elasticity requires a valid number");
-                        print_usage();
-                        return;
-                    }
-                }
-            }
-            "--particle-elasticity" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("Error: --particle-elasticity requires a number argument");
-                    print_usage();
-                    return;
-                }
-                match args[i].parse::<f64>() {
-                    Ok(n) if (0.0..=1.5).contains(&n) => particle_elasticity = n,
-                    Ok(_) => {
-                        eprintln!("Error: --particle-elasticity must be between 0.0 and 1.5");
-                        print_usage();
-                        return;
-                    }
-                    Err(_) => {
-                        eprintln!("Error: --particle-elasticity requires a valid number");
-                        print_usage();
-                        return;
-                    }
-                }
-            }
-            "--help" | "-h" => {
-                print_usage();
-                return;
-            }
-            other => {
-                eprintln!("Unknown option: {}", other);
-                print_usage();
-                return;
-            }
-        }
-        i += 1;
-    }
-
-    if spawn_at_collision {
+    // Print configuration summary
+    if config.spawn_at_collision {
         println!("Mode: Spawning particles at collision points");
     } else {
         println!("Mode: Spawning particles at center");
     }
-
-    if gravity_percent != 100 {
-        println!("Gravity: {}%", gravity_percent);
+    if config.gravity_percent != 100 {
+        println!("Gravity: {}%", config.gravity_percent);
     }
-    if wall_elasticity != 1.0 {
-        println!("Wall elasticity: {}", wall_elasticity);
+    if (config.wall_elasticity - 1.0).abs() > f64::EPSILON {
+        println!("Wall elasticity: {}", config.wall_elasticity);
     }
-    if particle_elasticity != 1.0 {
-        println!("Particle elasticity: {}", particle_elasticity);
+    if (config.particle_elasticity - 1.0).abs() > f64::EPSILON {
+        println!("Particle elasticity: {}", config.particle_elasticity);
     }
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::new(
-        spawn_at_collision,
-        min_particles_override,
-        gravity_percent,
-        wall_elasticity,
-        particle_elasticity,
-    );
-    event_loop.run_app(&mut app).expect("Event loop error");
+    let mut app = App::new(config);
+    let _ = event_loop.run_app(&mut app);
 }
