@@ -5,12 +5,10 @@
 
 use crate::audio::Audio;
 use crate::config::{ColorMode, Config};
-use crate::explosion::{
-    max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_THRESHOLD, SPAWN_RATE_WINDOW,
-};
+use crate::explosion::{max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_WINDOW};
 use crate::physics::{
-    handle_collisions, has_motion, substep_count, update_physics, CollisionRecorder, Particle,
-    SpatialGrid, MOTION_STOPPED_FRAMES,
+    apply_attractor, handle_collisions, has_motion, substep_count, update_physics,
+    CollisionRecorder, Particle, SpatialGrid, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
 };
 use crate::render::{
     create_render_context, fade_frame, render_explosion, render_particles, RenderContext,
@@ -38,10 +36,34 @@ const CLICK_BURST_SIZE: usize = 10;
 const WARMUP_FRAMES: u32 = 3;
 /// Runtime gravity adjustment step (percent) for Up/Down arrows.
 const GRAVITY_STEP: i32 = 10;
-/// Runtime elasticity adjustment step for Left/Right arrows.
+/// Runtime elasticity adjustment step for arrow and bracket keys.
 const ELASTICITY_STEP: f64 = 0.05;
+/// Runtime explosion-threshold adjustment step for the -/= keys.
+const THRESHOLD_STEP: usize = 5;
+const THRESHOLD_MAX: usize = 1000;
+/// Multiplicative step for time-scale adjustment (comma/period).
+const TIME_SCALE_STEP: f64 = 1.25;
+const TIME_SCALE_MIN: f64 = 0.1;
+const TIME_SCALE_MAX: f64 = 4.0;
+/// Simulated time for a single frame-step while paused (N key).
+const FRAME_STEP_DT: f64 = 1.0 / 120.0;
 /// Consecutive failed presents before giving up (a few seconds at 60 FPS).
 const MAX_RENDER_FAILURES: u32 = 300;
+/// Absolute population ceiling. The effective cap is usually lower: spawning
+/// stops when particles would occupy ~20% of the window area (a jammed,
+/// solid-packed window is neither interesting nor fast). Only reachable with
+/// automatic explosions disabled (--explosion-threshold 0).
+const MAX_PARTICLES: usize = 100_000;
+/// Floor for the density-based cap so small windows still allow bursts.
+const MIN_PARTICLE_CAP: usize = 1000;
+/// Spawn throttle per frame. In a dense cluster the collision count is
+/// quadratic in cluster size, so unthrottled spawning can multiply the
+/// population by orders of magnitude in a single frame.
+const MAX_SPAWNS_PER_FRAME: usize = 200;
+/// Random offset applied to collision-point spawns so new particles never
+/// stack at an identical position (identical positions defeat both collision
+/// separation and the spatial grid).
+const SPAWN_JITTER: f64 = 4.0;
 /// Minimum survivors of a cursor-triggered explosion. Unlike automatic
 /// explosions (which keep the screen-based base count alive), a manual blast
 /// wipes everything it touches down to the simulation's hard minimum.
@@ -52,6 +74,24 @@ const HUD_LINE_HEIGHT: f32 = 20.0;
 const HUD_MARGIN: f32 = 8.0;
 const HUD_COLOR: [u8; 3] = [200, 200, 200];
 const MESSAGE_COLOR: [u8; 3] = [255, 100, 100];
+
+/// HUD overlay state, cycled with the H key.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum HudMode {
+    Hidden,
+    Stats,
+    StatsAndKeys,
+}
+
+impl HudMode {
+    fn next(self) -> Self {
+        match self {
+            HudMode::Hidden => HudMode::Stats,
+            HudMode::Stats => HudMode::StatsAndKeys,
+            HudMode::StatsAndKeys => HudMode::Hidden,
+        }
+    }
+}
 
 /// Calculate the initial/minimum particle count based on screen size.
 fn calculate_particle_count(width: u32, height: u32) -> usize {
@@ -101,6 +141,8 @@ pub struct App {
 
     // Derived values
     base_particle_count: usize,
+    /// Density-based population cap for this window size.
+    max_particles: usize,
     center_x: f64,
     center_y: f64,
 
@@ -115,9 +157,16 @@ pub struct App {
     stopped: bool,
     frames_without_motion: u32,
     paused: bool,
-    hud_visible: bool,
+    step_once: bool,
+    hud_mode: HudMode,
     cursor_x: f64,
     cursor_y: f64,
+    /// Cursor gravity well: 0 = off, 1 = attract (G held), -1 = repel (Shift+G).
+    well_direction: i8,
+    shift_down: bool,
+    time_scale: f64,
+    /// Spawns/sec that trigger an automatic explosion; 0 = never.
+    explosion_threshold: usize,
 
     // Render failure tracking (transient surface loss should not crash)
     consecutive_render_failures: u32,
@@ -153,6 +202,7 @@ impl App {
             collisions: CollisionRecorder::new(),
             grid: SpatialGrid::new(),
             base_particle_count: 0,
+            max_particles: MAX_PARTICLES,
             center_x: 0.0,
             center_y: 0.0,
             last_time: Instant::now(),
@@ -163,9 +213,14 @@ impl App {
             stopped: false,
             frames_without_motion: 0,
             paused: false,
-            hud_visible: false,
+            step_once: false,
+            hud_mode: HudMode::Hidden,
             cursor_x: 0.0,
             cursor_y: 0.0,
+            well_direction: 0,
+            shift_down: false,
+            time_scale: 1.0,
+            explosion_threshold: config.explosion_threshold as usize,
             consecutive_render_failures: 0,
         }
     }
@@ -188,6 +243,16 @@ impl App {
         self.particles = (0..self.base_particle_count)
             .map(|_| Particle::new_random(&mut self.rng, width, height))
             .collect();
+
+        // Cap the population at ~20% area coverage: one particle per four
+        // diameter-squared tiles of window area.
+        let diameter = self.particle_radius * 2.0;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let density_cap =
+            (f64::from(width) * f64::from(height) / (4.0 * diameter * diameter)) as usize;
+        self.max_particles = density_cap
+            .clamp(MIN_PARTICLE_CAP, MAX_PARTICLES)
+            .max(self.base_particle_count);
 
         self.center_x = f64::from(width) / 2.0;
         self.center_y = f64::from(height) / 2.0;
@@ -275,7 +340,7 @@ impl App {
 
         // Spawn new particles or trigger explosion
         if !self.collisions.is_empty() && self.explosion.is_none() {
-            if self.spawn_times.len() >= SPAWN_RATE_THRESHOLD {
+            if self.explosion_threshold > 0 && self.spawn_times.len() >= self.explosion_threshold {
                 println!(
                     "EXPLOSION! Spawn rate {} per second exceeded threshold, {} total particles",
                     self.spawn_times.len(),
@@ -298,10 +363,19 @@ impl App {
                     self.base_particle_count,
                 );
             } else {
-                for i in 0..self.collisions.positions().len() {
+                use rand::Rng;
+                let spawn_count = self
+                    .collisions
+                    .positions()
+                    .len()
+                    .min(MAX_SPAWNS_PER_FRAME)
+                    .min(self.max_particles.saturating_sub(self.particles.len()));
+                for i in 0..spawn_count {
                     let (cx, cy) = self.collisions.positions()[i];
                     let particle = if self.spawn_at_collision {
-                        Particle::new_at_position(&mut self.rng, cx, cy)
+                        let jx = self.rng.random_range(-SPAWN_JITTER..SPAWN_JITTER);
+                        let jy = self.rng.random_range(-SPAWN_JITTER..SPAWN_JITTER);
+                        Particle::new_at_position(&mut self.rng, cx + jx, cy + jy)
                     } else {
                         Particle::new_at_center(&mut self.rng, width, height)
                     };
@@ -369,6 +443,15 @@ impl App {
 
         let mut max_energy = 0.0f64;
         for _ in 0..substeps {
+            if self.well_direction != 0 {
+                apply_attractor(
+                    &mut self.particles,
+                    self.cursor_x,
+                    self.cursor_y,
+                    f64::from(self.well_direction) * WELL_STRENGTH,
+                    sub_dt,
+                );
+            }
             update_physics(
                 &mut self.particles,
                 sub_dt,
@@ -403,8 +486,70 @@ impl App {
         self.check_motion();
     }
 
+    /// Build the HUD overlay text for the current mode.
+    fn hud_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!("FPS: {:.1}", self.current_fps),
+            format!("Particles: {}", self.particles.len()),
+            format!("Gravity: {}%  (Up/Down)", self.gravity_percent),
+            format!(
+                "Elasticity: particle {:.2} (Left/Right) / wall {:.2} ([/])",
+                self.particle_elasticity, self.wall_elasticity
+            ),
+            format!("Time scale: {:.2}x  (,/.)", self.time_scale),
+            if self.explosion_threshold == 0 {
+                "Explosions: off  (-/=)".to_string()
+            } else {
+                format!(
+                    "Explosions: at {}/s spawn rate  (-/=)",
+                    self.explosion_threshold
+                )
+            },
+        ];
+
+        let mut flags = Vec::new();
+        if self.paused {
+            flags.push("PAUSED");
+        }
+        if self.audio.is_muted() {
+            flags.push("MUTED");
+        }
+        if self.stopped {
+            flags.push("STOPPED");
+        }
+        if self.well_direction > 0 {
+            flags.push("WELL: ATTRACT");
+        } else if self.well_direction < 0 {
+            flags.push("WELL: REPEL");
+        }
+        if !flags.is_empty() {
+            lines.push(flags.join("  "));
+        }
+
+        if self.hud_mode == HudMode::StatsAndKeys {
+            lines.push(String::new());
+            for key_line in [
+                "P pause   N step   R reset   M mute",
+                "T trails   C colors   B spawn mode",
+                "G hold: gravity well (Shift+G repels)",
+                "Click: burst   Right-click: explosion",
+                "H cycle HUD   Space/Esc/Q quit",
+            ] {
+                lines.push(key_line.to_string());
+            }
+        }
+
+        lines
+    }
+
     /// Draw the current frame and present it, tolerating transient failures.
     fn render_frame(&mut self, width: u32, height: u32) {
+        let hud_lines = if self.hud_mode == HudMode::Hidden {
+            None
+        } else {
+            Some(self.hud_lines())
+        };
+
         let Some(ref mut render) = self.render else {
             return;
         };
@@ -432,24 +577,10 @@ impl App {
             } else if paused {
                 draw_text_centered(frame, width, height, "PAUSED", 72.0, MESSAGE_COLOR);
             }
+            if let Some(ref lines) = hud_lines {
+                draw_hud(frame, width, height, lines);
+            }
         });
-
-        if self.hud_visible {
-            // Copy the small amount of HUD state needed to avoid borrowing
-            // self while render is mutably borrowed.
-            let fps = self.current_fps;
-            let count = self.particles.len();
-            let gravity = self.gravity_percent;
-            let elasticity = self.particle_elasticity;
-            let paused = self.paused;
-            let muted = self.audio.is_muted();
-            let stopped = self.stopped;
-            render.with_frame(|frame| {
-                render_hud_lines(
-                    frame, width, height, fps, count, gravity, elasticity, paused, muted, stopped,
-                );
-            });
-        }
 
         match render.present() {
             Ok(()) => self.consecutive_render_failures = 0,
@@ -482,8 +613,12 @@ impl App {
         self.last_time = now;
 
         if !self.stopped && !self.paused {
-            self.simulate(dt, now, width, height);
+            self.simulate(dt * self.time_scale, now, width, height);
+        } else if self.paused && self.step_once {
+            // Frame-step (N while paused): advance one fixed-size step.
+            self.simulate(FRAME_STEP_DT * self.time_scale, now, width, height);
         }
+        self.step_once = false;
 
         self.render_frame(width, height);
         self.update_fps_counter();
@@ -492,6 +627,9 @@ impl App {
     /// Spawn a burst of particles at the cursor (left click).
     fn spawn_burst(&mut self, x: f64, y: f64) {
         for _ in 0..CLICK_BURST_SIZE {
+            if self.particles.len() >= self.max_particles {
+                break;
+            }
             self.particles
                 .push(Particle::new_at_position(&mut self.rng, x, y));
         }
@@ -500,20 +638,61 @@ impl App {
         self.frames_without_motion = 0;
     }
 
-    /// Handle a pressed key.
-    fn handle_key(&mut self, key_code: KeyCode, repeat: bool, event_loop: &ActiveEventLoop) {
+    /// Handle a key press or release.
+    fn handle_key(
+        &mut self,
+        key_code: KeyCode,
+        state: ElementState,
+        repeat: bool,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if state == ElementState::Released {
+            if key_code == KeyCode::KeyG {
+                self.well_direction = 0;
+            }
+            return;
+        }
+
         match key_code {
             KeyCode::Space | KeyCode::Escape | KeyCode::KeyQ => event_loop.exit(),
             KeyCode::KeyP if !repeat => {
                 self.paused = !self.paused;
                 println!("{}", if self.paused { "Paused" } else { "Resumed" });
             }
+            KeyCode::KeyN if self.paused => self.step_once = true,
             KeyCode::KeyR if !repeat => self.reset(),
             KeyCode::KeyM if !repeat => {
                 let muted = self.audio.toggle_mute();
                 println!("Audio {}", if muted { "muted" } else { "unmuted" });
             }
-            KeyCode::KeyH if !repeat => self.hud_visible = !self.hud_visible,
+            KeyCode::KeyH if !repeat => self.hud_mode = self.hud_mode.next(),
+            KeyCode::KeyT if !repeat => {
+                self.trails = !self.trails;
+                println!("Trails {}", if self.trails { "on" } else { "off" });
+            }
+            KeyCode::KeyC if !repeat => {
+                self.color_mode = match self.color_mode {
+                    ColorMode::Solid => ColorMode::Velocity,
+                    ColorMode::Velocity => ColorMode::Solid,
+                };
+            }
+            KeyCode::KeyB if !repeat => {
+                self.spawn_at_collision = !self.spawn_at_collision;
+                println!(
+                    "Spawning at {}",
+                    if self.spawn_at_collision {
+                        "collision points"
+                    } else {
+                        "center"
+                    }
+                );
+            }
+            KeyCode::KeyG => {
+                self.well_direction = if self.shift_down { -1 } else { 1 };
+                // The well moves particles; leave the stopped state if set.
+                self.stopped = false;
+                self.frames_without_motion = 0;
+            }
             KeyCode::ArrowUp => {
                 self.gravity_percent = (self.gravity_percent + GRAVITY_STEP).min(1000);
                 println!("Gravity: {}%", self.gravity_percent);
@@ -529,6 +708,35 @@ impl App {
             KeyCode::ArrowLeft => {
                 self.particle_elasticity = (self.particle_elasticity - ELASTICITY_STEP).max(0.0);
                 println!("Particle elasticity: {:.2}", self.particle_elasticity);
+            }
+            KeyCode::BracketRight => {
+                self.wall_elasticity = (self.wall_elasticity + ELASTICITY_STEP).min(1.5);
+                println!("Wall elasticity: {:.2}", self.wall_elasticity);
+            }
+            KeyCode::BracketLeft => {
+                self.wall_elasticity = (self.wall_elasticity - ELASTICITY_STEP).max(0.0);
+                println!("Wall elasticity: {:.2}", self.wall_elasticity);
+            }
+            KeyCode::Period => {
+                self.time_scale = (self.time_scale * TIME_SCALE_STEP).min(TIME_SCALE_MAX);
+                println!("Time scale: {:.2}x", self.time_scale);
+            }
+            KeyCode::Comma => {
+                self.time_scale = (self.time_scale / TIME_SCALE_STEP).max(TIME_SCALE_MIN);
+                println!("Time scale: {:.2}x", self.time_scale);
+            }
+            KeyCode::Equal => {
+                self.explosion_threshold =
+                    (self.explosion_threshold + THRESHOLD_STEP).min(THRESHOLD_MAX);
+                println!("Explosion threshold: {}/s", self.explosion_threshold);
+            }
+            KeyCode::Minus => {
+                self.explosion_threshold = self.explosion_threshold.saturating_sub(THRESHOLD_STEP);
+                if self.explosion_threshold == 0 {
+                    println!("Explosion threshold: off");
+                } else {
+                    println!("Explosion threshold: {}/s", self.explosion_threshold);
+                }
             }
             _ => {}
         }
@@ -551,42 +759,13 @@ impl App {
     }
 }
 
-/// Draw the HUD overlay lines. Free function so it can run while the render
-/// context is mutably borrowed.
-#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-fn render_hud_lines(
-    frame: &mut [u8],
-    width: u32,
-    height: u32,
-    fps: f64,
-    particle_count: usize,
-    gravity_percent: i32,
-    particle_elasticity: f64,
-    paused: bool,
-    muted: bool,
-    stopped: bool,
-) {
-    let mut lines = vec![
-        format!("FPS: {fps:.1}"),
-        format!("Particles: {particle_count}"),
-        format!("Gravity: {gravity_percent}%  (Up/Down)"),
-        format!("Elasticity: {particle_elasticity:.2}  (Left/Right)"),
-    ];
-    let mut flags = Vec::new();
-    if paused {
-        flags.push("PAUSED");
-    }
-    if muted {
-        flags.push("MUTED");
-    }
-    if stopped {
-        flags.push("STOPPED");
-    }
-    if !flags.is_empty() {
-        lines.push(flags.join("  "));
-    }
-
+/// Draw the HUD overlay lines top-left. Free function so it can run inside
+/// the frame closure while the render context is mutably borrowed.
+fn draw_hud(frame: &mut [u8], width: u32, height: u32, lines: &[String]) {
     for (i, line) in lines.iter().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
         #[allow(clippy::cast_precision_loss)]
         let y = HUD_MARGIN + i as f32 * HUD_LINE_HEIGHT;
         draw_text(
@@ -673,13 +852,16 @@ impl ApplicationHandler for App {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(key_code),
-                        state: ElementState::Pressed,
+                        state,
                         repeat,
                         ..
                     },
                 ..
             } => {
-                self.handle_key(key_code, repeat, event_loop);
+                self.handle_key(key_code, state, repeat, event_loop);
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.shift_down = modifiers.state().shift_key();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_x = position.x / self.scale_factor;

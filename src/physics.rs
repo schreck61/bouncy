@@ -438,6 +438,28 @@ pub fn handle_collisions(
     max_energy
 }
 
+/// Acceleration scale of the cursor gravity well (pixels/s^2, asymptotic).
+pub const WELL_STRENGTH: f64 = 2500.0;
+
+/// Pull (positive `strength`) or push (negative) every particle toward/away
+/// from `(x, y)`. The softened falloff keeps acceleration gentle near the
+/// well center — magnitude approaches `|strength|` at distance and fades to
+/// zero at the center, so particles orbit instead of jittering.
+pub fn apply_attractor(particles: &mut [Particle], x: f64, y: f64, strength: f64, dt: f64) {
+    const SOFTENING: f64 = 50.0;
+    for p in particles {
+        let dx = x - p.x;
+        let dy = y - p.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist < 1e-6 {
+            continue;
+        }
+        let scale = strength / (dist + SOFTENING);
+        p.vx += dx * scale * dt;
+        p.vy += dy * scale * dt;
+    }
+}
+
 /// Update all particle positions with physics simulation.
 pub fn update_physics(
     particles: &mut [Particle],
@@ -764,6 +786,36 @@ mod tests {
         assert!(substep_count(&fast, 0.008, RADIUS) > 1);
         assert!(substep_count(&fast, 10.0, RADIUS) <= MAX_SUBSTEPS);
         assert_eq!(substep_count(&[], 0.008, RADIUS), 1);
+    }
+
+    #[test]
+    fn attractor_pulls_toward_and_repels_from_point() {
+        let mut particles = vec![particle(100.0, 100.0, 0.0, 0.0)];
+        apply_attractor(&mut particles, 200.0, 100.0, WELL_STRENGTH, 0.01);
+        assert!(particles[0].vx > 0.0, "attract must pull toward the well");
+        assert!(particles[0].vy.abs() < 1e-9);
+
+        let mut particles = vec![particle(100.0, 100.0, 0.0, 0.0)];
+        apply_attractor(&mut particles, 200.0, 100.0, -WELL_STRENGTH, 0.01);
+        assert!(particles[0].vx < 0.0, "repel must push away from the well");
+
+        // A particle exactly at the well center must not produce NaN.
+        let mut particles = vec![particle(200.0, 100.0, 0.0, 0.0)];
+        apply_attractor(&mut particles, 200.0, 100.0, WELL_STRENGTH, 0.01);
+        assert!(particles[0].vx.is_finite() && particles[0].vy.is_finite());
+        assert_eq!(particles[0].vx, 0.0);
+    }
+
+    #[test]
+    fn attractor_acceleration_is_softened_near_center() {
+        let mut near = vec![particle(195.0, 100.0, 0.0, 0.0)];
+        let mut far = vec![particle(0.0, 100.0, 0.0, 0.0)];
+        apply_attractor(&mut near, 200.0, 100.0, WELL_STRENGTH, 0.01);
+        apply_attractor(&mut far, 200.0, 100.0, WELL_STRENGTH, 0.01);
+        assert!(
+            near[0].vx.abs() < far[0].vx.abs(),
+            "acceleration must fade near the well center"
+        );
     }
 
     #[test]

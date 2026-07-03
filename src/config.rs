@@ -69,6 +69,12 @@ pub struct Config {
     #[arg(long, value_enum, default_value_t = ColorMode::Solid)]
     pub color_mode: ColorMode,
 
+    /// Spawns per second that trigger an automatic explosion; 0 disables
+    /// automatic explosions entirely (right-click still works)
+    #[arg(long, default_value_t = crate::explosion::SPAWN_RATE_THRESHOLD as u64,
+          value_parser = clap::value_parser!(u64).range(0..=1000))]
+    pub explosion_threshold: u64,
+
     /// Seed the random number generator (reproducible starting conditions)
     #[arg(long)]
     pub seed: Option<u64>,
@@ -81,11 +87,19 @@ pub struct Config {
 const CONTROLS_HELP: &str = "Controls:
   Space, Escape, Q   Exit
   P                  Pause / resume
+  N                  Advance one frame (while paused)
   R                  Reset the simulation
   M                  Mute / unmute audio
-  H                  Toggle the HUD overlay
+  H                  Cycle the HUD (off / stats / stats+keys)
   Up / Down          Adjust gravity by 10%
   Left / Right       Adjust particle elasticity by 0.05
+  [ / ]              Adjust wall elasticity by 0.05
+  , / .              Slow down / speed up time (0.1x-4x)
+  - / =              Adjust explosion threshold by 5 (0 = off)
+  T                  Toggle motion trails
+  C                  Cycle color mode
+  B                  Toggle spawn location (center / collision point)
+  G (hold)           Gravity well at the cursor; Shift+G repels
   Left click         Spawn a burst of particles at the cursor
   Right click        Trigger an explosion at the cursor
 
@@ -184,6 +198,25 @@ mod tests {
         assert!(parse(&["--width", "800"]).is_err());
         assert!(parse(&["--height", "600"]).is_err());
         assert!(parse(&["--width", "800", "--height", "600"]).is_ok());
+    }
+
+    #[test]
+    fn explosion_threshold_defaults_and_bounds() {
+        assert_eq!(parse(&[]).unwrap().explosion_threshold, 30);
+        assert_eq!(
+            parse(&["--explosion-threshold", "0"])
+                .unwrap()
+                .explosion_threshold,
+            0
+        );
+        assert_eq!(
+            parse(&["--explosion-threshold", "1000"])
+                .unwrap()
+                .explosion_threshold,
+            1000
+        );
+        assert!(parse(&["--explosion-threshold", "1001"]).is_err());
+        assert!(parse(&["--explosion-threshold", "-1"]).is_err());
     }
 
     #[test]

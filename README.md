@@ -67,6 +67,7 @@ cargo run --release -- --spawn-at-collision
 | `--trails` | Leave motion trails behind particles | Off |
 | `--particle-size <R>` | Particle radius in pixels (0.5-10.0) | 1.5 |
 | `--color-mode <MODE>` | `solid` or `velocity` (hue follows speed) | solid |
+| `--explosion-threshold <N>` | Spawns per second that trigger an automatic explosion (0-1000); 0 disables automatic explosions (population is then capped at ~20% window coverage, at most 100,000 particles) | 30 |
 | `--seed <N>` | Seed the random number generator (reproducible starting conditions) | Random |
 | `--verbose` | Print per-second FPS statistics to stdout | Off |
 | `--help`, `-h` | Display help information | |
@@ -78,13 +79,23 @@ cargo run --release -- --spawn-at-collision
 |-------|--------|
 | `Space`, `Escape`, `Q` | Exit |
 | `P` | Pause / resume |
+| `N` | Advance one frame while paused |
 | `R` | Reset the simulation |
 | `M` | Mute / unmute audio |
-| `H` | Toggle the HUD overlay (FPS, particle count, physics settings) |
+| `H` | Cycle the HUD overlay: off / stats / stats + key reference |
 | `Up` / `Down` | Adjust gravity by 10% |
 | `Left` / `Right` | Adjust particle elasticity by 0.05 |
+| `[` / `]` | Adjust wall elasticity by 0.05 |
+| `,` / `.` | Slow down / speed up time (0.1x to 4x) |
+| `-` / `=` | Adjust the explosion threshold by 5 spawns/sec (0 = automatic explosions off) |
+| `T` | Toggle motion trails |
+| `C` | Cycle color mode (solid / velocity) |
+| `B` | Toggle spawn location (screen center / collision points) |
+| `G` (hold) | Gravity well: attract particles toward the cursor; `Shift+G` repels |
 | Left click | Spawn a burst of particles at the cursor |
 | Right click | Trigger an explosion centered at the cursor (kills every particle the ring reaches, down to a minimum of 2 survivors) |
+
+Wall elasticity is the simulation's temperature dial: below 1.0 the walls drain energy on every bounce and the system gradually cools; above 1.0 they pump energy in.
 
 ### Motion Detection
 
