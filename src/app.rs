@@ -375,23 +375,44 @@ impl App {
                 );
             } else {
                 use rand::Rng;
-                let spawn_count = self
-                    .collisions
-                    .positions()
-                    .len()
-                    .min(MAX_SPAWNS_PER_FRAME)
-                    .min(self.max_particles.saturating_sub(self.particles.len()));
-                for i in 0..spawn_count {
-                    let (cx, cy) = self.collisions.positions()[i];
-                    let particle = if self.spawn_at_collision {
-                        let jx = self.rng.random_range(-SPAWN_JITTER..SPAWN_JITTER);
-                        let jy = self.rng.random_range(-SPAWN_JITTER..SPAWN_JITTER);
-                        Particle::new_at_position(&mut self.rng, cx + jx, cy + jy)
+                let diameter = self.particle_radius * 2.0;
+                let jitter = SPAWN_JITTER.max(diameter);
+                // Grid state from the last collision pass covers exactly the
+                // pre-spawn particles; particles spawned this frame are
+                // checked separately below.
+                let first_new = self.particles.len();
+                let mut spawned = 0;
+                for i in 0..self.collisions.positions().len() {
+                    if spawned >= MAX_SPAWNS_PER_FRAME || self.particles.len() >= self.max_particles
+                    {
+                        break;
+                    }
+                    let (bx, by) = if self.spawn_at_collision {
+                        self.collisions.positions()[i]
                     } else {
-                        Particle::new_at_center(&mut self.rng, width, height)
+                        (self.center_x, self.center_y)
                     };
-                    self.particles.push(particle);
+                    let x = bx + self.rng.random_range(-jitter..jitter);
+                    let y = by + self.rng.random_range(-jitter..jitter);
+
+                    // Spawn only into free space. Materializing a particle
+                    // inside another re-collides instantly and spawns again:
+                    // a self-feeding cascade that inflates the spawn rate far
+                    // beyond what the moving particles actually produce.
+                    let blocked =
+                        self.grid
+                            .any_within(&self.particles[..first_new], x, y, diameter)
+                            || self.particles[first_new..]
+                                .iter()
+                                .any(|p| p.distance_squared_from(x, y) < diameter * diameter);
+                    if blocked {
+                        continue;
+                    }
+
+                    self.particles
+                        .push(Particle::new_at_position(&mut self.rng, x, y));
                     self.spawn_times.push_back(now);
+                    spawned += 1;
                 }
             }
         }
@@ -654,14 +675,19 @@ impl App {
         self.update_fps_counter();
     }
 
-    /// Spawn a burst of particles at the cursor (left click).
+    /// Spawn a burst of particles at the cursor (left click), spread over a
+    /// small disc so they don't materialize inside each other.
     fn spawn_burst(&mut self, x: f64, y: f64) {
+        use rand::Rng;
+        let spread = SPAWN_JITTER.max(self.particle_radius * 4.0);
         for _ in 0..CLICK_BURST_SIZE {
             if self.particles.len() >= self.max_particles {
                 break;
             }
+            let bx = x + self.rng.random_range(-spread..spread);
+            let by = y + self.rng.random_range(-spread..spread);
             self.particles
-                .push(Particle::new_at_position(&mut self.rng, x, y));
+                .push(Particle::new_at_position(&mut self.rng, bx, by));
         }
         // Fresh particles are moving; leave the stopped state if we were in it.
         self.stopped = false;

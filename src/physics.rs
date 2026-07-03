@@ -105,11 +105,6 @@ impl Particle {
         Self::new_at_position(rng, x, y)
     }
 
-    /// Create a particle at the center of the screen.
-    pub fn new_at_center(rng: &mut impl Rng, width: u32, height: u32) -> Self {
-        Self::new_at_position(rng, f64::from(width) / 2.0, f64::from(height) / 2.0)
-    }
-
     /// Create a particle at a specific position.
     pub fn new_at_position(rng: &mut impl Rng, x: f64, y: f64) -> Self {
         let (vx, vy) = Self::random_velocity(rng);
@@ -295,6 +290,36 @@ impl SpatialGrid {
             // Particle indices fit in i32: particle counts are far below i32::MAX.
             self.heads[cell] = i as i32;
         }
+    }
+
+    /// Check whether any particle center lies within `dist` of `(x, y)`.
+    /// Uses the cell lists from the most recent `build`; `particles` must be
+    /// the slice the grid was built from. `dist` must not exceed the cell
+    /// size (spawn-clearance queries use one particle diameter, which is
+    /// always at most half a cell).
+    pub fn any_within(&self, particles: &[Particle], x: f64, y: f64, dist: f64) -> bool {
+        if self.heads.is_empty() {
+            return false;
+        }
+        debug_assert!(dist <= self.cell_size);
+        let dist_sq = dist * dist;
+        let (cx, cy) = self.cell_of(x, y);
+        for ny in cy.saturating_sub(1)..=(cy + 1).min(self.rows - 1) {
+            for nx in cx.saturating_sub(1)..=(cx + 1).min(self.cols - 1) {
+                let mut i = self.heads[ny * self.cols + nx];
+                while i >= 0 {
+                    #[allow(clippy::cast_sign_loss)]
+                    let idx = i as usize;
+                    if idx < particles.len()
+                        && particles[idx].distance_squared_from(x, y) <= dist_sq
+                    {
+                        return true;
+                    }
+                    i = self.next[idx];
+                }
+            }
+        }
+        false
     }
 
     /// Visit every pair of particle indices that could be colliding.
@@ -756,6 +781,31 @@ mod tests {
         let contact_substeps = run_frame(&mut particles, &mut recorder);
         assert!(contact_substeps >= 1);
         assert_eq!(recorder.positions().len(), 1);
+    }
+
+    #[test]
+    fn grid_any_within_finds_nearby_particles() {
+        let (width, height) = (800u32, 600u32);
+        let particles = vec![particle(100.0, 100.0, 0.0, 0.0)];
+        let mut grid = SpatialGrid::new();
+
+        // Unbuilt grid: nothing is nearby.
+        assert!(!grid.any_within(&particles, 100.0, 100.0, 10.0));
+
+        grid.build(&particles, width, height, RADIUS);
+        assert!(grid.any_within(&particles, 100.0, 100.0, 10.0), "same spot");
+        assert!(
+            grid.any_within(&particles, 105.0, 100.0, 10.0),
+            "within distance, possibly a neighboring cell"
+        );
+        assert!(
+            !grid.any_within(&particles, 120.0, 100.0, 10.0),
+            "beyond distance"
+        );
+        assert!(!grid.any_within(&particles, 700.0, 500.0, 10.0), "far away");
+        // Out-of-bounds query coordinates must clamp, not panic.
+        assert!(!grid.any_within(&particles, -50.0, -50.0, 10.0));
+        assert!(!grid.any_within(&particles, 5000.0, 5000.0, 10.0));
     }
 
     #[test]
