@@ -97,6 +97,8 @@ cargo run --release -- --spawn-at-collision
 
 Wall elasticity is the simulation's temperature dial: below 1.0 the walls drain energy on every bounce and the system gradually cools; above 1.0 they pump energy in.
 
+The mouse cursor hides after 2 seconds of inactivity so it doesn't distract from the simulation. It reappears when moved, stays visible while the gravity well is held, and is always restored when the window loses focus or the program exits.
+
 ### Motion Detection
 
 When all particles stop moving (velocity below threshold for ~1 second), a "STOPPED" message is displayed and the simulation halts. This can happen when using low elasticity values where particles eventually lose all energy. Left-click to spawn fresh particles, or press `R` to reset.

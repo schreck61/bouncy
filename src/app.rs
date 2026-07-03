@@ -49,6 +49,8 @@ const TIME_SCALE_MAX: f64 = 4.0;
 const FRAME_STEP_DT: f64 = 1.0 / 120.0;
 /// Consecutive failed presents before giving up (a few seconds at 60 FPS).
 const MAX_RENDER_FAILURES: u32 = 300;
+/// Seconds of cursor inactivity before the cursor is hidden.
+const CURSOR_HIDE_DELAY: f64 = 2.0;
 /// Absolute population ceiling. The effective cap is usually lower: spawning
 /// stops when particles would occupy ~20% of the window area (a jammed,
 /// solid-packed window is neither interesting nor fast). Only reachable with
@@ -165,6 +167,11 @@ pub struct App {
     well_direction: i8,
     shift_down: bool,
     time_scale: f64,
+    /// Cursor auto-hide state: what visibility we last set on the window.
+    cursor_visible: bool,
+    last_cursor_move: Instant,
+    window_focused: bool,
+    cursor_inside: bool,
     /// Spawns/sec that trigger an automatic explosion; 0 = never.
     explosion_threshold: usize,
 
@@ -220,6 +227,10 @@ impl App {
             well_direction: 0,
             shift_down: false,
             time_scale: 1.0,
+            cursor_visible: true,
+            last_cursor_move: Instant::now(),
+            window_focused: true,
+            cursor_inside: false,
             explosion_threshold: config.explosion_threshold as usize,
             consecutive_render_failures: 0,
         }
@@ -593,7 +604,26 @@ impl App {
         }
     }
 
+    /// Apply the cursor auto-hide policy, changing OS cursor state only on
+    /// transitions.
+    fn update_cursor_visibility(&mut self) {
+        let idle = self.last_cursor_move.elapsed().as_secs_f64();
+        let desired = cursor_should_be_visible(
+            self.window_focused,
+            self.cursor_inside,
+            self.well_direction != 0,
+            idle,
+        );
+        if desired != self.cursor_visible {
+            if let Some(ref render) = self.render {
+                render.window().set_cursor_visible(desired);
+            }
+            self.cursor_visible = desired;
+        }
+    }
+
     fn update_and_render(&mut self) {
+        self.update_cursor_visibility();
         let Some((width, height)) = self.dimensions() else {
             return;
         };
@@ -759,6 +789,18 @@ impl App {
     }
 }
 
+/// Cursor auto-hide policy: visible while the window is unfocused, while the
+/// cursor is outside the window, while the gravity well is engaged, or until
+/// `CURSOR_HIDE_DELAY` seconds have passed since the last movement.
+fn cursor_should_be_visible(
+    focused: bool,
+    inside: bool,
+    well_active: bool,
+    idle_secs: f64,
+) -> bool {
+    !focused || !inside || well_active || idle_secs < CURSOR_HIDE_DELAY
+}
+
 /// Draw the HUD overlay lines top-left. Free function so it can run inside
 /// the frame closure while the render context is mutably borrowed.
 fn draw_hud(frame: &mut [u8], width: u32, height: u32, lines: &[String]) {
@@ -866,6 +908,22 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_x = position.x / self.scale_factor;
                 self.cursor_y = position.y / self.scale_factor;
+                self.cursor_inside = true;
+                self.last_cursor_move = Instant::now();
+            }
+            WindowEvent::CursorEntered { .. } => {
+                self.cursor_inside = true;
+                self.last_cursor_move = Instant::now();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.cursor_inside = false;
+            }
+            WindowEvent::Focused(focused) => {
+                self.window_focused = focused;
+                if focused {
+                    // Fresh focus should not instantly hide the cursor.
+                    self.last_cursor_move = Instant::now();
+                }
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -908,6 +966,14 @@ impl ApplicationHandler for App {
             render.window().request_redraw();
         }
     }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Restore the cursor on every exit path (exit keys, window close,
+        // repeated render failures) so it is never left hidden.
+        if let Some(ref render) = self.render {
+            render.window().set_cursor_visible(true);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -925,5 +991,20 @@ mod tests {
     fn physical_to_logical_conversion() {
         assert_eq!(physical_to_logical(3024, 2.0), 1512);
         assert_eq!(physical_to_logical(1920, 1.0), 1920);
+    }
+
+    #[test]
+    fn cursor_visibility_policy() {
+        let recently = CURSOR_HIDE_DELAY - 0.1;
+        let idle = CURSOR_HIDE_DELAY + 0.1;
+
+        // Hidden only when focused, inside, well off, and idle.
+        assert!(!cursor_should_be_visible(true, true, false, idle));
+
+        // Any of these forces visibility.
+        assert!(cursor_should_be_visible(true, true, false, recently)); // moving
+        assert!(cursor_should_be_visible(true, true, true, idle)); // well held
+        assert!(cursor_should_be_visible(false, true, false, idle)); // unfocused
+        assert!(cursor_should_be_visible(true, false, false, idle)); // outside window
     }
 }

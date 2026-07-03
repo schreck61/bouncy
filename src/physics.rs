@@ -439,7 +439,9 @@ pub fn handle_collisions(
 }
 
 /// Acceleration scale of the cursor gravity well (pixels/s^2, asymptotic).
-pub const WELL_STRENGTH: f64 = 2500.0;
+/// Kept below typical particle speeds so the well shepherds particles into
+/// orbits rather than instantly dominating their motion.
+pub const WELL_STRENGTH: f64 = 1000.0;
 
 /// Pull (positive `strength`) or push (negative) every particle toward/away
 /// from `(x, y)`. The softened falloff keeps acceleration gentle near the
