@@ -357,12 +357,65 @@ fn pair_mut(particles: &mut [Particle], i: usize, j: usize) -> (&mut Particle, &
     }
 }
 
+/// Records collision spawn positions across the substeps of one frame,
+/// counting each particle pair at most once.
+///
+/// The physics impulse must run on every contact so sustained contacts
+/// (stacks under gravity, wall traps, click-burst clusters) stay resolved,
+/// but re-detecting the same pair each substep must not multiply spawns —
+/// spawn accounting stays one-per-pair-per-frame, as it was before
+/// substepping existed. Clear at the start of each frame.
+pub struct CollisionRecorder {
+    positions: Vec<(f64, f64)>,
+    seen_pairs: std::collections::HashSet<(usize, usize)>,
+}
+
+impl CollisionRecorder {
+    pub fn new() -> Self {
+        CollisionRecorder {
+            positions: Vec::with_capacity(100),
+            seen_pairs: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Forget the current frame's collisions. Call once per frame, not per
+    /// substep — particle indices are stable within a frame, so pairs remain
+    /// identifiable across its substeps.
+    pub fn clear(&mut self) {
+        self.positions.clear();
+        self.seen_pairs.clear();
+    }
+
+    /// Record a contact between particles `i` and `j`; the position is kept
+    /// only the first time the pair collides this frame.
+    fn record(&mut self, i: usize, j: usize, x: f64, y: f64) {
+        if self.seen_pairs.insert((i.min(j), i.max(j))) {
+            self.positions.push((x, y));
+        }
+    }
+
+    /// Spawn positions recorded this frame (one per colliding pair).
+    pub fn positions(&self) -> &[(f64, f64)] {
+        &self.positions
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+}
+
+impl Default for CollisionRecorder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Process all particle-particle collisions using the spatial grid.
-/// Returns the maximum collision energy and appends to `collision_positions`.
+/// Returns the maximum collision energy and records spawn positions.
 pub fn handle_collisions(
     particles: &mut [Particle],
     grid: &mut SpatialGrid,
-    collision_positions: &mut Vec<(f64, f64)>,
+    recorder: &mut CollisionRecorder,
     width: u32,
     height: u32,
     radius: f64,
@@ -378,7 +431,7 @@ pub fn handle_collisions(
         let (p1, p2) = pair_mut(particles, i, j);
         if let Some(result) = try_elastic_collision(p1, p2, radius, particle_elasticity) {
             max_energy = max_energy.max(result.energy);
-            collision_positions.push((result.mid_x, result.mid_y));
+            recorder.record(i, j, result.mid_x, result.mid_y);
         }
     });
 
@@ -571,18 +624,18 @@ mod tests {
                 .map(|p| particle(p.x, p.y, p.vx, p.vy))
                 .collect();
             let mut grid = SpatialGrid::new();
-            let mut positions = Vec::new();
+            let mut recorder = CollisionRecorder::new();
             handle_collisions(
                 &mut grid_particles,
                 &mut grid,
-                &mut positions,
+                &mut recorder,
                 width,
                 height,
                 RADIUS,
                 1.0,
             );
             assert_eq!(
-                positions.len(),
+                recorder.positions().len(),
                 brute_pairs,
                 "grid and brute force disagree"
             );
@@ -599,17 +652,86 @@ mod tests {
             particle(12.1 + RADIUS, 50.0, -100.0, 0.0),
         ];
         let mut grid = SpatialGrid::new();
-        let mut positions = Vec::new();
+        let mut recorder = CollisionRecorder::new();
         handle_collisions(
             &mut particles,
             &mut grid,
-            &mut positions,
+            &mut recorder,
             width,
             height,
             RADIUS,
             1.0,
         );
-        assert_eq!(positions.len(), 1);
+        assert_eq!(recorder.positions().len(), 1);
+    }
+
+    #[test]
+    fn sustained_contact_spawns_once_per_frame() {
+        // Regression: a pair in resting contact (gravity presses the upper
+        // particle into the lower one, which sits on the floor) re-collides
+        // on every substep. The impulse must run each time, but only ONE
+        // spawn position may be recorded per pair per frame.
+        let (width, height) = (200u32, 200u32);
+        let floor_y = f64::from(height) - RADIUS;
+        let mut particles = vec![
+            particle(100.0, floor_y, 0.0, 0.0), // resting on the floor
+            particle(100.0, floor_y - 2.0 * RADIUS, 0.0, 0.0), // stacked on top
+        ];
+        let mut grid = SpatialGrid::new();
+        let mut recorder = CollisionRecorder::new();
+
+        // Strong gravity presses the stack back into contact within a few
+        // substeps of each separation, but never fast enough to tunnel.
+        let gravity_multiplier = 20.0;
+        let sub_dt = 0.01;
+        let mut run_frame = |particles: &mut Vec<Particle>,
+                             recorder: &mut CollisionRecorder|
+         -> u32 {
+            recorder.clear();
+            let mut contact_substeps = 0;
+            for _ in 0..8 {
+                update_physics(
+                    particles,
+                    sub_dt,
+                    width,
+                    height,
+                    RADIUS,
+                    gravity_multiplier,
+                    0.0,
+                );
+                let energy =
+                    handle_collisions(particles, &mut grid, recorder, width, height, RADIUS, 0.0);
+                if energy > 0.0 {
+                    contact_substeps += 1;
+                }
+            }
+            contact_substeps
+        };
+
+        let contact_substeps = run_frame(&mut particles, &mut recorder);
+        assert!(
+            contact_substeps > 1,
+            "test setup must produce repeated contact, got {contact_substeps}"
+        );
+        assert_eq!(
+            recorder.positions().len(),
+            1,
+            "a pair may spawn only once per frame"
+        );
+
+        // Physics still resolved every substep: the stack has not interpenetrated.
+        let dist_sq = particles[0].distance_squared_from(particles[1].x, particles[1].y);
+        assert!(
+            dist_sq.sqrt() >= 2.0 * RADIUS - 0.1,
+            "particles sank into each other: dist={}",
+            dist_sq.sqrt()
+        );
+
+        // A new frame (recorder cleared) records the pair again — the dedup
+        // is per frame, not forever.
+        let contact_substeps = run_frame(&mut particles, &mut recorder);
+        assert!(contact_substeps >= 1);
+        assert_eq!(recorder.positions().len(), 1);
     }
 
     #[test]

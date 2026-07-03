@@ -9,8 +9,8 @@ use crate::explosion::{
     max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_THRESHOLD, SPAWN_RATE_WINDOW,
 };
 use crate::physics::{
-    handle_collisions, has_motion, substep_count, update_physics, Particle, SpatialGrid,
-    MOTION_STOPPED_FRAMES,
+    handle_collisions, has_motion, substep_count, update_physics, CollisionRecorder, Particle,
+    SpatialGrid, MOTION_STOPPED_FRAMES,
 };
 use crate::render::{
     create_render_context, fade_frame, render_explosion, render_particles, RenderContext,
@@ -96,7 +96,7 @@ pub struct App {
     particles: Vec<Particle>,
     explosion: Option<Explosion>,
     spawn_times: VecDeque<Instant>,
-    collision_positions: Vec<(f64, f64)>,
+    collisions: CollisionRecorder,
     grid: SpatialGrid,
 
     // Derived values
@@ -150,7 +150,7 @@ impl App {
             particles: Vec::new(),
             explosion: None,
             spawn_times: VecDeque::new(),
-            collision_positions: Vec::with_capacity(100),
+            collisions: CollisionRecorder::new(),
             grid: SpatialGrid::new(),
             base_particle_count: 0,
             center_x: 0.0,
@@ -194,7 +194,7 @@ impl App {
 
         self.explosion = None;
         self.spawn_times.clear();
-        self.collision_positions.clear();
+        self.collisions.clear();
         self.stopped = false;
         self.frames_without_motion = 0;
         self.last_time = Instant::now();
@@ -274,7 +274,7 @@ impl App {
         }
 
         // Spawn new particles or trigger explosion
-        if !self.collision_positions.is_empty() && self.explosion.is_none() {
+        if !self.collisions.is_empty() && self.explosion.is_none() {
             if self.spawn_times.len() >= SPAWN_RATE_THRESHOLD {
                 println!(
                     "EXPLOSION! Spawn rate {} per second exceeded threshold, {} total particles",
@@ -298,8 +298,8 @@ impl App {
                     self.base_particle_count,
                 );
             } else {
-                for i in 0..self.collision_positions.len() {
-                    let (cx, cy) = self.collision_positions[i];
+                for i in 0..self.collisions.positions().len() {
+                    let (cx, cy) = self.collisions.positions()[i];
                     let particle = if self.spawn_at_collision {
                         Particle::new_at_position(&mut self.rng, cx, cy)
                     } else {
@@ -314,15 +314,15 @@ impl App {
 
     /// Average position of this frame's collisions.
     fn collision_centroid(&self) -> Option<(f64, f64)> {
-        if self.collision_positions.is_empty() {
+        let positions = self.collisions.positions();
+        if positions.is_empty() {
             return None;
         }
-        let (sx, sy) = self
-            .collision_positions
+        let (sx, sy) = positions
             .iter()
             .fold((0.0, 0.0), |(ax, ay), (x, y)| (ax + x, ay + y));
         #[allow(clippy::cast_precision_loss)]
-        let n = self.collision_positions.len() as f64;
+        let n = positions.len() as f64;
         Some((sx / n, sy / n))
     }
 
@@ -363,7 +363,7 @@ impl App {
         self.update_explosion(dt);
 
         let gravity_multiplier = f64::from(self.gravity_percent) / 100.0;
-        self.collision_positions.clear();
+        self.collisions.clear();
         let substeps = substep_count(&self.particles, dt, self.particle_radius);
         let sub_dt = dt / f64::from(substeps);
 
@@ -381,7 +381,7 @@ impl App {
             let energy = handle_collisions(
                 &mut self.particles,
                 &mut self.grid,
-                &mut self.collision_positions,
+                &mut self.collisions,
                 width,
                 height,
                 self.particle_radius,
