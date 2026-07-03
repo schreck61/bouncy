@@ -193,7 +193,8 @@ Tested on:
 
 Should work on:
 - Windows (DX12/Vulkan backend)
-- Linux (Vulkan backend)
+- Linux x86_64 (Vulkan backend)
+- Linux ARM64, e.g. Raspberry Pi 4/5 or Asahi Linux (Vulkan backend, with CPU fallback) — prebuilt binaries are provided but untested on real hardware
 
 ## Architecture
 
