@@ -1,0 +1,747 @@
+// Copyright (c) 2026 James O. Schreckengast
+// Licensed under the MIT License. See LICENSE for details.
+
+//! Application state, input handling, and the winit event loop glue.
+
+use crate::audio::Audio;
+use crate::config::{ColorMode, Config};
+use crate::explosion::{
+    max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_THRESHOLD, SPAWN_RATE_WINDOW,
+};
+use crate::physics::{
+    handle_collisions, has_motion, substep_count, update_physics, Particle, SpatialGrid,
+    MOTION_STOPPED_FRAMES,
+};
+use crate::render::{
+    create_render_context, fade_frame, render_explosion, render_particles, RenderContext,
+};
+use crate::text::{draw_text, draw_text_centered};
+use rand::rngs::StdRng;
+use rand::SeedableRng;
+use std::collections::VecDeque;
+use std::rc::Rc;
+use std::time::Instant;
+use winit::{
+    application::ApplicationHandler,
+    dpi::LogicalSize,
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
+    event_loop::ActiveEventLoop,
+    keyboard::{KeyCode, PhysicalKey},
+    window::{Fullscreen, Window, WindowId},
+};
+
+/// Screen area (in logical pixels) per initial particle.
+const PIXELS_PER_PARTICLE: u64 = 375_000;
+/// Particles spawned by a left click.
+const CLICK_BURST_SIZE: usize = 10;
+/// Frames of physics skipped at startup to let the GPU initialize.
+const WARMUP_FRAMES: u32 = 3;
+/// Runtime gravity adjustment step (percent) for Up/Down arrows.
+const GRAVITY_STEP: i32 = 10;
+/// Runtime elasticity adjustment step for Left/Right arrows.
+const ELASTICITY_STEP: f64 = 0.05;
+/// Consecutive failed presents before giving up (a few seconds at 60 FPS).
+const MAX_RENDER_FAILURES: u32 = 300;
+/// Minimum survivors of a cursor-triggered explosion. Unlike automatic
+/// explosions (which keep the screen-based base count alive), a manual blast
+/// wipes everything it touches down to the simulation's hard minimum.
+const MANUAL_EXPLOSION_SURVIVORS: usize = 2;
+
+const HUD_FONT_SIZE: f32 = 16.0;
+const HUD_LINE_HEIGHT: f32 = 20.0;
+const HUD_MARGIN: f32 = 8.0;
+const HUD_COLOR: [u8; 3] = [200, 200, 200];
+const MESSAGE_COLOR: [u8; 3] = [255, 100, 100];
+
+/// Calculate the initial/minimum particle count based on screen size.
+fn calculate_particle_count(width: u32, height: u32) -> usize {
+    let total_pixels = u64::from(width) * u64::from(height);
+    let count = (total_pixels + PIXELS_PER_PARTICLE / 2) / PIXELS_PER_PARTICLE;
+    // Safe: count is always small (screen pixels / 375000)
+    usize::try_from(count.max(2)).unwrap_or(2)
+}
+
+/// Convert physical pixels to logical pixels given a scale factor.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn physical_to_logical(physical: u32, scale_factor: f64) -> u32 {
+    (f64::from(physical) / scale_factor) as u32
+}
+
+/// Main application state for the particle simulation.
+pub struct App {
+    // Configuration
+    spawn_at_collision: bool,
+    min_particles_override: Option<usize>,
+    gravity_percent: i32,
+    wall_elasticity: f64,
+    particle_elasticity: f64,
+    requested_width: Option<u32>,
+    requested_height: Option<u32>,
+    force_cpu: bool,
+    trails: bool,
+    particle_radius: f64,
+    color_mode: ColorMode,
+    verbose: bool,
+
+    // Subsystems
+    audio: Audio,
+    rng: StdRng,
+
+    // Window and rendering (initialized on resume)
+    render: Option<RenderContext>,
+    scale_factor: f64,
+
+    // Simulation state
+    particles: Vec<Particle>,
+    explosion: Option<Explosion>,
+    spawn_times: VecDeque<Instant>,
+    collision_positions: Vec<(f64, f64)>,
+    grid: SpatialGrid,
+
+    // Derived values
+    base_particle_count: usize,
+    center_x: f64,
+    center_y: f64,
+
+    // Timing
+    last_time: Instant,
+    frame_count: u64,
+    fps_timer: Instant,
+    warmup_frames: u32,
+    current_fps: f64,
+
+    // Interaction state
+    stopped: bool,
+    frames_without_motion: u32,
+    paused: bool,
+    hud_visible: bool,
+    cursor_x: f64,
+    cursor_y: f64,
+
+    // Render failure tracking (transient surface loss should not crash)
+    consecutive_render_failures: u32,
+}
+
+impl App {
+    /// Create a new App with the given configuration.
+    pub fn new(config: Config) -> Self {
+        let rng = config
+            .seed
+            .map_or_else(StdRng::from_os_rng, StdRng::seed_from_u64);
+
+        App {
+            spawn_at_collision: config.spawn_at_collision,
+            min_particles_override: config.min_particles.map(|n| n as usize),
+            gravity_percent: config.gravity,
+            wall_elasticity: config.wall_elasticity,
+            particle_elasticity: config.particle_elasticity,
+            requested_width: config.width,
+            requested_height: config.height,
+            force_cpu: config.cpu,
+            trails: config.trails,
+            particle_radius: config.particle_size,
+            color_mode: config.color_mode,
+            verbose: config.verbose,
+            audio: Audio::new(config.mute),
+            rng,
+            render: None,
+            scale_factor: 1.0,
+            particles: Vec::new(),
+            explosion: None,
+            spawn_times: VecDeque::new(),
+            collision_positions: Vec::with_capacity(100),
+            grid: SpatialGrid::new(),
+            base_particle_count: 0,
+            center_x: 0.0,
+            center_y: 0.0,
+            last_time: Instant::now(),
+            frame_count: 0,
+            fps_timer: Instant::now(),
+            warmup_frames: WARMUP_FRAMES,
+            current_fps: 0.0,
+            stopped: false,
+            frames_without_motion: 0,
+            paused: false,
+            hud_visible: false,
+            cursor_x: 0.0,
+            cursor_y: 0.0,
+            consecutive_render_failures: 0,
+        }
+    }
+
+    /// Initialize simulation state: particles, geometry, and timers.
+    fn init_simulation_state(&mut self, width: u32, height: u32) {
+        self.base_particle_count = self
+            .min_particles_override
+            .unwrap_or_else(|| calculate_particle_count(width, height));
+        println!(
+            "Base particle count{}: {}",
+            if self.min_particles_override.is_some() {
+                " (override)"
+            } else {
+                " for this screen"
+            },
+            self.base_particle_count
+        );
+
+        self.particles = (0..self.base_particle_count)
+            .map(|_| Particle::new_random(&mut self.rng, width, height))
+            .collect();
+
+        self.center_x = f64::from(width) / 2.0;
+        self.center_y = f64::from(height) / 2.0;
+
+        self.explosion = None;
+        self.spawn_times.clear();
+        self.collision_positions.clear();
+        self.stopped = false;
+        self.frames_without_motion = 0;
+        self.last_time = Instant::now();
+        self.fps_timer = Instant::now();
+        self.frame_count = 0;
+    }
+
+    /// Reset the simulation to its initial state (R key).
+    fn reset(&mut self) {
+        if let Some((width, height)) = self.dimensions() {
+            println!("Simulation reset");
+            self.init_simulation_state(width, height);
+            self.paused = false;
+        }
+    }
+
+    fn dimensions(&self) -> Option<(u32, u32)> {
+        self.render.as_ref().map(|r| (r.width(), r.height()))
+    }
+
+    /// Trigger an explosion centered at `(x, y)`, dooming a `kill_ratio`
+    /// share of particles while leaving at least `min_survivors` alive.
+    fn trigger_explosion(
+        &mut self,
+        x: f64,
+        y: f64,
+        width: u32,
+        height: u32,
+        kill_ratio: f64,
+        min_survivors: usize,
+    ) {
+        let max_radius = max_radius_from(x, y, width, height);
+        let explosion = Explosion::new(
+            &mut self.rng,
+            x,
+            y,
+            max_radius,
+            &mut self.particles,
+            kill_ratio,
+            min_survivors,
+        );
+        println!(
+            "Explosion will kill {} of {} particles",
+            explosion.doomed_count,
+            self.particles.len()
+        );
+        self.explosion = Some(explosion);
+        self.audio.play_explosion();
+        self.spawn_times.clear();
+    }
+
+    /// Update explosion state, processing kills and checking completion.
+    fn update_explosion(&mut self, dt: f64) {
+        if let Some(ref mut exp) = self.explosion {
+            exp.update(dt);
+            exp.process_kills(&mut self.particles);
+
+            if !exp.active {
+                println!(
+                    "Explosion complete: killed {}, {} remaining",
+                    exp.killed_count,
+                    self.particles.len()
+                );
+                self.explosion = None;
+            }
+        }
+    }
+
+    /// Handle particle spawning from collisions, potentially triggering explosions.
+    fn handle_spawning(&mut self, now: Instant, width: u32, height: u32) {
+        // Track spawn rate over sliding window
+        let spawn_window = std::time::Duration::from_secs_f64(SPAWN_RATE_WINDOW);
+        if let Some(cutoff) = now.checked_sub(spawn_window) {
+            while self.spawn_times.front().is_some_and(|&t| t < cutoff) {
+                self.spawn_times.pop_front();
+            }
+        }
+
+        // Spawn new particles or trigger explosion
+        if !self.collision_positions.is_empty() && self.explosion.is_none() {
+            if self.spawn_times.len() >= SPAWN_RATE_THRESHOLD {
+                println!(
+                    "EXPLOSION! Spawn rate {} per second exceeded threshold, {} total particles",
+                    self.spawn_times.len(),
+                    self.particles.len()
+                );
+                // In collision-spawning mode the action is wherever particles
+                // are densest; center the blast on the recent collisions.
+                let (ex, ey) = if self.spawn_at_collision {
+                    self.collision_centroid()
+                        .unwrap_or((self.center_x, self.center_y))
+                } else {
+                    (self.center_x, self.center_y)
+                };
+                self.trigger_explosion(
+                    ex,
+                    ey,
+                    width,
+                    height,
+                    EXPLOSION_KILL_RATIO,
+                    self.base_particle_count,
+                );
+            } else {
+                for i in 0..self.collision_positions.len() {
+                    let (cx, cy) = self.collision_positions[i];
+                    let particle = if self.spawn_at_collision {
+                        Particle::new_at_position(&mut self.rng, cx, cy)
+                    } else {
+                        Particle::new_at_center(&mut self.rng, width, height)
+                    };
+                    self.particles.push(particle);
+                    self.spawn_times.push_back(now);
+                }
+            }
+        }
+    }
+
+    /// Average position of this frame's collisions.
+    fn collision_centroid(&self) -> Option<(f64, f64)> {
+        if self.collision_positions.is_empty() {
+            return None;
+        }
+        let (sx, sy) = self
+            .collision_positions
+            .iter()
+            .fold((0.0, 0.0), |(ax, ay), (x, y)| (ax + x, ay + y));
+        #[allow(clippy::cast_precision_loss)]
+        let n = self.collision_positions.len() as f64;
+        Some((sx / n, sy / n))
+    }
+
+    /// Check if all particles have stopped moving.
+    fn check_motion(&mut self) {
+        if self.explosion.is_none() {
+            if has_motion(&self.particles) {
+                self.frames_without_motion = 0;
+            } else {
+                self.frames_without_motion += 1;
+                if self.frames_without_motion >= MOTION_STOPPED_FRAMES {
+                    println!("All motion has stopped");
+                    self.stopped = true;
+                }
+            }
+        }
+    }
+
+    /// Update FPS counter and (in verbose mode) print statistics.
+    fn update_fps_counter(&mut self) {
+        self.frame_count += 1;
+        let elapsed = self.fps_timer.elapsed().as_secs_f64();
+        if elapsed >= 1.0 {
+            // Precision loss acceptable: frame_count is small relative to f64 mantissa
+            #[allow(clippy::cast_precision_loss)]
+            let fps = self.frame_count as f64 / elapsed;
+            self.current_fps = fps;
+            if self.verbose {
+                println!("FPS: {fps:.1}, Particles: {}", self.particles.len());
+            }
+            self.frame_count = 0;
+            self.fps_timer = Instant::now();
+        }
+    }
+
+    /// Advance the simulation by `dt` seconds.
+    fn simulate(&mut self, dt: f64, now: Instant, width: u32, height: u32) {
+        self.update_explosion(dt);
+
+        let gravity_multiplier = f64::from(self.gravity_percent) / 100.0;
+        self.collision_positions.clear();
+        let substeps = substep_count(&self.particles, dt, self.particle_radius);
+        let sub_dt = dt / f64::from(substeps);
+
+        let mut max_energy = 0.0f64;
+        for _ in 0..substeps {
+            update_physics(
+                &mut self.particles,
+                sub_dt,
+                width,
+                height,
+                self.particle_radius,
+                gravity_multiplier,
+                self.wall_elasticity,
+            );
+            let energy = handle_collisions(
+                &mut self.particles,
+                &mut self.grid,
+                &mut self.collision_positions,
+                width,
+                height,
+                self.particle_radius,
+                self.particle_elasticity,
+            );
+            max_energy = max_energy.max(energy);
+        }
+
+        if max_energy > 0.0 {
+            // Pan the ping toward where the collisions happened.
+            let pan = self
+                .collision_centroid()
+                .map_or(0.5, |(x, _)| x / f64::from(width));
+            #[allow(clippy::cast_possible_truncation)]
+            self.audio.play_ping(max_energy, pan as f32);
+        }
+
+        self.handle_spawning(now, width, height);
+        self.check_motion();
+    }
+
+    /// Draw the current frame and present it, tolerating transient failures.
+    fn render_frame(&mut self, width: u32, height: u32) {
+        let Some(ref mut render) = self.render else {
+            return;
+        };
+
+        let explosion_ref = self.explosion.as_ref();
+        let particles = &self.particles;
+        let trails = self.trails;
+        let radius = self.particle_radius;
+        let color_mode = self.color_mode;
+        let stopped = self.stopped;
+        let paused = self.paused;
+
+        render.with_frame(|frame| {
+            if trails {
+                fade_frame(frame);
+            } else {
+                frame.fill(0);
+            }
+            if let Some(exp) = explosion_ref {
+                render_explosion(frame, exp, width, height);
+            }
+            render_particles(frame, particles, width, height, radius, color_mode);
+            if stopped {
+                draw_text_centered(frame, width, height, "STOPPED", 72.0, MESSAGE_COLOR);
+            } else if paused {
+                draw_text_centered(frame, width, height, "PAUSED", 72.0, MESSAGE_COLOR);
+            }
+        });
+
+        if self.hud_visible {
+            // Copy the small amount of HUD state needed to avoid borrowing
+            // self while render is mutably borrowed.
+            let fps = self.current_fps;
+            let count = self.particles.len();
+            let gravity = self.gravity_percent;
+            let elasticity = self.particle_elasticity;
+            let paused = self.paused;
+            let muted = self.audio.is_muted();
+            let stopped = self.stopped;
+            render.with_frame(|frame| {
+                render_hud_lines(
+                    frame, width, height, fps, count, gravity, elasticity, paused, muted, stopped,
+                );
+            });
+        }
+
+        match render.present() {
+            Ok(()) => self.consecutive_render_failures = 0,
+            Err(e) => {
+                // Transient surface loss (display sleep, mode change) should
+                // not crash; give up only if it never recovers.
+                self.consecutive_render_failures += 1;
+                eprintln!("Render failed ({e}); skipping frame");
+            }
+        }
+    }
+
+    fn update_and_render(&mut self) {
+        let Some((width, height)) = self.dimensions() else {
+            return;
+        };
+        let now = Instant::now();
+
+        // Warmup frames for GPU initialization
+        if self.warmup_frames > 0 {
+            self.warmup_frames -= 1;
+            self.last_time = now;
+            self.fps_timer = now;
+            self.frame_count = 0;
+            self.render_frame(width, height);
+            return;
+        }
+
+        let dt = now.duration_since(self.last_time).as_secs_f64().min(0.05);
+        self.last_time = now;
+
+        if !self.stopped && !self.paused {
+            self.simulate(dt, now, width, height);
+        }
+
+        self.render_frame(width, height);
+        self.update_fps_counter();
+    }
+
+    /// Spawn a burst of particles at the cursor (left click).
+    fn spawn_burst(&mut self, x: f64, y: f64) {
+        for _ in 0..CLICK_BURST_SIZE {
+            self.particles
+                .push(Particle::new_at_position(&mut self.rng, x, y));
+        }
+        // Fresh particles are moving; leave the stopped state if we were in it.
+        self.stopped = false;
+        self.frames_without_motion = 0;
+    }
+
+    /// Handle a pressed key.
+    fn handle_key(&mut self, key_code: KeyCode, repeat: bool, event_loop: &ActiveEventLoop) {
+        match key_code {
+            KeyCode::Space | KeyCode::Escape | KeyCode::KeyQ => event_loop.exit(),
+            KeyCode::KeyP if !repeat => {
+                self.paused = !self.paused;
+                println!("{}", if self.paused { "Paused" } else { "Resumed" });
+            }
+            KeyCode::KeyR if !repeat => self.reset(),
+            KeyCode::KeyM if !repeat => {
+                let muted = self.audio.toggle_mute();
+                println!("Audio {}", if muted { "muted" } else { "unmuted" });
+            }
+            KeyCode::KeyH if !repeat => self.hud_visible = !self.hud_visible,
+            KeyCode::ArrowUp => {
+                self.gravity_percent = (self.gravity_percent + GRAVITY_STEP).min(1000);
+                println!("Gravity: {}%", self.gravity_percent);
+            }
+            KeyCode::ArrowDown => {
+                self.gravity_percent = (self.gravity_percent - GRAVITY_STEP).max(-1000);
+                println!("Gravity: {}%", self.gravity_percent);
+            }
+            KeyCode::ArrowRight => {
+                self.particle_elasticity = (self.particle_elasticity + ELASTICITY_STEP).min(1.5);
+                println!("Particle elasticity: {:.2}", self.particle_elasticity);
+            }
+            KeyCode::ArrowLeft => {
+                self.particle_elasticity = (self.particle_elasticity - ELASTICITY_STEP).max(0.0);
+                println!("Particle elasticity: {:.2}", self.particle_elasticity);
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle a mouse button press at the current cursor position.
+    fn handle_mouse(&mut self, button: MouseButton) {
+        let Some((width, height)) = self.dimensions() else {
+            return;
+        };
+        let (x, y) = (self.cursor_x, self.cursor_y);
+        match button {
+            MouseButton::Left => self.spawn_burst(x, y),
+            MouseButton::Right if self.explosion.is_none() && !self.particles.is_empty() => {
+                println!("Explosion triggered at cursor");
+                self.trigger_explosion(x, y, width, height, 1.0, MANUAL_EXPLOSION_SURVIVORS);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Draw the HUD overlay lines. Free function so it can run while the render
+/// context is mutably borrowed.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn render_hud_lines(
+    frame: &mut [u8],
+    width: u32,
+    height: u32,
+    fps: f64,
+    particle_count: usize,
+    gravity_percent: i32,
+    particle_elasticity: f64,
+    paused: bool,
+    muted: bool,
+    stopped: bool,
+) {
+    let mut lines = vec![
+        format!("FPS: {fps:.1}"),
+        format!("Particles: {particle_count}"),
+        format!("Gravity: {gravity_percent}%  (Up/Down)"),
+        format!("Elasticity: {particle_elasticity:.2}  (Left/Right)"),
+    ];
+    let mut flags = Vec::new();
+    if paused {
+        flags.push("PAUSED");
+    }
+    if muted {
+        flags.push("MUTED");
+    }
+    if stopped {
+        flags.push("STOPPED");
+    }
+    if !flags.is_empty() {
+        lines.push(flags.join("  "));
+    }
+
+    for (i, line) in lines.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let y = HUD_MARGIN + i as f32 * HUD_LINE_HEIGHT;
+        draw_text(
+            frame,
+            width,
+            height,
+            line,
+            HUD_FONT_SIZE,
+            (HUD_MARGIN, y),
+            HUD_COLOR,
+        );
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.render.is_some() {
+            return; // Already initialized
+        }
+
+        // Build window attributes based on requested size or fullscreen
+        let window_attrs = Window::default_attributes()
+            .with_title("Bouncy Particles - Press SPACE to exit")
+            .with_resizable(false);
+
+        let window_attrs = if let (Some(w), Some(h)) = (self.requested_width, self.requested_height)
+        {
+            // Validate against actual display size
+            if let Some(monitor) = event_loop.available_monitors().next() {
+                let monitor_size = monitor.size();
+                let scale = monitor.scale_factor();
+                let max_width = physical_to_logical(monitor_size.width, scale);
+                let max_height = physical_to_logical(monitor_size.height, scale);
+
+                if w > max_width || h > max_height {
+                    eprintln!(
+                        "Error: Requested size {w}x{h} exceeds display size {max_width}x{max_height}"
+                    );
+                    event_loop.exit();
+                    return;
+                }
+            }
+            println!("Window mode: {w}x{h} (fixed size)");
+            window_attrs.with_inner_size(LogicalSize::new(w, h))
+        } else {
+            println!("Window mode: fullscreen");
+            window_attrs.with_fullscreen(Some(Fullscreen::Borderless(None)))
+        };
+
+        let window = event_loop
+            .create_window(window_attrs)
+            .expect("Failed to create window");
+
+        let physical_size = window.inner_size();
+        let scale_factor = window.scale_factor();
+        let width = physical_to_logical(physical_size.width, scale_factor);
+        let height = physical_to_logical(physical_size.height, scale_factor);
+        self.scale_factor = scale_factor;
+
+        println!(
+            "Window: {}x{} physical, {}x{} logical, scale={}",
+            physical_size.width, physical_size.height, width, height, scale_factor
+        );
+
+        self.init_simulation_state(width, height);
+
+        let window = Rc::new(window);
+        self.render = Some(create_render_context(
+            &window,
+            width,
+            height,
+            physical_size.width,
+            physical_size.height,
+            self.force_cpu,
+        ));
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(key_code),
+                        state: ElementState::Pressed,
+                        repeat,
+                        ..
+                    },
+                ..
+            } => {
+                self.handle_key(key_code, repeat, event_loop);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_x = position.x / self.scale_factor;
+                self.cursor_y = position.y / self.scale_factor;
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => {
+                self.handle_mouse(button);
+            }
+            WindowEvent::Resized(new_size) => {
+                if let Some(ref mut render) = self.render {
+                    render.resize_surface(new_size.width, new_size.height);
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // The window is not resizable, but DPI can change when it
+                // moves between monitors. The simulation keeps its original
+                // logical size; log the change deliberately. (winit also
+                // fires this at window creation with the initial factor.)
+                if (scale_factor - self.scale_factor).abs() > f64::EPSILON {
+                    println!(
+                        "Scale factor changed: {} -> {scale_factor} (simulation keeps original size)",
+                        self.scale_factor
+                    );
+                }
+                self.scale_factor = scale_factor;
+            }
+            WindowEvent::RedrawRequested => {
+                self.update_and_render();
+                if self.consecutive_render_failures >= MAX_RENDER_FAILURES {
+                    eprintln!("Rendering failed repeatedly; exiting");
+                    event_loop.exit();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(ref render) = self.render {
+            render.window().request_redraw();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn particle_count_scales_with_screen_size() {
+        assert_eq!(calculate_particle_count(100, 100), 2); // minimum enforced
+        assert_eq!(calculate_particle_count(1920, 1080), 6);
+        assert_eq!(calculate_particle_count(3840, 2160), 22);
+    }
+
+    #[test]
+    fn physical_to_logical_conversion() {
+        assert_eq!(physical_to_logical(3024, 2.0), 1512);
+        assert_eq!(physical_to_logical(1920, 1.0), 1920);
+    }
+}

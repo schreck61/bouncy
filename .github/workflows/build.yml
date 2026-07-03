@@ -43,6 +43,12 @@ jobs:
             artifact_name: bouncy.exe
             asset_name: bouncy-windows-arm64
 
+          # Linux x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: bouncy
+            asset_name: bouncy-linux-x64
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -61,6 +67,12 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           # Windows SDK includes necessary libraries
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
@@ -137,6 +149,9 @@ jobs:
 
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --all-features
 
   # Verify DCO sign-off on commits
   dco:

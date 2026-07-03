@@ -1,7 +1,8 @@
 [package]
 name = "bouncy"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
+rust-version = "1.85"
 authors = ["James O. Schreckengast"]
 license = "MIT"
 description = "GPU-accelerated particle simulation with elastic collisions, gravity, and explosive chain reactions"
@@ -12,9 +13,13 @@ categories = ["games", "graphics", "simulation"]
 [dependencies]
 pixels = "0.15"
 winit = "0.30"
-rand = "0.8"
+rand = "0.9"
 pollster = "0.4"
-rodio = "0.19"
+rodio = { version = "0.21", default-features = false, features = ["playback"] }
 softbuffer = "0.4"
 ouroboros = "0.18"
-rusttype = "0.9"
+clap = { version = "4.6", features = ["derive"] }
+ab_glyph = "0.2"
+
+[profile.release]
+lto = "thin"
