@@ -42,6 +42,23 @@ pub fn fade_frame(frame: &mut [u8]) {
     }
 }
 
+/// Darken a rectangle of the frame in place (a semi-transparent black
+/// overlay), clipped to the frame bounds. `rect` is `(x, y, w, h)`; `keep`
+/// is the numerator of the retained brightness out of 256, e.g. 77 keeps
+/// ~30%.
+pub fn dim_rect(frame: &mut [u8], width: u32, height: u32, rect: (u32, u32, u32, u32), keep: u16) {
+    let (x0, y0, w, h) = rect;
+    let x1 = x0.saturating_add(w).min(width);
+    let y1 = y0.saturating_add(h).min(height);
+    for y in y0.min(height)..y1 {
+        let row = (y as usize * width as usize + x0 as usize) * 4;
+        let row_end = (y as usize * width as usize + x1 as usize) * 4;
+        for byte in &mut frame[row..row_end] {
+            *byte = ((u16::from(*byte) * keep) >> 8) as u8;
+        }
+    }
+}
+
 /// Color of a particle under the given color mode.
 fn particle_color(particle: &Particle, color_mode: ColorMode) -> [u8; 4] {
     match color_mode {
@@ -371,6 +388,20 @@ mod tests {
     fn scale_map_identity_when_equal() {
         let map = scale_map(100, 100);
         assert!(map.iter().enumerate().all(|(i, &v)| i == v));
+    }
+
+    #[test]
+    fn dim_rect_darkens_only_inside_and_clips() {
+        let (width, height) = (10u32, 10u32);
+        let mut frame = vec![200u8; (width * height * 4) as usize];
+        // Rectangle extends past the frame edge: must clip, not panic.
+        dim_rect(&mut frame, width, height, (5, 5, 100, 100), 77);
+
+        let px = |x: u32, y: u32| frame[((y * width + x) * 4) as usize];
+        assert_eq!(px(0, 0), 200, "outside must be untouched");
+        assert_eq!(px(4, 5), 200, "left of rect must be untouched");
+        assert!(px(5, 5) < 200 / 2, "inside must be darkened");
+        assert!(px(9, 9) < 200 / 2, "clipped corner must be darkened");
     }
 
     #[test]

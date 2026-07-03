@@ -11,9 +11,9 @@ use crate::physics::{
     CollisionRecorder, Particle, SpatialGrid, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
 };
 use crate::render::{
-    create_render_context, fade_frame, render_explosion, render_particles, RenderContext,
+    create_render_context, dim_rect, fade_frame, render_explosion, render_particles, RenderContext,
 };
-use crate::text::{draw_text, draw_text_centered};
+use crate::text::{draw_text, draw_text_centered, measure_text};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use std::collections::VecDeque;
@@ -801,9 +801,26 @@ fn cursor_should_be_visible(
     !focused || !inside || well_active || idle_secs < CURSOR_HIDE_DELAY
 }
 
-/// Draw the HUD overlay lines top-left. Free function so it can run inside
-/// the frame closure while the render context is mutably borrowed.
+/// Draw the HUD overlay lines top-left over a dark semi-transparent panel
+/// so the text stays readable against a dense particle field. Free function
+/// so it can run inside the frame closure while the render context is
+/// mutably borrowed.
 fn draw_hud(frame: &mut [u8], width: u32, height: u32, lines: &[String]) {
+    const PANEL_PADDING: f32 = 6.0;
+    const PANEL_KEEP: u16 = 77; // retain ~30% background brightness
+
+    let max_line_width = lines
+        .iter()
+        .filter(|line| !line.is_empty())
+        .map(|line| measure_text(line, HUD_FONT_SIZE).0)
+        .fold(0.0f32, f32::max);
+    #[allow(clippy::cast_precision_loss)]
+    let panel_height = lines.len() as f32 * HUD_LINE_HEIGHT + 2.0 * PANEL_PADDING;
+    let panel_width = max_line_width + 2.0 * (HUD_MARGIN + PANEL_PADDING);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let panel = (0, 0, panel_width.ceil() as u32, panel_height.ceil() as u32);
+    dim_rect(frame, width, height, panel, PANEL_KEEP);
+
     for (i, line) in lines.iter().enumerate() {
         if line.is_empty() {
             continue;
