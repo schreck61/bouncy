@@ -9,7 +9,8 @@ use crate::config::Config;
 use crate::explosion::{max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_WINDOW};
 use crate::physics::{
     apply_attractor, handle_collisions, has_motion, substep_count, update_physics,
-    CollisionRecorder, Particle, SpatialGrid, SpawnSite, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
+    CollisionRecorder, Particle, SpatialGrid, SpawnSite, COLLISION_ENERGY_NORMALIZER,
+    INITIAL_VELOCITY, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -39,6 +40,11 @@ const SPAWN_JITTER: f64 = 4.0;
 /// explosions (which keep the screen-based base count alive), a manual blast
 /// wipes everything it touches down to the simulation's hard minimum.
 const MANUAL_EXPLOSION_SURVIVORS: usize = 2;
+/// Half-angle of the ejection cone around the outward spawn direction.
+const SPAWN_CONE_HALF_ANGLE: f64 = std::f64::consts::FRAC_PI_4;
+/// Ejection speed at zero collision energy, as a fraction of
+/// `INITIAL_VELOCITY`; full energy ejects at the full initial velocity.
+const SPAWN_SPEED_MIN_FRACTION: f64 = 0.25;
 
 /// Calculate the initial/minimum particle count based on screen size.
 pub fn calculate_particle_count(width: u32, height: u32) -> usize {
@@ -373,20 +379,48 @@ impl Simulation {
                 break;
             }
             let site = self.collisions.sites()[i];
-            let candidate = if self.spawn_at_collision {
+            let spawn = if self.spawn_at_collision {
+                // Eject the newborn outward, away from the collision.
                 self.free_position_beside(site, first_new)
+                    .map(|(pos, out)| {
+                        let (vx, vy) = self.ejection_velocity(out, site.energy);
+                        (pos, vx, vy)
+                    })
             } else {
-                self.free_position_near_center(first_new)
+                // Classic center fountain: random direction and speed.
+                self.free_position_near_center(first_new).map(|pos| {
+                    let angle = self.rng.random_range(0.0..std::f64::consts::TAU);
+                    let speed = self
+                        .rng
+                        .random_range(INITIAL_VELOCITY * 0.5..INITIAL_VELOCITY);
+                    (pos, speed * angle.cos(), speed * angle.sin())
+                })
             };
 
-            if let Some((x, y)) = candidate {
+            if let Some(((x, y), vx, vy)) = spawn {
                 self.particles
-                    .push(Particle::new_at_position(&mut self.rng, x, y));
+                    .push(Particle::new_moving(&mut self.rng, x, y, vx, vy));
                 self.spawn_times.push_back(now);
                 spawned += 1;
             }
         }
         false
+    }
+
+    /// Velocity for a particle ejected from a collision: aimed within a
+    /// cone around the outward direction `out` (away from both parents,
+    /// which recede along the collision normal), at a speed scaled by the
+    /// collision energy — hard impacts eject fast fragments, grazing ones
+    /// release slow debris.
+    fn ejection_velocity(&mut self, out: (f64, f64), energy: f64) -> (f64, f64) {
+        let angle = out.1.atan2(out.0)
+            + self
+                .rng
+                .random_range(-SPAWN_CONE_HALF_ANGLE..SPAWN_CONE_HALF_ANGLE);
+        let t = (energy / COLLISION_ENERGY_NORMALIZER).clamp(0.0, 1.0);
+        let speed =
+            (SPAWN_SPEED_MIN_FRACTION + (1.0 - SPAWN_SPEED_MIN_FRACTION) * t) * INITIAL_VELOCITY;
+        (speed * angle.cos(), speed * angle.sin())
     }
 
     /// Pick a spawn position beside a collision site, guaranteed clear of
@@ -397,7 +431,15 @@ impl Simulation {
     /// into occupied space would re-collide instantly and spawn again, a
     /// self-feeding cascade that inflates the spawn rate far beyond what the
     /// moving particles actually produce.
-    fn free_position_beside(&mut self, site: SpawnSite, first_new: usize) -> Option<(f64, f64)> {
+    ///
+    /// Returns the position together with its outward unit direction (away
+    /// from the collision midpoint), which orients the ejection velocity.
+    #[allow(clippy::type_complexity)]
+    fn free_position_beside(
+        &mut self,
+        site: SpawnSite,
+        first_new: usize,
+    ) -> Option<((f64, f64), (f64, f64))> {
         let diameter = self.particle_radius * 2.0;
         // Perpendicular offset: distance to each parent (at ~diameter/2
         // along the normal) is sqrt(off^2 + (d/2)^2) > diameter. The
@@ -410,26 +452,16 @@ impl Simulation {
         let side = if self.rng.random_bool(0.5) { 1.0 } else { -1.0 };
 
         let candidates = [
-            (
-                site.x + side * px * perp_offset,
-                site.y + side * py * perp_offset,
-            ),
-            (
-                site.x - side * px * perp_offset,
-                site.y - side * py * perp_offset,
-            ),
-            (
-                site.x + site.nx * normal_offset,
-                site.y + site.ny * normal_offset,
-            ),
-            (
-                site.x - site.nx * normal_offset,
-                site.y - site.ny * normal_offset,
-            ),
+            ((side * px, side * py), perp_offset),
+            ((-side * px, -side * py), perp_offset),
+            ((site.nx, site.ny), normal_offset),
+            ((-site.nx, -site.ny), normal_offset),
         ];
-        candidates
-            .into_iter()
-            .find(|&(x, y)| self.spawn_position_is_free(x, y, first_new))
+        candidates.into_iter().find_map(|((dx, dy), offset)| {
+            let (x, y) = (site.x + dx * offset, site.y + dy * offset);
+            self.spawn_position_is_free(x, y, first_new)
+                .then_some(((x, y), (dx, dy)))
+        })
     }
 
     /// Pick a free spawn position near the screen center (default mode),
@@ -609,9 +641,64 @@ mod tests {
                 );
             }
             // And it appears beside the collision, not somewhere random.
-            let site_dist = spawn.distance_squared_from(400.0, 300.0).sqrt();
+            let ox = spawn.x - 400.0;
+            let oy = spawn.y - 300.0;
+            let site_dist = (ox * ox + oy * oy).sqrt();
             assert!(site_dist < diameter * 3.0, "spawn stays near the site");
+
+            // Ejected outward: its velocity lies within the 45-degree cone
+            // around the direction away from the collision midpoint.
+            let speed = spawn.speed();
+            let outward_dot = (spawn.vx * ox + spawn.vy * oy) / (speed * site_dist);
+            assert!(
+                outward_dot >= (std::f64::consts::FRAC_PI_4.cos() - 1e-9),
+                "spawn must move away from the collision (cos angle = {outward_dot:.3})"
+            );
         }
+    }
+
+    #[test]
+    fn ejection_speed_scales_with_collision_energy() {
+        // Same setup, different closing speeds: the newborn from a hard
+        // collision must leave faster than one from a grazing collision.
+        let spawn_speed = |closing: f64| -> f64 {
+            let mut s = Simulation::new(
+                &Config::try_parse_from([
+                    "bouncy",
+                    "--seed",
+                    "9",
+                    "--min-particles",
+                    "2",
+                    "--spawn-at-collision",
+                ])
+                .unwrap(),
+                800,
+                600,
+            );
+            arm_collision(&mut s, 400.0, 300.0);
+            s.particles[0].vx = closing;
+            s.particles[1].vx = -closing;
+            // Slow closings take a few steps to reach contact.
+            let now = Instant::now();
+            for _ in 0..20 {
+                s.step(0.01, now, None);
+                if s.particle_count() == 3 {
+                    break;
+                }
+            }
+            assert_eq!(s.particle_count(), 3);
+            s.particles[2].speed()
+        };
+
+        let slow = spawn_speed(30.0);
+        let fast = spawn_speed(600.0);
+        assert!(
+            fast > slow * 1.5,
+            "hard collisions must eject faster fragments: slow={slow:.0}, fast={fast:.0}"
+        );
+        // Both stay within the ejection speed envelope.
+        assert!(slow >= SPAWN_SPEED_MIN_FRACTION * INITIAL_VELOCITY - 1e-9);
+        assert!(fast <= INITIAL_VELOCITY + 1e-9);
     }
 
     #[test]

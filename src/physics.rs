@@ -83,14 +83,16 @@ pub struct CollisionResult {
     pub ny: f64,
 }
 
-/// Where and how a collision happened, kept for spawning: the midpoint plus
-/// the collision normal along which the parent particles separated.
+/// Where and how a collision happened, kept for spawning: the midpoint, the
+/// collision normal along which the parent particles separated, and the
+/// collision energy (which sets the ejected particle's speed).
 #[derive(Copy, Clone)]
 pub struct SpawnSite {
     pub x: f64,
     pub y: f64,
     pub nx: f64,
     pub ny: f64,
+    pub energy: f64,
 }
 
 /// A particle in the simulation with position, velocity, and color.
@@ -119,9 +121,14 @@ impl Particle {
         Self::new_at_position(rng, x, y)
     }
 
-    /// Create a particle at a specific position.
+    /// Create a particle at a specific position with a random velocity.
     pub fn new_at_position(rng: &mut impl Rng, x: f64, y: f64) -> Self {
         let (vx, vy) = Self::random_velocity(rng);
+        Self::new_moving(rng, x, y, vx, vy)
+    }
+
+    /// Create a particle with a specific position and velocity.
+    pub fn new_moving(rng: &mut impl Rng, x: f64, y: f64, vx: f64, vy: f64) -> Self {
         Particle {
             x,
             y,
@@ -480,6 +487,7 @@ pub fn handle_collisions(
                     y: result.mid_y,
                     nx: result.nx,
                     ny: result.ny,
+                    energy: result.energy,
                 },
             );
         }
