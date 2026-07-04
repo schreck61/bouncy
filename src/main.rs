@@ -24,6 +24,7 @@ mod config;
 mod explosion;
 mod physics;
 mod render;
+mod sim;
 mod text;
 
 use app::App;
