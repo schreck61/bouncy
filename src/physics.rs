@@ -77,6 +77,20 @@ pub struct CollisionResult {
     pub mid_x: f64,
     /// Midpoint y-coordinate where the collision occurred.
     pub mid_y: f64,
+    /// Unit collision normal (the direction from p1 to p2); the separated
+    /// parents lie along this line, so space perpendicular to it is clear.
+    pub nx: f64,
+    pub ny: f64,
+}
+
+/// Where and how a collision happened, kept for spawning: the midpoint plus
+/// the collision normal along which the parent particles separated.
+#[derive(Copy, Clone)]
+pub struct SpawnSite {
+    pub x: f64,
+    pub y: f64,
+    pub nx: f64,
+    pub ny: f64,
 }
 
 /// A particle in the simulation with position, velocity, and color.
@@ -225,6 +239,8 @@ pub fn try_elastic_collision(
         energy,
         mid_x,
         mid_y,
+        nx,
+        ny,
     })
 }
 
@@ -391,14 +407,14 @@ fn pair_mut(particles: &mut [Particle], i: usize, j: usize) -> (&mut Particle, &
 /// spawn accounting stays one-per-pair-per-frame, as it was before
 /// substepping existed. Clear at the start of each frame.
 pub struct CollisionRecorder {
-    positions: Vec<(f64, f64)>,
+    sites: Vec<SpawnSite>,
     seen_pairs: std::collections::HashSet<(usize, usize)>,
 }
 
 impl CollisionRecorder {
     pub fn new() -> Self {
         CollisionRecorder {
-            positions: Vec::with_capacity(100),
+            sites: Vec::with_capacity(100),
             seen_pairs: std::collections::HashSet::new(),
         }
     }
@@ -407,25 +423,25 @@ impl CollisionRecorder {
     /// substep — particle indices are stable within a frame, so pairs remain
     /// identifiable across its substeps.
     pub fn clear(&mut self) {
-        self.positions.clear();
+        self.sites.clear();
         self.seen_pairs.clear();
     }
 
-    /// Record a contact between particles `i` and `j`; the position is kept
+    /// Record a contact between particles `i` and `j`; the site is kept
     /// only the first time the pair collides this frame.
-    fn record(&mut self, i: usize, j: usize, x: f64, y: f64) {
+    fn record(&mut self, i: usize, j: usize, site: SpawnSite) {
         if self.seen_pairs.insert((i.min(j), i.max(j))) {
-            self.positions.push((x, y));
+            self.sites.push(site);
         }
     }
 
-    /// Spawn positions recorded this frame (one per colliding pair).
-    pub fn positions(&self) -> &[(f64, f64)] {
-        &self.positions
+    /// Spawn sites recorded this frame (one per colliding pair).
+    pub fn sites(&self) -> &[SpawnSite] {
+        &self.sites
     }
 
     pub fn is_empty(&self) -> bool {
-        self.positions.is_empty()
+        self.sites.is_empty()
     }
 }
 
@@ -456,7 +472,16 @@ pub fn handle_collisions(
         let (p1, p2) = pair_mut(particles, i, j);
         if let Some(result) = try_elastic_collision(p1, p2, radius, particle_elasticity) {
             max_energy = max_energy.max(result.energy);
-            recorder.record(i, j, result.mid_x, result.mid_y);
+            recorder.record(
+                i,
+                j,
+                SpawnSite {
+                    x: result.mid_x,
+                    y: result.mid_y,
+                    nx: result.nx,
+                    ny: result.ny,
+                },
+            );
         }
     });
 
@@ -684,7 +709,7 @@ mod tests {
                 1.0,
             );
             assert_eq!(
-                recorder.positions().len(),
+                recorder.sites().len(),
                 brute_pairs,
                 "grid and brute force disagree"
             );
@@ -711,7 +736,7 @@ mod tests {
             RADIUS,
             1.0,
         );
-        assert_eq!(recorder.positions().len(), 1);
+        assert_eq!(recorder.sites().len(), 1);
     }
 
     #[test]
@@ -763,7 +788,7 @@ mod tests {
             "test setup must produce repeated contact, got {contact_substeps}"
         );
         assert_eq!(
-            recorder.positions().len(),
+            recorder.sites().len(),
             1,
             "a pair may spawn only once per frame"
         );
@@ -780,7 +805,7 @@ mod tests {
         // is per frame, not forever.
         let contact_substeps = run_frame(&mut particles, &mut recorder);
         assert!(contact_substeps >= 1);
-        assert_eq!(recorder.positions().len(), 1);
+        assert_eq!(recorder.sites().len(), 1);
     }
 
     #[test]

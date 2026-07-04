@@ -120,7 +120,7 @@ A uniform spatial grid (rebuilt each substep with zero steady-state allocations)
 
 ### Particle Spawning
 
-Each collision between particles spawns a new particle. By default, new particles appear at the screen center. With the `--spawn-at-collision` flag, they spawn at the collision point, creating more localized cluster effects.
+Each collision between particles spawns a new particle. By default, new particles appear near the screen center. With the `--spawn-at-collision` flag, they spawn beside the collision point — placed perpendicular to the collision axis so the new particle never materializes inside the particles that spawned it. Spawns are only skipped when the surrounding space is genuinely occupied by other particles (dense clusters), which keeps the spawn rate tied to real collisions.
 
 ### Explosion Trigger
 

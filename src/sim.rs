@@ -9,7 +9,7 @@ use crate::config::Config;
 use crate::explosion::{max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_WINDOW};
 use crate::physics::{
     apply_attractor, handle_collisions, has_motion, substep_count, update_physics,
-    CollisionRecorder, Particle, SpatialGrid, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
+    CollisionRecorder, Particle, SpatialGrid, SpawnSite, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -363,58 +363,119 @@ impl Simulation {
             return true;
         }
 
-        let diameter = self.particle_radius * 2.0;
-        let jitter = SPAWN_JITTER.max(diameter);
         // Grid state from the last collision pass covers exactly the
         // pre-spawn particles; particles spawned this frame are checked
-        // separately below.
+        // separately in `spawn_position_is_free`.
         let first_new = self.particles.len();
         let mut spawned = 0;
-        for i in 0..self.collisions.positions().len() {
+        for i in 0..self.collisions.sites().len() {
             if spawned >= MAX_SPAWNS_PER_FRAME || self.particles.len() >= self.max_particles {
                 break;
             }
-            let (bx, by) = if self.spawn_at_collision {
-                self.collisions.positions()[i]
+            let site = self.collisions.sites()[i];
+            let candidate = if self.spawn_at_collision {
+                self.free_position_beside(site, first_new)
             } else {
-                (self.center_x, self.center_y)
+                self.free_position_near_center(first_new)
             };
-            let x = bx + self.rng.random_range(-jitter..jitter);
-            let y = by + self.rng.random_range(-jitter..jitter);
 
-            // Spawn only into free space. Materializing a particle inside
-            // another re-collides instantly and spawns again: a self-feeding
-            // cascade that inflates the spawn rate far beyond what the
-            // moving particles actually produce.
-            let blocked = self
-                .grid
-                .any_within(&self.particles[..first_new], x, y, diameter)
-                || self.particles[first_new..]
-                    .iter()
-                    .any(|p| p.distance_squared_from(x, y) < diameter * diameter);
-            if blocked {
-                continue;
+            if let Some((x, y)) = candidate {
+                self.particles
+                    .push(Particle::new_at_position(&mut self.rng, x, y));
+                self.spawn_times.push_back(now);
+                spawned += 1;
             }
-
-            self.particles
-                .push(Particle::new_at_position(&mut self.rng, x, y));
-            self.spawn_times.push_back(now);
-            spawned += 1;
         }
         false
     }
 
+    /// Pick a spawn position beside a collision site, guaranteed clear of
+    /// the colliding parents: they separated along the collision normal, so
+    /// a point one diameter out along the *perpendicular* cannot touch them.
+    /// Falls back to points along the normal beyond each parent, and gives
+    /// up only when third-party particles occupy every candidate — spawning
+    /// into occupied space would re-collide instantly and spawn again, a
+    /// self-feeding cascade that inflates the spawn rate far beyond what the
+    /// moving particles actually produce.
+    fn free_position_beside(&mut self, site: SpawnSite, first_new: usize) -> Option<(f64, f64)> {
+        let diameter = self.particle_radius * 2.0;
+        // Perpendicular offset: distance to each parent (at ~diameter/2
+        // along the normal) is sqrt(off^2 + (d/2)^2) > diameter. The
+        // along-normal fallbacks sit beyond the far side of each parent.
+        let perp_offset = diameter + 0.5;
+        let normal_offset = 1.5 * diameter + 1.0;
+        let (px, py) = (-site.ny, site.nx);
+        // Randomize which side is tried first so spawns don't drift to one
+        // side of the collision plane.
+        let side = if self.rng.random_bool(0.5) { 1.0 } else { -1.0 };
+
+        let candidates = [
+            (
+                site.x + side * px * perp_offset,
+                site.y + side * py * perp_offset,
+            ),
+            (
+                site.x - side * px * perp_offset,
+                site.y - side * py * perp_offset,
+            ),
+            (
+                site.x + site.nx * normal_offset,
+                site.y + site.ny * normal_offset,
+            ),
+            (
+                site.x - site.nx * normal_offset,
+                site.y - site.ny * normal_offset,
+            ),
+        ];
+        candidates
+            .into_iter()
+            .find(|&(x, y)| self.spawn_position_is_free(x, y, first_new))
+    }
+
+    /// Pick a free spawn position near the screen center (default mode),
+    /// trying a few jittered draws before giving up.
+    fn free_position_near_center(&mut self, first_new: usize) -> Option<(f64, f64)> {
+        const CENTER_SPAWN_ATTEMPTS: usize = 4;
+        let jitter = SPAWN_JITTER.max(self.particle_radius * 2.0);
+        for _ in 0..CENTER_SPAWN_ATTEMPTS {
+            let x = self.center_x + self.rng.random_range(-jitter..jitter);
+            let y = self.center_y + self.rng.random_range(-jitter..jitter);
+            if self.spawn_position_is_free(x, y, first_new) {
+                return Some((x, y));
+            }
+        }
+        None
+    }
+
+    /// A spawn position is usable when it lies inside the arena and at
+    /// least one diameter from every existing particle (checked via the
+    /// grid for pre-existing particles and linearly for this frame's
+    /// spawns, which the grid cannot see yet).
+    fn spawn_position_is_free(&self, x: f64, y: f64, first_new: usize) -> bool {
+        let diameter = self.particle_radius * 2.0;
+        let r = self.particle_radius;
+        if x < r || x > f64::from(self.width) - r || y < r || y > f64::from(self.height) - r {
+            return false;
+        }
+        !self
+            .grid
+            .any_within(&self.particles[..first_new], x, y, diameter)
+            && !self.particles[first_new..]
+                .iter()
+                .any(|p| p.distance_squared_from(x, y) < diameter * diameter)
+    }
+
     /// Average position of this step's collisions.
     fn collision_centroid(&self) -> Option<(f64, f64)> {
-        let positions = self.collisions.positions();
-        if positions.is_empty() {
+        let sites = self.collisions.sites();
+        if sites.is_empty() {
             return None;
         }
-        let (sx, sy) = positions
+        let (sx, sy) = sites
             .iter()
-            .fold((0.0, 0.0), |(ax, ay), (x, y)| (ax + x, ay + y));
+            .fold((0.0, 0.0), |(ax, ay), s| (ax + s.x, ay + s.y));
         #[allow(clippy::cast_precision_loss)]
-        let n = positions.len() as f64;
+        let n = sites.len() as f64;
         Some((sx / n, sy / n))
     }
 
@@ -501,36 +562,56 @@ mod tests {
         assert_eq!(calculate_particle_count(3840, 2160), 22);
     }
 
-    /// Re-arm the same collision until a spawn lands. The free-space rule
-    /// legitimately rejects spawn positions that fall inside the colliding
-    /// pair, so a single collision guarantees an *attempt*, not a spawn.
-    /// Returns the events of the step that spawned.
-    fn step_until_spawn(s: &mut Simulation, site: (f64, f64), now: Instant) -> StepEvents {
-        let before = s.particle_count();
-        for _ in 0..50 {
-            arm_collision(s, site.0, site.1);
-            let events = s.step(0.01, now, None);
-            assert!(
-                events.max_collision_energy > 0.0,
-                "the armed pair must collide every step"
-            );
-            if s.particle_count() > before {
-                return events;
-            }
-        }
-        panic!("a spawn must land within 50 armed collisions");
+    #[test]
+    fn collision_spawns_exactly_one_particle() {
+        let mut s = sim(&["--min-particles", "2"]);
+        arm_collision(&mut s, 200.0, 300.0);
+        let events = s.step(0.01, Instant::now(), None);
+        assert!(events.max_collision_energy > 0.0);
+        assert_eq!(s.particle_count(), 3, "one collision spawns one particle");
+        assert_eq!(s.spawn_times.len(), 1);
+        // Pan reflects the collision site (x=200 of 800).
+        assert!((events.collision_pan - 0.25).abs() < 0.05);
+        // Default mode spawns near the screen center.
+        let spawn = &s.particles[2];
+        assert!((spawn.x - 400.0).abs() < 10.0 && (spawn.y - 300.0).abs() < 10.0);
     }
 
     #[test]
-    fn collision_spawns_a_particle_and_reports_energy() {
-        let mut s = sim(&["--min-particles", "2"]);
-        let now = Instant::now();
-        let events = step_until_spawn(&mut s, (400.0, 300.0), now);
-        assert!(events.max_collision_energy > 0.0);
-        assert_eq!(s.particle_count(), 3, "one successful spawn");
-        assert_eq!(s.spawn_times.len(), 1);
-        // Pan reflects the collision site (x=400 of 800 => center).
-        assert!((events.collision_pan - 0.5).abs() < 0.05);
+    fn spawn_beside_collision_never_touches_the_parents() {
+        for seed in ["1", "2", "3", "4", "5"] {
+            let mut s = Simulation::new(
+                &Config::try_parse_from([
+                    "bouncy",
+                    "--seed",
+                    seed,
+                    "--min-particles",
+                    "2",
+                    "--spawn-at-collision",
+                ])
+                .unwrap(),
+                800,
+                600,
+            );
+            arm_collision(&mut s, 400.0, 300.0);
+            s.step(0.01, Instant::now(), None);
+            assert_eq!(s.particle_count(), 3, "every collision must spawn");
+
+            let spawn = &s.particles[2];
+            let diameter = s.particle_radius() * 2.0;
+            for parent in &s.particles[..2] {
+                let dist = parent.distance_squared_from(spawn.x, spawn.y).sqrt();
+                assert!(
+                    dist > diameter,
+                    "spawn at ({:.1}, {:.1}) overlaps a parent (dist {dist:.2})",
+                    spawn.x,
+                    spawn.y
+                );
+            }
+            // And it appears beside the collision, not somewhere random.
+            let site_dist = spawn.distance_squared_from(400.0, 300.0).sqrt();
+            assert!(site_dist < diameter * 3.0, "spawn stays near the site");
+        }
     }
 
     #[test]
@@ -568,13 +649,15 @@ mod tests {
     #[test]
     fn below_threshold_spawns_instead_of_exploding() {
         let mut s = sim(&["--min-particles", "30", "--explosion-threshold", "5"]);
+        arm_collision(&mut s, 200.0, 300.0);
         let now = Instant::now();
         // 4 of 5 window slots used: the next spawn must not explode.
         for _ in 0..4 {
             s.spawn_times.push_back(now);
         }
 
-        step_until_spawn(&mut s, (400.0, 300.0), now);
+        let events = s.step(0.01, now, None);
+        assert!(!events.explosion_started);
         assert!(s.explosion().is_none());
         assert_eq!(s.particle_count(), 31);
         assert_eq!(s.spawn_times.len(), 5);
@@ -583,13 +666,15 @@ mod tests {
     #[test]
     fn threshold_zero_never_explodes() {
         let mut s = sim(&["--min-particles", "2", "--explosion-threshold", "0"]);
+        arm_collision(&mut s, 200.0, 300.0);
         let now = Instant::now();
         // A spawn window far beyond any positive threshold.
         for _ in 0..5000 {
             s.spawn_times.push_back(now);
         }
 
-        step_until_spawn(&mut s, (400.0, 300.0), now);
+        let events = s.step(0.01, now, None);
+        assert!(!events.explosion_started);
         assert!(s.explosion().is_none());
         assert_eq!(s.particle_count(), 3, "spawning continues instead");
     }
@@ -622,10 +707,10 @@ mod tests {
 
     #[test]
     fn spawns_are_blocked_in_crowded_space() {
-        let mut s = sim(&["--min-particles", "2"]);
+        let mut s = sim(&["--min-particles", "2", "--spawn-at-collision"]);
         arm_collision(&mut s, 400.0, 300.0);
-        // Pack the neighborhood of the collision site solid: any candidate
-        // spawn position within the jitter radius overlaps something.
+        // Pack the neighborhood of the collision site solid: every candidate
+        // spawn position (perpendicular and along-normal) overlaps something.
         for gx in 0..13 {
             for gy in 0..13 {
                 let mut p = Particle::new_at_position(
