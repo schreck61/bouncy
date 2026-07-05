@@ -45,6 +45,9 @@ fn main() {
     if config.flow {
         println!("Flow field: enabled");
     }
+    if config.wells > 0 {
+        println!("Pinned wells: {}", config.wells);
+    }
     if config.gravity != 100 {
         println!("Gravity: {}%", config.gravity);
     }

@@ -61,6 +61,9 @@ pub enum Preset {
     /// Many tiny particles drifting on the flow field with soft walls.
     #[value(alias = "snow")]
     Peace,
+    /// Weightless particles slung around pinned gravity wells; trails
+    /// paint the orbits.
+    Orbits,
 }
 
 impl Preset {
@@ -70,6 +73,7 @@ impl Preset {
             Preset::Blob => "blob",
             Preset::Billiards => "billiards",
             Preset::Peace => "peace",
+            Preset::Orbits => "orbits",
         }
     }
 
@@ -200,6 +204,33 @@ impl Preset {
                     0,
                 );
             }
+            Preset::Orbits => {
+                // A binary system of pinned wells with weightless particles
+                // launched slowly enough to stay bound; trails paint the
+                // orbit ribbons.
+                set(matches, "wells", &mut config.wells, 2);
+                set(matches, "gravity", &mut config.gravity, 0);
+                set(matches, "trails", &mut config.trails, true);
+                set(matches, "initial_speed", &mut config.initial_speed, 220.0);
+                set(
+                    matches,
+                    "min_particles",
+                    &mut config.min_particles,
+                    Some(40),
+                );
+                set(
+                    matches,
+                    "spawn_mode",
+                    &mut config.spawn_mode,
+                    SpawnMode::Off,
+                );
+                set(
+                    matches,
+                    "explosion_threshold",
+                    &mut config.explosion_threshold,
+                    0,
+                );
+            }
         }
     }
 }
@@ -230,6 +261,12 @@ pub struct Config {
     /// currents (toggle at runtime with F)
     #[arg(long)]
     pub flow: bool,
+
+    /// Pin this many attracting gravity wells around the screen center at
+    /// startup (pin more at runtime with W; the range mirrors
+    /// MAX_PINNED_WELLS)
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=16))]
+    pub wells: u32,
 
     /// Set starting/minimum particle count
     #[arg(long, value_parser = clap::value_parser!(u32).range(2..=100))]
@@ -348,6 +385,8 @@ const CONTROLS_HELP: &str = "Controls:
   X                  Toggle matter mechanics (fusion/fission)
   F                  Toggle the flow field
   G (hold)           Gravity well at the cursor; Shift+G repels
+  W                  Pin a persistent well at the cursor; Shift+W repels
+  Shift+R            Clear all pinned wells
   Left click         Spawn a burst of particles at the cursor
   Right click        Trigger an explosion at the cursor
 
@@ -388,6 +427,7 @@ mod tests {
         let config = parse(&[]).unwrap();
         assert!(!config.spawn_at_collision);
         assert_eq!(config.min_particles, None);
+        assert_eq!(config.wells, 0);
         assert_eq!(config.gravity, 100);
         assert_eq!(config.wall_elasticity, 1.0);
         assert_eq!(config.particle_elasticity, 1.0);
@@ -475,6 +515,8 @@ mod tests {
     fn rejects_out_of_range_values() {
         assert!(parse(&["--min-particles", "1"]).is_err());
         assert!(parse(&["--min-particles", "101"]).is_err());
+        assert!(parse(&["--wells", "17"]).is_err());
+        assert!(parse(&["--wells", "-1"]).is_err());
         assert!(parse(&["--gravity", "1001"]).is_err());
         assert!(parse(&["--wall-elasticity", "1.6"]).is_err());
         assert!(parse(&["--wall-elasticity", "-0.1"]).is_err());
@@ -540,6 +582,14 @@ mod tests {
         assert_eq!(config.spawn_mode, SpawnMode::Collision);
         assert!(config.trails);
         assert_eq!(config.color_mode, ColorMode::Velocity);
+
+        let config = parse(&["--preset", "orbits"]).unwrap();
+        assert_eq!(config.wells, 2);
+        assert_eq!(config.gravity, 0);
+        assert!(config.trails);
+        assert_eq!(config.initial_speed, 220.0);
+        assert_eq!(config.spawn_mode, SpawnMode::Off);
+        assert_eq!(config.explosion_threshold, 0);
     }
 
     #[test]
@@ -563,5 +613,9 @@ mod tests {
         let config = parse(&["--preset", "peace", "--min-particles", "10"]).unwrap();
         assert_eq!(config.min_particles, Some(10));
         assert!(config.flow);
+
+        let config = parse(&["--preset", "orbits", "--wells", "5"]).unwrap();
+        assert_eq!(config.wells, 5, "explicit well count wins");
+        assert!(config.trails, "rest of preset still applies");
     }
 }

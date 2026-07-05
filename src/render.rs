@@ -7,6 +7,7 @@
 use crate::config::ColorMode;
 use crate::explosion::{Explosion, EXPLOSION_RING_WIDTH};
 use crate::physics::{color_component, hsv_to_rgba, Particle, INITIAL_VELOCITY};
+use crate::sim::Well;
 use ouroboros::self_referencing;
 use pixels::{Pixels, SurfaceTexture};
 use std::num::NonZeroU32;
@@ -92,6 +93,47 @@ pub fn render_particles(
         for dy in -r..=r {
             for dx in -r..=r {
                 if disc && dx * dx + dy * dy > r_sq {
+                    continue;
+                }
+                let px = cx + dx;
+                let py = cy + dy;
+
+                // Bounds check: px/py are valid pixel coordinates after this check
+                #[allow(clippy::cast_sign_loss)]
+                if px >= 0 && (px as u32) < width && py >= 0 && (py as u32) < height {
+                    let idx = ((py as u32) as usize * width as usize + (px as u32) as usize) * 4;
+                    frame[idx..idx + 4].copy_from_slice(&color);
+                }
+            }
+        }
+    }
+}
+
+/// Radius of the pinned-well marker ring in pixels.
+const WELL_MARKER_RADIUS: i32 = 7;
+/// Marker color for attracting wells (cool cyan: pulls inward).
+const WELL_ATTRACT_COLOR: [u8; 4] = [120, 220, 255, 255];
+/// Marker color for repelling wells (hot orange: pushes outward).
+const WELL_REPEL_COLOR: [u8; 4] = [255, 140, 80, 255];
+
+/// Draw each pinned well as a small ring with a center dot: cyan for
+/// attractors, orange for repellers.
+pub fn render_wells(frame: &mut [u8], wells: &[Well], width: u32, height: u32) {
+    let r = WELL_MARKER_RADIUS;
+    for well in wells {
+        let color = if well.direction >= 0 {
+            WELL_ATTRACT_COLOR
+        } else {
+            WELL_REPEL_COLOR
+        };
+        let cx = coord_to_pixel(well.x);
+        let cy = coord_to_pixel(well.y);
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let d2 = dx * dx + dy * dy;
+                let on_ring = d2 <= r * r && d2 >= (r - 1) * (r - 1);
+                let on_dot = d2 <= 1;
+                if !(on_ring || on_dot) {
                     continue;
                 }
                 let px = cx + dx;
@@ -435,6 +477,41 @@ mod tests {
             render_particles(&mut frame, &particles, width, height, ColorMode::Velocity);
         }
         assert!(frame.iter().any(|&b| b > 0));
+    }
+
+    #[test]
+    fn render_wells_draws_markers_and_clips() {
+        let (width, height) = (50u32, 40u32);
+        let mut frame = vec![0u8; (width * height * 4) as usize];
+        let wells = [
+            Well {
+                x: 25.0,
+                y: 20.0,
+                direction: 1,
+            },
+            Well {
+                x: 0.0,
+                y: 0.0,
+                direction: -1,
+            }, // clipped at the corner
+            Well {
+                x: -20.0,
+                y: 100.0,
+                direction: 1,
+            }, // fully off-screen
+        ];
+        render_wells(&mut frame, &wells, width, height);
+
+        let px = |x: u32, y: u32| {
+            let idx = ((y * width + x) * 4) as usize;
+            [frame[idx], frame[idx + 1], frame[idx + 2], frame[idx + 3]]
+        };
+        // Attractor: cyan on the ring and at the center dot, hollow between.
+        assert_eq!(px(25, 13), WELL_ATTRACT_COLOR, "top of the ring");
+        assert_eq!(px(25, 20), WELL_ATTRACT_COLOR, "center dot");
+        assert_eq!(px(25, 16), [0, 0, 0, 0], "ring interior stays hollow");
+        // Repeller: its ring reaches into the frame despite clipping.
+        assert_eq!(px(7, 0), WELL_REPEL_COLOR, "clipped repeller still drawn");
     }
 
     #[test]

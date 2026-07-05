@@ -55,11 +55,12 @@ cargo run --release -- --spawn-at-collision
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--preset <NAME>` | Apply a curated settings bundle: `fireworks`, `blob`, `billiards`, or `peace`; explicit options override the preset | None |
+| `--preset <NAME>` | Apply a curated settings bundle: `fireworks`, `blob`, `billiards`, `peace`, or `orbits`; explicit options override the preset | None |
 | `--spawn-mode <MODE>` | Where collision spawns appear: `center`, `collision`, or `off` | center |
 | `--spawn-at-collision` | Alias for `--spawn-mode collision` (kept for compatibility) | Off |
 | `--matter` | Enable matter mechanics: slow contacts fuse particles, hard impacts split them | Off |
 | `--flow` | Enable the ambient flow field (drifting wind currents) | Off |
+| `--wells <N>` | Pin N attracting gravity wells around the screen center at startup (0-16) | 0 |
 | `--min-particles <N>` | Override the starting/minimum particle count (2-100) | Screen-based |
 | `--gravity <PERCENT>` | Set gravity as percentage of standard (-1000 to 1000); negative values cause upward gravity | 100 |
 | `--wall-elasticity <VALUE>` | Set wall bounce elasticity (0.0-1.5); 0.0 = sticks, 1.0 = elastic, >1.0 = adds energy | 1.0 |
@@ -99,6 +100,8 @@ cargo run --release -- --spawn-at-collision
 | `X` | Toggle matter mechanics (fusion/fission) |
 | `F` | Toggle the flow field |
 | `G` (hold) | Gravity well: attract particles toward the cursor; `Shift+G` repels |
+| `W` | Pin a persistent gravity well at the cursor; `Shift+W` pins a repeller |
+| `Shift+R` | Clear all pinned wells |
 | Left click | Spawn a burst of particles at the cursor |
 | Right click | Trigger an explosion centered at the cursor (kills every particle the ring reaches, down to a minimum of 2 survivors) |
 
@@ -131,6 +134,10 @@ When enabled, collision energy decides each contact's outcome:
 
 With spawning off (`--preset blob` uses this), population and size distribution become emergent: slow regions coarsen into heavy blobs, violent regions shatter them back into dust.
 
+### Gravity Wells (`G` / `W`)
+
+Holding `G` creates a temporary gravity well at the cursor (`Shift+G` repels). Pressing `W` pins a persistent well at the cursor instead — `Shift+W` pins a repeller, and `Shift+R` clears them all (up to 16 pinned wells; `R` restores any `--wells` startup layout). Both use a softened (Plummer) force profile — the pull peaks near the softening radius and falls off as 1/d² — with pinned wells at half the held well's strength. Multiple pinned wells make binary systems, slingshots, and, with trails on, orbit painting. Attractors are marked with a cyan ring, repellers with an orange one.
+
 ### The Flow Field (`--flow` / `F`)
 
 A slowly drifting field of currents that particles are *entrained into*: each particle is dragged toward the local current's velocity rather than being pushed by a force, so speeds stay bounded at the current's speed (with gentle gusts) instead of accumulating. Best appreciated with trails enabled or the `peace` preset.
@@ -145,6 +152,7 @@ A slowly drifting field of currents that particles are *entrained into*: each pa
 | `blob` | Slow heavy blobs that merge and drift; matter mechanics, no explosions |
 | `billiards` | A fixed rack of large elastic balls; pure collision physics |
 | `peace` | Many tiny particles drifting on the flow field with soft walls |
+| `orbits` | Weightless particles slung around a binary system of pinned wells; trails paint the orbits |
 
 ### Collision Detection
 

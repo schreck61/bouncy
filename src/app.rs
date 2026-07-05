@@ -7,9 +7,10 @@
 use crate::audio::Audio;
 use crate::config::{ColorMode, Config};
 use crate::render::{
-    create_render_context, dim_rect, fade_frame, render_explosion, render_particles, RenderContext,
+    create_render_context, dim_rect, fade_frame, render_explosion, render_particles, render_wells,
+    RenderContext,
 };
-use crate::sim::{Simulation, Well};
+use crate::sim::{Simulation, Well, MAX_PINNED_WELLS};
 use crate::text::{draw_text, draw_text_centered, measure_text};
 use std::rc::Rc;
 use std::time::Instant;
@@ -227,6 +228,10 @@ impl App {
                 if sim.matter { "on" } else { "off" },
                 if sim.flow { "on" } else { "off" },
             ),
+            format!(
+                "Wells: {}  (W pins, Shift+W repels)",
+                sim.pinned_wells().len()
+            ),
         ]);
 
         let mut flags = Vec::new();
@@ -255,6 +260,7 @@ impl App {
                 "T trails   C colors   B spawn mode",
                 "X matter (fusion/fission)   F flow field",
                 "G hold: gravity well (Shift+G repels)",
+                "W pin well (Shift+W repel, Shift+R clear)",
                 "Click: burst   Right-click: explosion",
                 "H cycle HUD   Space/Esc/Q quit",
             ] {
@@ -294,6 +300,7 @@ impl App {
             if let Some(exp) = sim.explosion() {
                 render_explosion(frame, exp, width, height);
             }
+            render_wells(frame, sim.pinned_wells(), width, height);
             render_particles(frame, sim.particles(), width, height, color_mode);
             if stopped {
                 draw_text_centered(frame, width, height, "STOPPED", 72.0, MESSAGE_COLOR);
@@ -390,9 +397,14 @@ impl App {
             KeyCode::KeyN if self.paused => self.step_once = true,
             KeyCode::KeyR if !repeat => {
                 if let Some(ref mut sim) = self.sim {
-                    println!("Simulation reset");
-                    sim.reset();
-                    self.paused = false;
+                    if self.shift_down {
+                        let cleared = sim.clear_wells();
+                        println!("Cleared {cleared} pinned wells");
+                    } else {
+                        println!("Simulation reset");
+                        sim.reset();
+                        self.paused = false;
+                    }
                 }
             }
             KeyCode::KeyM if !repeat => {
@@ -437,6 +449,26 @@ impl App {
                 // The well moves particles; leave the stopped state if set.
                 if let Some(ref mut sim) = self.sim {
                     sim.wake();
+                }
+            }
+            KeyCode::KeyW if !repeat => {
+                if let Some(ref mut sim) = self.sim {
+                    let direction = if self.shift_down { -1 } else { 1 };
+                    if sim.pin_well(self.cursor_x, self.cursor_y, direction) {
+                        println!(
+                            "Pinned {} well at ({:.0}, {:.0}); {} total (Shift+R clears)",
+                            if direction > 0 {
+                                "attracting"
+                            } else {
+                                "repelling"
+                            },
+                            self.cursor_x,
+                            self.cursor_y,
+                            sim.pinned_wells().len()
+                        );
+                    } else {
+                        println!("Pinned well limit reached ({MAX_PINNED_WELLS})");
+                    }
                 }
             }
             KeyCode::ArrowUp => {

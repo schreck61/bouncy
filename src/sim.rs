@@ -61,6 +61,14 @@ const MAX_RADIUS_FACTOR: f64 = 6.0;
 /// Fragment separation speed as a fraction of the collision energy.
 const FISSION_KICK_FRACTION: f64 = 0.3;
 
+/// Maximum number of pinned gravity wells (the W key and --wells stop here;
+/// keep the clap range on --wells in sync).
+pub const MAX_PINNED_WELLS: usize = 16;
+/// Peak acceleration of each pinned well: half the held well's strength, so
+/// a constellation of pinned wells shapes orbits without overpowering the
+/// cursor well or flinging everything into the walls.
+const PINNED_WELL_STRENGTH: f64 = WELL_STRENGTH / 2.0;
+
 /// Calculate the initial/minimum particle count based on screen size.
 pub fn calculate_particle_count(width: u32, height: u32) -> usize {
     let total_pixels = u64::from(width) * u64::from(height);
@@ -81,7 +89,8 @@ pub struct StepEvents {
     pub explosion_started: bool,
 }
 
-/// The cursor gravity well as seen by the simulation for one step.
+/// A gravity well: the transient cursor well (held G) passed into each
+/// step, or a persistent pinned well (W key) stored in the simulation.
 #[derive(Copy, Clone)]
 pub struct Well {
     pub x: f64,
@@ -115,6 +124,10 @@ pub struct Simulation {
 
     // State
     particles: Vec<Particle>,
+    /// Persistent gravity wells pinned with the W key (or --wells).
+    pinned_wells: Vec<Well>,
+    /// Attractors pinned at startup (--wells); reset restores this layout.
+    initial_wells: usize,
     explosion: Option<Explosion>,
     spawn_times: VecDeque<Instant>,
     collisions: CollisionRecorder,
@@ -175,6 +188,8 @@ impl Simulation {
             matter: config.matter,
             flow: config.flow,
             particles: Vec::new(),
+            pinned_wells: Vec::new(),
+            initial_wells: config.wells as usize,
             explosion: None,
             spawn_times: VecDeque::new(),
             collisions: CollisionRecorder::new(),
@@ -189,7 +204,33 @@ impl Simulation {
             center_y: f64::from(height) / 2.0,
         };
         sim.populate();
+        sim.place_initial_wells();
         sim
+    }
+
+    /// Pin the startup attractors (--wells): a single well sits at the
+    /// screen center, several spread evenly on a circle around it.
+    fn place_initial_wells(&mut self) {
+        let count = self.initial_wells.min(MAX_PINNED_WELLS);
+        if count == 1 {
+            self.pinned_wells.push(Well {
+                x: self.center_x,
+                y: self.center_y,
+                direction: 1,
+            });
+            return;
+        }
+        let ring = f64::from(self.width.min(self.height)) / 4.0;
+        for i in 0..count {
+            #[allow(clippy::cast_precision_loss)]
+            let angle =
+                std::f64::consts::TAU * i as f64 / count as f64 - std::f64::consts::FRAC_PI_2;
+            self.pinned_wells.push(Well {
+                x: self.center_x + ring * angle.cos(),
+                y: self.center_y + ring * angle.sin(),
+                direction: 1,
+            });
+        }
     }
 
     fn populate(&mut self) {
@@ -206,9 +247,12 @@ impl Simulation {
             .collect();
     }
 
-    /// Reset to the initial population and clear all transient state.
+    /// Reset to the initial population and clear all transient state,
+    /// restoring the startup well layout.
     pub fn reset(&mut self) {
         self.populate();
+        self.pinned_wells.clear();
+        self.place_initial_wells();
         self.explosion = None;
         self.spawn_times.clear();
         self.collisions.clear();
@@ -228,6 +272,10 @@ impl Simulation {
 
     pub fn explosion(&self) -> Option<&Explosion> {
         self.explosion.as_ref()
+    }
+
+    pub fn pinned_wells(&self) -> &[Well] {
+        &self.pinned_wells
     }
 
     pub fn stopped(&self) -> bool {
@@ -262,6 +310,25 @@ impl Simulation {
         }
         // Fresh particles are moving; leave the stopped state if we were in it.
         self.wake();
+    }
+
+    /// Pin a persistent gravity well at `(x, y)` (W key; Shift+W pins a
+    /// repeller). Returns false once the well limit is reached.
+    pub fn pin_well(&mut self, x: f64, y: f64, direction: i8) -> bool {
+        if self.pinned_wells.len() >= MAX_PINNED_WELLS {
+            return false;
+        }
+        self.pinned_wells.push(Well { x, y, direction });
+        // The new well is about to move particles.
+        self.wake();
+        true
+    }
+
+    /// Remove all pinned wells, returning how many were cleared.
+    pub fn clear_wells(&mut self) -> usize {
+        let cleared = self.pinned_wells.len();
+        self.pinned_wells.clear();
+        cleared
     }
 
     /// Trigger a cursor explosion at `(x, y)`: kills everything the ring
@@ -326,6 +393,15 @@ impl Simulation {
                     sub_dt,
                 );
             }
+            for w in &self.pinned_wells {
+                apply_attractor(
+                    &mut self.particles,
+                    w.x,
+                    w.y,
+                    f64::from(w.direction) * PINNED_WELL_STRENGTH,
+                    sub_dt,
+                );
+            }
             if self.flow {
                 apply_flow(&mut self.particles, self.sim_time, sub_dt);
             }
@@ -365,7 +441,7 @@ impl Simulation {
         }
 
         events.explosion_started = self.handle_spawning(now);
-        self.check_motion(well.is_some() || self.flow);
+        self.check_motion(well.is_some() || self.flow || !self.pinned_wells.is_empty());
         events
     }
 
@@ -1104,6 +1180,102 @@ mod tests {
     }
 
     #[test]
+    fn pinned_well_accelerates_particles_and_suppresses_stopped() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.particles[0].x = 100.0;
+        s.particles[0].y = 300.0;
+        s.particles[1].x = 700.0;
+        s.particles[1].y = 300.0;
+        assert!(s.pin_well(400.0, 300.0, 1));
+
+        let now = Instant::now();
+        for _ in 0..=MOTION_STOPPED_FRAMES {
+            s.step(0.001, now, None);
+        }
+        assert!(
+            !s.stopped(),
+            "a pinned well must suppress the stopped state"
+        );
+        assert!(
+            s.particles[0].vx > 0.0,
+            "left particle accelerates toward the pinned well"
+        );
+        assert!(
+            s.particles[1].vx < 0.0,
+            "right particle accelerates toward the pinned well"
+        );
+    }
+
+    #[test]
+    fn pinned_repeller_pushes_particles_away() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.particles[0].x = 300.0;
+        s.particles[0].y = 300.0;
+        s.particles[1].x = 500.0;
+        s.particles[1].y = 300.0;
+        assert!(s.pin_well(400.0, 300.0, -1));
+
+        s.step(0.01, Instant::now(), None);
+        assert!(s.particles[0].vx < 0.0, "left particle pushed left");
+        assert!(s.particles[1].vx > 0.0, "right particle pushed right");
+    }
+
+    #[test]
+    fn clear_wells_removes_all_and_motion_detection_resumes() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.pin_well(100.0, 100.0, 1);
+        s.pin_well(200.0, 200.0, -1);
+        assert_eq!(s.pinned_wells().len(), 2);
+
+        assert_eq!(s.clear_wells(), 2);
+        assert!(s.pinned_wells().is_empty());
+
+        let now = Instant::now();
+        for _ in 0..=MOTION_STOPPED_FRAMES {
+            s.step(0.001, now, None);
+        }
+        assert!(s.stopped(), "with no wells left, motion detection resumes");
+    }
+
+    #[test]
+    fn pinned_wells_are_capped() {
+        let mut s = sim(&["--min-particles", "2"]);
+        for _ in 0..MAX_PINNED_WELLS {
+            assert!(s.pin_well(400.0, 300.0, 1));
+        }
+        assert!(!s.pin_well(400.0, 300.0, 1), "cap must refuse the next pin");
+        assert_eq!(s.pinned_wells().len(), MAX_PINNED_WELLS);
+    }
+
+    #[test]
+    fn wells_flag_prepins_attractors_and_reset_restores_them() {
+        let mut s = sim(&["--wells", "3", "--min-particles", "2"]);
+        assert_eq!(s.pinned_wells().len(), 3);
+        for w in s.pinned_wells() {
+            assert_eq!(w.direction, 1, "startup wells attract");
+            assert!(w.x > 0.0 && w.x < 800.0 && w.y > 0.0 && w.y < 600.0);
+        }
+
+        s.pin_well(50.0, 50.0, -1);
+        assert_eq!(s.pinned_wells().len(), 4);
+        s.reset();
+        assert_eq!(s.pinned_wells().len(), 3, "reset restores startup wells");
+        assert!(s.pinned_wells().iter().all(|w| w.direction == 1));
+    }
+
+    #[test]
+    fn single_startup_well_sits_at_the_center() {
+        let s = sim(&["--wells", "1", "--min-particles", "2"]);
+        let wells = s.pinned_wells();
+        assert_eq!(wells.len(), 1);
+        assert!((wells[0].x - 400.0).abs() < 1e-9);
+        assert!((wells[0].y - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn spawn_mode_off_never_spawns() {
         let mut s = sim(&["--min-particles", "2", "--spawn-mode", "off"]);
         arm_collision(&mut s, 200.0, 300.0);
@@ -1251,6 +1423,7 @@ mod tests {
         let mut s = sim(&["--min-particles", "10"]);
         s.spawn_burst(400.0, 300.0);
         s.trigger_manual_explosion(400.0, 300.0);
+        s.pin_well(100.0, 100.0, 1);
         s.stopped = true;
         s.spawn_times.push_back(Instant::now());
 
@@ -1259,6 +1432,7 @@ mod tests {
         assert!(s.explosion().is_none());
         assert!(!s.stopped());
         assert!(s.spawn_times.is_empty());
+        assert!(s.pinned_wells().is_empty(), "no startup wells to restore");
     }
 
     #[test]
