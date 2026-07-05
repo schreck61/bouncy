@@ -54,20 +54,22 @@ pub enum Preset {
     /// Low gravity, energetic collision sprays, trails, velocity colors.
     Fireworks,
     /// Slow heavy blobs that merge and drift; fusion/fission enabled.
-    LavaLamp,
+    #[value(alias = "lava-lamp")]
+    Blob,
     /// A fixed rack of large elastic balls; no spawning, no explosions.
     Billiards,
     /// Many tiny particles drifting on the flow field with soft walls.
-    Snow,
+    #[value(alias = "snow")]
+    Peace,
 }
 
 impl Preset {
     pub fn label(self) -> &'static str {
         match self {
             Preset::Fireworks => "fireworks",
-            Preset::LavaLamp => "lava-lamp",
+            Preset::Blob => "blob",
             Preset::Billiards => "billiards",
-            Preset::Snow => "snow",
+            Preset::Peace => "peace",
         }
     }
 
@@ -115,7 +117,7 @@ impl Preset {
                     Some(20),
                 );
             }
-            Preset::LavaLamp => {
+            Preset::Blob => {
                 set(matches, "matter", &mut config.matter, true);
                 // Weightless, lossless, and slow: blobs drift below the
                 // fusion threshold and merge instead of sinking into a pile.
@@ -163,7 +165,7 @@ impl Preset {
                     0,
                 );
             }
-            Preset::Snow => {
+            Preset::Peace => {
                 set(matches, "flow", &mut config.flow, true);
                 // Gentle flakes: born slow, entrained by the flow, drifting
                 // down under light gravity. Silent by default - the constant
@@ -524,14 +526,14 @@ mod tests {
         assert_eq!(config.spawn_mode, SpawnMode::Off);
         assert_eq!(config.explosion_threshold, 0);
 
-        let config = parse(&["--preset", "lava-lamp"]).unwrap();
+        let config = parse(&["--preset", "blob"]).unwrap();
         assert!(config.matter);
         assert_eq!(config.gravity, 0);
         assert_eq!(config.initial_speed, 60.0);
 
-        let config = parse(&["--preset", "snow"]).unwrap();
+        let config = parse(&["--preset", "peace"]).unwrap();
         assert!(config.flow);
-        assert!(config.mute, "snow is silent by default");
+        assert!(config.mute, "peace is silent by default");
         assert_eq!(config.initial_speed, 40.0);
 
         let config = parse(&["--preset", "fireworks"]).unwrap();
@@ -541,12 +543,24 @@ mod tests {
     }
 
     #[test]
+    fn old_preset_names_still_work_as_aliases() {
+        assert_eq!(
+            parse(&["--preset", "lava-lamp"]).unwrap().preset,
+            Some(Preset::Blob)
+        );
+        assert_eq!(
+            parse(&["--preset", "snow"]).unwrap().preset,
+            Some(Preset::Peace)
+        );
+    }
+
+    #[test]
     fn explicit_options_override_the_preset() {
         let config = parse(&["--preset", "billiards", "--gravity", "50"]).unwrap();
         assert_eq!(config.gravity, 50, "explicit flag wins");
         assert_eq!(config.particle_size, 7.0, "rest of preset still applies");
 
-        let config = parse(&["--preset", "snow", "--min-particles", "10"]).unwrap();
+        let config = parse(&["--preset", "peace", "--min-particles", "10"]).unwrap();
         assert_eq!(config.min_particles, Some(10));
         assert!(config.flow);
     }

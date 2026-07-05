@@ -55,7 +55,7 @@ cargo run --release -- --spawn-at-collision
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--preset <NAME>` | Apply a curated settings bundle: `fireworks`, `lava-lamp`, `billiards`, or `snow`; explicit options override the preset | None |
+| `--preset <NAME>` | Apply a curated settings bundle: `fireworks`, `blob`, `billiards`, or `peace`; explicit options override the preset | None |
 | `--spawn-mode <MODE>` | Where collision spawns appear: `center`, `collision`, or `off` | center |
 | `--spawn-at-collision` | Alias for `--spawn-mode collision` (kept for compatibility) | Off |
 | `--matter` | Enable matter mechanics: slow contacts fuse particles, hard impacts split them | Off |
@@ -129,11 +129,11 @@ When enabled, collision energy decides each contact's outcome:
 - **Fission** (hard impact): each participant shatters into two half-area fragments that recede perpendicular to the impact, down to a minimum of half the base radius
 - **In between**: an ordinary bounce (and a spawn, if spawning is on)
 
-With spawning off (`--preset lava-lamp` uses this), population and size distribution become emergent: slow regions coarsen into heavy blobs, violent regions shatter them back into dust.
+With spawning off (`--preset blob` uses this), population and size distribution become emergent: slow regions coarsen into heavy blobs, violent regions shatter them back into dust.
 
 ### The Flow Field (`--flow` / `F`)
 
-A slowly drifting field of currents that particles are *entrained into*: each particle is dragged toward the local current's velocity rather than being pushed by a force, so speeds stay bounded at the current's speed (with gentle gusts) instead of accumulating. Best appreciated with trails enabled or the `snow` preset.
+A slowly drifting field of currents that particles are *entrained into*: each particle is dragged toward the local current's velocity rather than being pushed by a force, so speeds stay bounded at the current's speed (with gentle gusts) instead of accumulating. Best appreciated with trails enabled or the `peace` preset.
 
 ### Presets
 
@@ -142,9 +142,9 @@ A slowly drifting field of currents that particles are *entrained into*: each pa
 | Preset | Character |
 |--------|-----------|
 | `fireworks` | Low gravity, collision sprays, trails, velocity colors, frequent explosions |
-| `lava-lamp` | Slow heavy blobs that merge and drift; matter mechanics, no explosions |
+| `blob` | Slow heavy blobs that merge and drift; matter mechanics, no explosions |
 | `billiards` | A fixed rack of large elastic balls; pure collision physics |
-| `snow` | Many tiny particles drifting on the flow field with soft walls |
+| `peace` | Many tiny particles drifting on the flow field with soft walls |
 
 ### Collision Detection
 
