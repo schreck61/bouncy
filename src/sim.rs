@@ -10,7 +10,7 @@ use crate::explosion::{max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_R
 use crate::physics::{
     apply_attractor, apply_flow, handle_collisions, has_motion, max_radius, substep_count,
     update_physics, CollisionRecorder, Particle, SpatialGrid, SpawnSite,
-    COLLISION_ENERGY_NORMALIZER, INITIAL_VELOCITY, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
+    COLLISION_ENERGY_NORMALIZER, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -43,7 +43,7 @@ const MANUAL_EXPLOSION_SURVIVORS: usize = 2;
 /// Half-angle of the ejection cone around the outward spawn direction.
 const SPAWN_CONE_HALF_ANGLE: f64 = std::f64::consts::FRAC_PI_4;
 /// Ejection speed at zero collision energy, as a fraction of
-/// `INITIAL_VELOCITY`; full energy ejects at the full initial velocity.
+/// the initial speed; full energy ejects at the full initial speed.
 const SPAWN_SPEED_MIN_FRACTION: f64 = 0.25;
 
 // Matter mechanics (--matter / X key): collision energy decides the outcome.
@@ -54,9 +54,10 @@ const FISSION_MIN_ENERGY: f64 = 700.0;
 /// Smallest fragment radius, as a fraction of the base particle radius;
 /// particles too small to yield fragments this size bounce instead.
 const MIN_RADIUS_FACTOR: f64 = 0.5;
-/// Largest fused radius, as a multiple of the base particle radius; fusions
-/// that would exceed it do not happen.
-const MAX_RADIUS_FACTOR: f64 = 3.0;
+/// Largest fused radius, as a multiple of the base particle radius. A blob
+/// that would exceed it absorbs only up to the cap (partial fusion) and the
+/// smaller particle's remainder survives.
+const MAX_RADIUS_FACTOR: f64 = 6.0;
 /// Fragment separation speed as a fraction of the collision energy.
 const FISSION_KICK_FRACTION: f64 = 0.3;
 
@@ -97,6 +98,8 @@ pub struct Simulation {
     /// Radius of newly spawned particles and the initial population; matter
     /// mechanics diversify sizes between MIN/MAX_RADIUS_FACTOR of this.
     base_radius: f64,
+    /// Top speed of newly created particles (they start at 50-100% of it).
+    initial_speed: f64,
 
     // Runtime-tunable parameters
     pub spawn_mode: SpawnMode,
@@ -163,6 +166,7 @@ impl Simulation {
             width,
             height,
             base_radius: config.particle_size,
+            initial_speed: config.initial_speed,
             spawn_mode: config.effective_spawn_mode(),
             gravity_percent: config.gravity,
             wall_elasticity: config.wall_elasticity,
@@ -190,7 +194,15 @@ impl Simulation {
 
     fn populate(&mut self) {
         self.particles = (0..self.base_particle_count)
-            .map(|_| Particle::new_random(&mut self.rng, self.width, self.height, self.base_radius))
+            .map(|_| {
+                Particle::new_random(
+                    &mut self.rng,
+                    self.width,
+                    self.height,
+                    self.base_radius,
+                    self.initial_speed,
+                )
+            })
             .collect();
     }
 
@@ -245,6 +257,7 @@ impl Simulation {
                 bx,
                 by,
                 self.base_radius,
+                self.initial_speed,
             ));
         }
         // Fresh particles are moving; leave the stopped state if we were in it.
@@ -376,36 +389,71 @@ impl Simulation {
             }
 
             if site.energy <= FUSION_MAX_ENERGY {
-                // Fusion: merge j into i, conserving area and momentum.
-                if self.particles.len() - dead.len() <= 2 {
-                    continue; // never fuse below the minimum population
-                }
-                let merged_r = (self.particles[i].mass() + self.particles[j].mass()).sqrt();
-                if merged_r > max_r {
-                    continue; // too big; the pair just bounces
-                }
+                let max_mass = max_r * max_r;
                 let (m1, m2) = (self.particles[i].mass(), self.particles[j].mass());
-                let mt = m1 + m2;
-                let (pj_x, pj_y, pj_vx, pj_vy, pj_color) = {
-                    let p = &self.particles[j];
-                    (p.x, p.y, p.vx, p.vy, p.color)
-                };
-                let p = &mut self.particles[i];
-                p.x = (p.x * m1 + pj_x * m2) / mt;
-                p.y = (p.y * m1 + pj_y * m2) / mt;
-                p.vx = (p.vx * m1 + pj_vx * m2) / mt;
-                p.vy = (p.vy * m1 + pj_vy * m2) / mt;
-                p.radius = merged_r;
-                for (c, &jc) in p.color.iter_mut().zip(pj_color.iter()).take(3) {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    {
-                        *c = ((f64::from(*c) * m1 + f64::from(jc) * m2) / mt) as u8;
+
+                if m1 + m2 <= max_mass {
+                    // Full fusion: merge j into i, conserving area, momentum,
+                    // and mass-blended color.
+                    if self.particles.len() - dead.len() <= 2 {
+                        continue; // never fuse below the minimum population
                     }
+                    let mt = m1 + m2;
+                    let (pj_x, pj_y, pj_vx, pj_vy, pj_color) = {
+                        let p = &self.particles[j];
+                        (p.x, p.y, p.vx, p.vy, p.color)
+                    };
+                    let p = &mut self.particles[i];
+                    p.x = (p.x * m1 + pj_x * m2) / mt;
+                    p.y = (p.y * m1 + pj_y * m2) / mt;
+                    p.vx = (p.vx * m1 + pj_vx * m2) / mt;
+                    p.vy = (p.vy * m1 + pj_vy * m2) / mt;
+                    p.radius = mt.sqrt();
+                    for (c, &jc) in p.color.iter_mut().zip(pj_color.iter()).take(3) {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        {
+                            *c = ((f64::from(*c) * m1 + f64::from(jc) * m2) / mt) as u8;
+                        }
+                    }
+                    touched.insert(i);
+                    touched.insert(j);
+                    dead.push(j);
+                    changed = true;
+                } else {
+                    // Partial fusion at the cap: the larger particle absorbs
+                    // mass from the smaller, up to the cap and never leaving
+                    // the smaller below the fragment minimum. The transferred
+                    // matter carries the smaller's velocity and position
+                    // share, so area and momentum are conserved exactly.
+                    let (big, small) = if m1 >= m2 { (i, j) } else { (j, i) };
+                    let (mb, ms) = (self.particles[big].mass(), self.particles[small].mass());
+                    let min_mass = min_r * min_r;
+                    let transfer = (max_mass - mb).min(ms - min_mass);
+                    if transfer <= 0.0 {
+                        continue; // absorber full or donor at minimum: bounce
+                    }
+                    let (ps_x, ps_y, ps_vx, ps_vy, ps_color) = {
+                        let p = &self.particles[small];
+                        (p.x, p.y, p.vx, p.vy, p.color)
+                    };
+                    let mb_new = mb + transfer;
+                    let p = &mut self.particles[big];
+                    p.x = (p.x * mb + ps_x * transfer) / mb_new;
+                    p.y = (p.y * mb + ps_y * transfer) / mb_new;
+                    p.vx = (p.vx * mb + ps_vx * transfer) / mb_new;
+                    p.vy = (p.vy * mb + ps_vy * transfer) / mb_new;
+                    p.radius = mb_new.sqrt();
+                    for (c, &sc) in p.color.iter_mut().zip(ps_color.iter()).take(3) {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        {
+                            *c = ((f64::from(*c) * mb + f64::from(sc) * transfer) / mb_new) as u8;
+                        }
+                    }
+                    self.particles[small].radius = (ms - transfer).sqrt();
+                    touched.insert(i);
+                    touched.insert(j);
+                    changed = true;
                 }
-                touched.insert(i);
-                touched.insert(j);
-                dead.push(j);
-                changed = true;
             } else if site.energy >= FISSION_MIN_ENERGY {
                 // Fission: shatter each participant that is large enough
                 // into two half-area fragments receding perpendicular to
@@ -538,7 +586,7 @@ impl Simulation {
                     let angle = self.rng.random_range(0.0..std::f64::consts::TAU);
                     let speed = self
                         .rng
-                        .random_range(INITIAL_VELOCITY * 0.5..INITIAL_VELOCITY);
+                        .random_range(self.initial_speed * 0.5..self.initial_speed);
                     (pos, speed * angle.cos(), speed * angle.sin())
                 })
             };
@@ -571,7 +619,7 @@ impl Simulation {
                 .random_range(-SPAWN_CONE_HALF_ANGLE..SPAWN_CONE_HALF_ANGLE);
         let t = (energy / COLLISION_ENERGY_NORMALIZER).clamp(0.0, 1.0);
         let speed =
-            (SPAWN_SPEED_MIN_FRACTION + (1.0 - SPAWN_SPEED_MIN_FRACTION) * t) * INITIAL_VELOCITY;
+            (SPAWN_SPEED_MIN_FRACTION + (1.0 - SPAWN_SPEED_MIN_FRACTION) * t) * self.initial_speed;
         (speed * angle.cos(), speed * angle.sin())
     }
 
@@ -851,8 +899,8 @@ mod tests {
             "hard collisions must eject faster fragments: slow={slow:.0}, fast={fast:.0}"
         );
         // Both stay within the ejection speed envelope.
-        assert!(slow >= SPAWN_SPEED_MIN_FRACTION * INITIAL_VELOCITY - 1e-9);
-        assert!(fast <= INITIAL_VELOCITY + 1e-9);
+        assert!(slow >= SPAWN_SPEED_MIN_FRACTION * 600.0 - 1e-9);
+        assert!(fast <= 600.0 + 1e-9);
     }
 
     #[test]
@@ -959,6 +1007,7 @@ mod tests {
                     388.0 + f64::from(gx) * 2.0,
                     288.0 + f64::from(gy) * 2.0,
                     1.5,
+                    600.0,
                 );
                 p.vx = 0.0;
                 p.vy = 0.0;
@@ -1124,6 +1173,46 @@ mod tests {
             .unwrap();
         let expected_r = 1.5 / std::f64::consts::SQRT_2;
         assert!((frag.radius - expected_r).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fusion_at_the_cap_is_partial_and_conserves_area_and_momentum() {
+        let mut s = sim(&["--min-particles", "30", "--matter", "--spawn-mode", "off"]);
+        arm_collision(&mut s, 400.0, 300.0);
+        // Slow contact between a blob near the 6x cap (r=9 for base 1.5)
+        // and a base-size donor: combined area exceeds the cap.
+        s.particles[0].vx = 25.0;
+        s.particles[1].vx = -25.0;
+        s.particles[0].radius = 8.9;
+        s.particles[1].radius = 1.5;
+        let max_r = s.base_radius * MAX_RADIUS_FACTOR;
+        let min_r = s.base_radius * MIN_RADIUS_FACTOR;
+        let area_before: f64 = s.particles.iter().map(Particle::mass).sum();
+        let momentum_before: f64 = s.particles.iter().map(|p| p.mass() * p.vx).sum();
+
+        s.step(0.01, Instant::now(), None);
+
+        assert_eq!(s.particle_count(), 30, "partial fusion kills nobody");
+        let area_after: f64 = s.particles.iter().map(Particle::mass).sum();
+        let momentum_after: f64 = s.particles.iter().map(|p| p.mass() * p.vx).sum();
+        assert!((area_before - area_after).abs() < 1e-9, "area conserved");
+        assert!(
+            (momentum_before - momentum_after).abs() < 1e-6,
+            "momentum conserved: {momentum_before} vs {momentum_after}"
+        );
+
+        let big = s.particles.iter().map(|p| p.radius).fold(0.0f64, f64::max);
+        let small = s
+            .particles
+            .iter()
+            .map(|p| p.radius)
+            .fold(f64::INFINITY, f64::min);
+        assert!(big > 8.9, "the absorber grew: {big}");
+        assert!(big <= max_r + 1e-9, "but never past the cap: {big}");
+        assert!(
+            small >= min_r - 1e-9,
+            "the donor never shrinks below the fragment minimum: {small}"
+        );
     }
 
     #[test]

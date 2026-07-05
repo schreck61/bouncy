@@ -92,6 +92,14 @@ fn pan_gains(pan: f32) -> (f32, f32) {
     (pan.cos(), pan.sin())
 }
 
+/// Minimum collision energy (closing speed) that makes an audible ping.
+const PING_MIN_ENERGY: f64 = 40.0;
+
+/// Soft contacts are inaudible.
+fn ping_audible(energy: f64) -> bool {
+    energy >= PING_MIN_ENERGY
+}
+
 /// Audio output system. Holds the output stream (if a device is available),
 /// the mute state, and pre-generated ping buffers.
 pub struct Audio {
@@ -141,7 +149,12 @@ impl Audio {
 
     /// Play a collision ping. Pitch follows collision energy; the sound is
     /// panned by `pan` (0.0 = left edge of screen, 1.0 = right edge).
+    /// Contacts below the audibility floor are silent — a drifting field of
+    /// grazing particles should not produce a constant ticking.
     pub fn play_ping(&self, energy: f64, pan: f32) {
+        if !ping_audible(energy) {
+            return;
+        }
         let Some(stream) = self.stream.as_ref().filter(|_| !self.muted) else {
             return;
         };
@@ -191,6 +204,14 @@ mod tests {
         assert_eq!(ping_bucket(1.0), PING_BUCKETS - 1);
         assert_eq!(ping_bucket(2.0), PING_BUCKETS - 1);
         assert_eq!(ping_bucket(-1.0), 0);
+    }
+
+    #[test]
+    fn soft_contacts_are_inaudible() {
+        assert!(!ping_audible(0.0));
+        assert!(!ping_audible(PING_MIN_ENERGY - 1.0));
+        assert!(ping_audible(PING_MIN_ENERGY));
+        assert!(ping_audible(500.0));
     }
 
     #[test]

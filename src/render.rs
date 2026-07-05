@@ -422,9 +422,9 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(9);
         // Particles at the extreme corners must not panic.
         let mut particles = vec![
-            Particle::new_at_position(&mut rng, 0.0, 0.0, 1.5),
-            Particle::new_at_position(&mut rng, 49.9, 39.9, 1.5),
-            Particle::new_at_position(&mut rng, -5.0, -5.0, 1.5),
+            Particle::new_at_position(&mut rng, 0.0, 0.0, 1.5, 600.0),
+            Particle::new_at_position(&mut rng, 49.9, 39.9, 1.5, 600.0),
+            Particle::new_at_position(&mut rng, -5.0, -5.0, 1.5, 600.0),
         ];
         particles[0].color = [1, 2, 3, 255];
         for radius in [1.5, 5.0, 10.0] {

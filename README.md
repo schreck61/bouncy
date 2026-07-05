@@ -70,6 +70,7 @@ cargo run --release -- --spawn-at-collision
 | `--mute` | Start with audio muted | Off |
 | `--trails` | Leave motion trails behind particles | Off |
 | `--particle-size <R>` | Particle radius in pixels (0.5-10.0) | 1.5 |
+| `--initial-speed <V>` | Top speed of newly created particles in px/sec (10-2000); they start at 50-100% of it | 600 |
 | `--color-mode <MODE>` | `solid` or `velocity` (hue follows speed) | solid |
 | `--explosion-threshold <N>` | Spawns per second that trigger an automatic explosion (0-1000); 0 disables automatic explosions (population is then capped at ~20% window coverage, at most 100,000 particles) | 30 |
 | `--seed <N>` | Seed the random number generator (reproducible starting conditions) | Random |
@@ -124,7 +125,7 @@ The simulation uses a simple but effective physics model:
 
 When enabled, collision energy decides each contact's outcome:
 
-- **Fusion** (slow contact): the two particles merge into one, conserving area, momentum, and blending color by mass. Fused giants grow up to 3x the base radius
+- **Fusion** (slow contact): the two particles merge into one, conserving area, momentum, and blending color by mass. Fused giants grow up to 6x the base radius; a blob at the cap absorbs only what fits (partial fusion) and the donor's remainder survives
 - **Fission** (hard impact): each participant shatters into two half-area fragments that recede perpendicular to the impact, down to a minimum of half the base radius
 - **In between**: an ordinary bounce (and a spawn, if spawning is on)
 
@@ -132,7 +133,7 @@ With spawning off (`--preset lava-lamp` uses this), population and size distribu
 
 ### The Flow Field (`--flow` / `F`)
 
-A slowly drifting field of layered sinusoids pushes particles along invisible currents — best appreciated with trails enabled or the `snow` preset.
+A slowly drifting field of currents that particles are *entrained into*: each particle is dragged toward the local current's velocity rather than being pushed by a force, so speeds stay bounded at the current's speed (with gentle gusts) instead of accumulating. Best appreciated with trails enabled or the `snow` preset.
 
 ### Presets
 

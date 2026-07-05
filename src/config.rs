@@ -117,14 +117,10 @@ impl Preset {
             }
             Preset::LavaLamp => {
                 set(matches, "matter", &mut config.matter, true);
-                set(matches, "gravity", &mut config.gravity, 10);
-                set(
-                    matches,
-                    "particle_elasticity",
-                    &mut config.particle_elasticity,
-                    0.2,
-                );
-                set(matches, "wall_elasticity", &mut config.wall_elasticity, 0.4);
+                // Weightless, lossless, and slow: blobs drift below the
+                // fusion threshold and merge instead of sinking into a pile.
+                set(matches, "gravity", &mut config.gravity, 0);
+                set(matches, "initial_speed", &mut config.initial_speed, 60.0);
                 set(matches, "particle_size", &mut config.particle_size, 5.0);
                 set(
                     matches,
@@ -169,6 +165,12 @@ impl Preset {
             }
             Preset::Snow => {
                 set(matches, "flow", &mut config.flow, true);
+                // Gentle flakes: born slow, entrained by the flow, drifting
+                // down under light gravity. Silent by default - the constant
+                // grazing contacts would otherwise tick continuously (M
+                // unmutes at runtime).
+                set(matches, "mute", &mut config.mute, true);
+                set(matches, "initial_speed", &mut config.initial_speed, 40.0);
                 set(matches, "gravity", &mut config.gravity, 25);
                 set(
                     matches,
@@ -268,6 +270,11 @@ pub struct Config {
     #[arg(long, default_value_t = crate::physics::DEFAULT_PARTICLE_RADIUS, value_parser = parse_particle_size)]
     pub particle_size: f64,
 
+    /// Top speed of newly created particles in pixels/sec (they start at
+    /// 50-100% of this)
+    #[arg(long, default_value_t = crate::physics::INITIAL_VELOCITY, value_parser = parse_initial_speed)]
+    pub initial_speed: f64,
+
     /// How particles are colored
     #[arg(long, value_enum, default_value_t = ColorMode::Solid)]
     pub color_mode: ColorMode,
@@ -360,6 +367,10 @@ fn parse_elasticity(s: &str) -> Result<f64, String> {
 
 fn parse_particle_size(s: &str) -> Result<f64, String> {
     parse_range_f64(s, "particle size", 0.5, 10.0)
+}
+
+fn parse_initial_speed(s: &str) -> Result<f64, String> {
+    parse_range_f64(s, "initial speed", 10.0, 2000.0)
 }
 
 #[cfg(test)]
@@ -515,10 +526,13 @@ mod tests {
 
         let config = parse(&["--preset", "lava-lamp"]).unwrap();
         assert!(config.matter);
-        assert_eq!(config.gravity, 10);
+        assert_eq!(config.gravity, 0);
+        assert_eq!(config.initial_speed, 60.0);
 
         let config = parse(&["--preset", "snow"]).unwrap();
         assert!(config.flow);
+        assert!(config.mute, "snow is silent by default");
+        assert_eq!(config.initial_speed, 40.0);
 
         let config = parse(&["--preset", "fireworks"]).unwrap();
         assert_eq!(config.spawn_mode, SpawnMode::Collision);

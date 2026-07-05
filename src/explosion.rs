@@ -110,7 +110,7 @@ mod tests {
     fn make_particles(n: usize) -> Vec<Particle> {
         let mut rng = StdRng::seed_from_u64(3);
         (0..n)
-            .map(|_| Particle::new_random(&mut rng, 800, 600, 1.5))
+            .map(|_| Particle::new_random(&mut rng, 800, 600, 1.5, 600.0))
             .collect()
     }
 

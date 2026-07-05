@@ -114,23 +114,35 @@ pub struct Particle {
 }
 
 impl Particle {
-    /// Generate a random velocity vector with speed between 50-100% of `INITIAL_VELOCITY`.
-    fn random_velocity(rng: &mut impl Rng) -> (f64, f64) {
+    /// Generate a random velocity vector with speed between 50-100% of `max_speed`.
+    fn random_velocity(rng: &mut impl Rng, max_speed: f64) -> (f64, f64) {
         let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
-        let speed: f64 = rng.random_range(INITIAL_VELOCITY * 0.5..INITIAL_VELOCITY);
+        let speed: f64 = rng.random_range(max_speed * 0.5..max_speed.max(1e-9));
         (speed * angle.cos(), speed * angle.sin())
     }
 
     /// Create a particle at a random position within the screen bounds.
-    pub fn new_random(rng: &mut impl Rng, width: u32, height: u32, radius: f64) -> Self {
+    pub fn new_random(
+        rng: &mut impl Rng,
+        width: u32,
+        height: u32,
+        radius: f64,
+        max_speed: f64,
+    ) -> Self {
         let x = rng.random_range(PARTICLE_MARGIN..(f64::from(width) - PARTICLE_MARGIN));
         let y = rng.random_range(PARTICLE_MARGIN..(f64::from(height) - PARTICLE_MARGIN));
-        Self::new_at_position(rng, x, y, radius)
+        Self::new_at_position(rng, x, y, radius, max_speed)
     }
 
     /// Create a particle at a specific position with a random velocity.
-    pub fn new_at_position(rng: &mut impl Rng, x: f64, y: f64, radius: f64) -> Self {
-        let (vx, vy) = Self::random_velocity(rng);
+    pub fn new_at_position(
+        rng: &mut impl Rng,
+        x: f64,
+        y: f64,
+        radius: f64,
+        max_speed: f64,
+    ) -> Self {
+        let (vx, vy) = Self::random_velocity(rng, max_speed);
         Self::new_moving(rng, x, y, vx, vy, radius)
     }
 
@@ -529,25 +541,30 @@ pub fn handle_collisions(
     max_energy
 }
 
-/// Acceleration scale of the cursor gravity well (pixels/s^2, asymptotic).
-/// Kept below typical particle speeds so the well shepherds particles into
-/// orbits rather than instantly dominating their motion.
-pub const WELL_STRENGTH: f64 = 1000.0;
+/// Peak acceleration of the cursor gravity well (pixels/s^2), reached at
+/// roughly `WELL_SOFTENING / sqrt(2)` pixels from the cursor.
+pub const WELL_STRENGTH: f64 = 800.0;
+/// Softening length of the well: inside it the pull fades linearly to zero
+/// (no jitter at the center); outside it the pull falls off as 1/d^2.
+const WELL_SOFTENING: f64 = 120.0;
+/// Peak of d/(d^2+s^2)^(3/2), times s^2: at d = s/sqrt(2) the curve reaches
+/// 1/(sqrt(2) * 1.5^1.5 * s^2). Used to normalize the peak to WELL_STRENGTH.
+const WELL_PEAK_FACTOR: f64 = 0.384_900_179_459_750_5;
 
 /// Pull (positive `strength`) or push (negative) every particle toward/away
-/// from `(x, y)`. The softened falloff keeps acceleration gentle near the
-/// well center — magnitude approaches `|strength|` at distance and fades to
-/// zero at the center, so particles orbit instead of jittering.
+/// from `(x, y)` like a softened point mass (Plummer): acceleration rises
+/// linearly from zero at the center, peaks at `|strength|` near the
+/// softening radius, and falls off as 1/d^2 at range — local control, not
+/// screen-wide suction.
 pub fn apply_attractor(particles: &mut [Particle], x: f64, y: f64, strength: f64, dt: f64) {
-    const SOFTENING: f64 = 50.0;
+    let s2 = WELL_SOFTENING * WELL_SOFTENING;
+    // a(d) = k * d / (d^2 + s^2)^(3/2), normalized so max |a| = |strength|.
+    let k = strength * s2 / WELL_PEAK_FACTOR;
     for p in particles {
         let dx = x - p.x;
         let dy = y - p.y;
-        let dist = (dx * dx + dy * dy).sqrt();
-        if dist < 1e-6 {
-            continue;
-        }
-        let scale = strength / (dist + SOFTENING);
+        let d2 = dx * dx + dy * dy;
+        let scale = k / (d2 + s2).powf(1.5);
         p.vx += dx * scale * dt;
         p.vy += dy * scale * dt;
     }
@@ -567,19 +584,28 @@ pub fn update_physics(
     }
 }
 
-/// Strength of the ambient flow field (pixels/s^2).
-pub const FLOW_STRENGTH: f64 = 350.0;
+/// Speed of the ambient flow field's currents (pixels/s). Gentle by design:
+/// the flow should read as drift, not wind tunnel.
+pub const FLOW_SPEED: f64 = 60.0;
+/// How quickly particles entrain into the flow (1/s). The flow is a medium,
+/// not a force: particles are dragged *toward* the local current velocity,
+/// so speeds stay bounded instead of accumulating until a wall eats them.
+const FLOW_COUPLING: f64 = 1.2;
 
-/// Push every particle along a slowly-drifting swirl field. The field is a
-/// few layered sinusoids of position and time — cheap, smooth, divergence
-/// enough to look like wind currents, and fully deterministic.
+/// Entrain every particle toward a slowly-drifting swirl of currents. The
+/// field direction is a few layered sinusoids of position and time — cheap,
+/// smooth, deterministic — with gentle gusts in magnitude.
 pub fn apply_flow(particles: &mut [Particle], t: f64, dt: f64) {
+    let k = (FLOW_COUPLING * dt).min(1.0);
     for p in particles {
         let angle = (p.x * 0.008 + t * 0.35).sin() * 2.2
             + (p.y * 0.011 - t * 0.23).cos() * 1.9
             + (p.x * 0.002 - p.y * 0.003 + t * 0.11).sin() * 1.3;
-        p.vx += angle.cos() * FLOW_STRENGTH * dt;
-        p.vy += angle.sin() * FLOW_STRENGTH * dt;
+        let gust = 0.7 + 0.3 * (p.x * 0.004 + p.y * 0.005 + t * 0.17).sin();
+        let fx = angle.cos() * FLOW_SPEED * gust;
+        let fy = angle.sin() * FLOW_SPEED * gust;
+        p.vx += (fx - p.vx) * k;
+        p.vy += (fy - p.vy) * k;
     }
 }
 
@@ -752,18 +778,39 @@ mod tests {
     }
 
     #[test]
-    fn flow_field_moves_particles_smoothly() {
+    fn flow_field_entrains_toward_bounded_speeds() {
         let mut particles = vec![
             particle(100.0, 100.0, 0.0, 0.0),
             particle(500.0, 300.0, 0.0, 0.0),
         ];
+        // From rest, the flow pushes every particle.
         apply_flow(&mut particles, 1.0, 0.01);
         for p in &particles {
             assert!(p.vx.is_finite() && p.vy.is_finite());
-            let dv = (p.vx * p.vx + p.vy * p.vy).sqrt();
-            assert!(dv > 0.0, "flow must push every particle");
-            assert!(dv <= FLOW_STRENGTH * 0.01 + 1e-9, "bounded by strength");
+            assert!(p.speed() > 0.0, "flow must push every particle");
         }
+
+        // The flow is a medium, not a force: speeds converge to the local
+        // current instead of growing without bound.
+        let mut t = 1.0;
+        for _ in 0..10_000 {
+            apply_flow(&mut particles, t, 0.01);
+            t += 0.01;
+        }
+        for p in &particles {
+            assert!(
+                p.speed() <= FLOW_SPEED * 1.01,
+                "flow speeds must stay bounded: {}",
+                p.speed()
+            );
+        }
+
+        // A particle far faster than the current is slowed by drag.
+        let mut fast = vec![particle(200.0, 200.0, 900.0, 0.0)];
+        for _ in 0..300 {
+            apply_flow(&mut fast, 5.0, 0.01);
+        }
+        assert!(fast[0].speed() < 300.0, "drag must bleed off excess speed");
     }
 
     #[test]
@@ -988,6 +1035,39 @@ mod tests {
             near[0].vx.abs() < far[0].vx.abs(),
             "acceleration must fade near the well center"
         );
+    }
+
+    #[test]
+    fn attractor_peaks_at_strength_and_falls_off_as_inverse_square() {
+        let accel_at = |d: f64| -> f64 {
+            let mut p = vec![particle(0.0, 0.0, 0.0, 0.0)];
+            apply_attractor(&mut p, d, 0.0, WELL_STRENGTH, 1.0);
+            p[0].vx
+        };
+
+        // The peak sits at s/sqrt(2) and equals WELL_STRENGTH.
+        let peak_d = 120.0 / std::f64::consts::SQRT_2;
+        let peak = accel_at(peak_d);
+        assert!(
+            (peak - WELL_STRENGTH).abs() < WELL_STRENGTH * 0.01,
+            "peak acceleration must equal WELL_STRENGTH: {peak}"
+        );
+
+        // Beyond the softening radius the pull decays monotonically...
+        let (a200, a400, a800) = (accel_at(200.0), accel_at(400.0), accel_at(800.0));
+        assert!(peak > a200 && a200 > a400 && a400 > a800);
+
+        // ...approaching a true inverse-square law: doubling the distance
+        // divides the pull by ~4.
+        let ratio = a400 / a800;
+        assert!(
+            (3.2..=4.2).contains(&ratio),
+            "far field must be ~1/d^2 (got ratio {ratio:.2})"
+        );
+
+        // Distant particles feel a small fraction of the peak, not the
+        // near-full strength the old asymptotic model applied.
+        assert!(a800 < WELL_STRENGTH * 0.1);
     }
 
     #[test]
