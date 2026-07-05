@@ -5,12 +5,12 @@
 //! orchestration. No windowing, rendering, or audio — the `App` layer owns
 //! those and drives this struct, which keeps every gameplay rule testable.
 
-use crate::config::Config;
+use crate::config::{Config, SpawnMode};
 use crate::explosion::{max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_WINDOW};
 use crate::physics::{
-    apply_attractor, handle_collisions, has_motion, substep_count, update_physics,
-    CollisionRecorder, Particle, SpatialGrid, SpawnSite, COLLISION_ENERGY_NORMALIZER,
-    INITIAL_VELOCITY, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
+    apply_attractor, apply_flow, handle_collisions, has_motion, max_radius, substep_count,
+    update_physics, CollisionRecorder, Particle, SpatialGrid, SpawnSite,
+    COLLISION_ENERGY_NORMALIZER, INITIAL_VELOCITY, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -46,6 +46,20 @@ const SPAWN_CONE_HALF_ANGLE: f64 = std::f64::consts::FRAC_PI_4;
 /// `INITIAL_VELOCITY`; full energy ejects at the full initial velocity.
 const SPAWN_SPEED_MIN_FRACTION: f64 = 0.25;
 
+// Matter mechanics (--matter / X key): collision energy decides the outcome.
+/// At or below this closing speed, touching particles fuse into one.
+const FUSION_MAX_ENERGY: f64 = 60.0;
+/// At or above this closing speed, the colliding particles shatter.
+const FISSION_MIN_ENERGY: f64 = 700.0;
+/// Smallest fragment radius, as a fraction of the base particle radius;
+/// particles too small to yield fragments this size bounce instead.
+const MIN_RADIUS_FACTOR: f64 = 0.5;
+/// Largest fused radius, as a multiple of the base particle radius; fusions
+/// that would exceed it do not happen.
+const MAX_RADIUS_FACTOR: f64 = 3.0;
+/// Fragment separation speed as a fraction of the collision energy.
+const FISSION_KICK_FRACTION: f64 = 0.3;
+
 /// Calculate the initial/minimum particle count based on screen size.
 pub fn calculate_particle_count(width: u32, height: u32) -> usize {
     let total_pixels = u64::from(width) * u64::from(height);
@@ -80,15 +94,21 @@ pub struct Simulation {
     // Geometry (fixed at creation)
     width: u32,
     height: u32,
-    particle_radius: f64,
+    /// Radius of newly spawned particles and the initial population; matter
+    /// mechanics diversify sizes between MIN/MAX_RADIUS_FACTOR of this.
+    base_radius: f64,
 
     // Runtime-tunable parameters
-    pub spawn_at_collision: bool,
+    pub spawn_mode: SpawnMode,
     pub gravity_percent: i32,
     pub wall_elasticity: f64,
     pub particle_elasticity: f64,
     /// Spawns/sec that trigger an automatic explosion; 0 = never.
     pub explosion_threshold: usize,
+    /// Fusion/fission mechanics enabled.
+    pub matter: bool,
+    /// Ambient flow field enabled.
+    pub flow: bool,
 
     // State
     particles: Vec<Particle>,
@@ -99,6 +119,8 @@ pub struct Simulation {
     rng: StdRng,
     stopped: bool,
     frames_without_motion: u32,
+    /// Accumulated simulated time; drives the flow field's drift.
+    sim_time: f64,
 
     // Derived values
     base_particle_count: usize,
@@ -140,12 +162,14 @@ impl Simulation {
         let mut sim = Simulation {
             width,
             height,
-            particle_radius: config.particle_size,
-            spawn_at_collision: config.spawn_at_collision,
+            base_radius: config.particle_size,
+            spawn_mode: config.effective_spawn_mode(),
             gravity_percent: config.gravity,
             wall_elasticity: config.wall_elasticity,
             particle_elasticity: config.particle_elasticity,
             explosion_threshold: config.explosion_threshold as usize,
+            matter: config.matter,
+            flow: config.flow,
             particles: Vec::new(),
             explosion: None,
             spawn_times: VecDeque::new(),
@@ -154,6 +178,7 @@ impl Simulation {
             rng,
             stopped: false,
             frames_without_motion: 0,
+            sim_time: 0.0,
             base_particle_count,
             max_particles,
             center_x: f64::from(width) / 2.0,
@@ -165,7 +190,7 @@ impl Simulation {
 
     fn populate(&mut self) {
         self.particles = (0..self.base_particle_count)
-            .map(|_| Particle::new_random(&mut self.rng, self.width, self.height))
+            .map(|_| Particle::new_random(&mut self.rng, self.width, self.height, self.base_radius))
             .collect();
     }
 
@@ -197,10 +222,6 @@ impl Simulation {
         self.stopped
     }
 
-    pub fn particle_radius(&self) -> f64 {
-        self.particle_radius
-    }
-
     // --- Interaction ------------------------------------------------------
 
     /// Leave the stopped state (something is about to inject motion).
@@ -212,15 +233,19 @@ impl Simulation {
     /// Spawn a burst of particles around `(x, y)` (left click), spread over
     /// a small disc so they don't materialize inside each other.
     pub fn spawn_burst(&mut self, x: f64, y: f64) {
-        let spread = SPAWN_JITTER.max(self.particle_radius * 4.0);
+        let spread = SPAWN_JITTER.max(self.base_radius * 4.0);
         for _ in 0..CLICK_BURST_SIZE {
             if self.particles.len() >= self.max_particles {
                 break;
             }
             let bx = x + self.rng.random_range(-spread..spread);
             let by = y + self.rng.random_range(-spread..spread);
-            self.particles
-                .push(Particle::new_at_position(&mut self.rng, bx, by));
+            self.particles.push(Particle::new_at_position(
+                &mut self.rng,
+                bx,
+                by,
+                self.base_radius,
+            ));
         }
         // Fresh particles are moving; leave the stopped state if we were in it.
         self.wake();
@@ -270,10 +295,11 @@ impl Simulation {
         }
 
         self.update_explosion(dt);
+        self.sim_time += dt;
 
         let gravity_multiplier = f64::from(self.gravity_percent) / 100.0;
         self.collisions.clear();
-        let substeps = substep_count(&self.particles, dt, self.particle_radius);
+        let substeps = substep_count(&self.particles, dt);
         let sub_dt = dt / f64::from(substeps);
 
         let mut max_energy = 0.0f64;
@@ -287,12 +313,14 @@ impl Simulation {
                     sub_dt,
                 );
             }
+            if self.flow {
+                apply_flow(&mut self.particles, self.sim_time, sub_dt);
+            }
             update_physics(
                 &mut self.particles,
                 sub_dt,
                 self.width,
                 self.height,
-                self.particle_radius,
                 gravity_multiplier,
                 self.wall_elasticity,
             );
@@ -302,7 +330,6 @@ impl Simulation {
                 &mut self.collisions,
                 self.width,
                 self.height,
-                self.particle_radius,
                 self.particle_elasticity,
             );
             max_energy = max_energy.max(energy);
@@ -313,9 +340,116 @@ impl Simulation {
             .collision_centroid()
             .map_or(0.5, |(x, _)| x / f64::from(self.width));
 
+        if self.matter && self.explosion.is_none() && self.process_matter() {
+            // Matter ops reorder the particle list; rebuild the grid so the
+            // spawn clearance checks below consult correct positions.
+            self.grid.build(
+                &self.particles,
+                self.width,
+                self.height,
+                max_radius(&self.particles),
+            );
+        }
+
         events.explosion_started = self.handle_spawning(now);
-        self.check_motion(well.is_some());
+        self.check_motion(well.is_some() || self.flow);
         events
+    }
+
+    /// Apply fusion/fission outcomes to this step's collisions. Slow
+    /// contacts merge (area, momentum, and blended color conserved); hard
+    /// impacts shatter both participants into half-area fragments that fly
+    /// apart perpendicular to the impact. Each particle takes part in at
+    /// most one matter event per step. Returns true if anything changed.
+    fn process_matter(&mut self) -> bool {
+        let min_r = self.base_radius * MIN_RADIUS_FACTOR;
+        let max_r = self.base_radius * MAX_RADIUS_FACTOR;
+        let mut touched: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut dead: Vec<usize> = Vec::new();
+        let mut changed = false;
+
+        for k in 0..self.collisions.sites().len() {
+            let site = self.collisions.sites()[k];
+            let (i, j) = (site.i, site.j);
+            if touched.contains(&i) || touched.contains(&j) {
+                continue;
+            }
+
+            if site.energy <= FUSION_MAX_ENERGY {
+                // Fusion: merge j into i, conserving area and momentum.
+                if self.particles.len() - dead.len() <= 2 {
+                    continue; // never fuse below the minimum population
+                }
+                let merged_r = (self.particles[i].mass() + self.particles[j].mass()).sqrt();
+                if merged_r > max_r {
+                    continue; // too big; the pair just bounces
+                }
+                let (m1, m2) = (self.particles[i].mass(), self.particles[j].mass());
+                let mt = m1 + m2;
+                let (pj_x, pj_y, pj_vx, pj_vy, pj_color) = {
+                    let p = &self.particles[j];
+                    (p.x, p.y, p.vx, p.vy, p.color)
+                };
+                let p = &mut self.particles[i];
+                p.x = (p.x * m1 + pj_x * m2) / mt;
+                p.y = (p.y * m1 + pj_y * m2) / mt;
+                p.vx = (p.vx * m1 + pj_vx * m2) / mt;
+                p.vy = (p.vy * m1 + pj_vy * m2) / mt;
+                p.radius = merged_r;
+                for (c, &jc) in p.color.iter_mut().zip(pj_color.iter()).take(3) {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    {
+                        *c = ((f64::from(*c) * m1 + f64::from(jc) * m2) / mt) as u8;
+                    }
+                }
+                touched.insert(i);
+                touched.insert(j);
+                dead.push(j);
+                changed = true;
+            } else if site.energy >= FISSION_MIN_ENERGY {
+                // Fission: shatter each participant that is large enough
+                // into two half-area fragments receding perpendicular to
+                // the impact.
+                let (px, py) = (-site.ny, site.nx);
+                let kick = FISSION_KICK_FRACTION * site.energy;
+                for idx in [i, j] {
+                    let frag_r = self.particles[idx].radius / std::f64::consts::SQRT_2;
+                    if frag_r < min_r || self.particles.len() >= self.max_particles {
+                        continue;
+                    }
+                    let offset = frag_r + 0.5;
+                    let parent = &mut self.particles[idx];
+                    parent.radius = frag_r;
+                    parent.x += px * offset;
+                    parent.y += py * offset;
+                    parent.vx += px * kick;
+                    parent.vy += py * kick;
+                    let twin = Particle {
+                        x: parent.x - 2.0 * px * offset,
+                        y: parent.y - 2.0 * py * offset,
+                        vx: parent.vx - 2.0 * px * kick,
+                        vy: parent.vy - 2.0 * py * kick,
+                        radius: frag_r,
+                        color: parent.color,
+                        doomed: false,
+                    };
+                    self.particles.push(twin);
+                    touched.insert(idx);
+                    changed = true;
+                }
+                touched.insert(i);
+                touched.insert(j);
+            }
+        }
+
+        // Remove fused-away particles. Descending order keeps the remaining
+        // indices valid under swap_remove, and the swapped-in tail elements
+        // (fission fragments or untouched particles) are never in `dead`.
+        dead.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in dead {
+            self.particles.swap_remove(idx);
+        }
+        changed
     }
 
     /// Update explosion state, processing kills and checking completion.
@@ -346,7 +480,10 @@ impl Simulation {
             }
         }
 
-        if self.collisions.is_empty() || self.explosion.is_some() {
+        if self.collisions.is_empty()
+            || self.explosion.is_some()
+            || self.spawn_mode == SpawnMode::Off
+        {
             return false;
         }
 
@@ -359,7 +496,7 @@ impl Simulation {
             );
             // In collision-spawning mode the action is wherever particles
             // are densest; center the blast on the recent collisions.
-            let (ex, ey) = if self.spawn_at_collision {
+            let (ex, ey) = if self.spawn_mode == SpawnMode::Collision {
                 self.collision_centroid()
                     .unwrap_or((self.center_x, self.center_y))
             } else {
@@ -369,26 +506,35 @@ impl Simulation {
             return true;
         }
 
-        // Grid state from the last collision pass covers exactly the
-        // pre-spawn particles; particles spawned this frame are checked
-        // separately in `spawn_position_is_free`.
+        // Grid state covers exactly the pre-spawn particles (rebuilt after
+        // matter ops); particles spawned this frame are checked separately
+        // in `spawn_position_is_free`. Clearance distances are conservative
+        // against the largest particle in the population.
         let first_new = self.particles.len();
+        let max_r = max_radius(&self.particles);
         let mut spawned = 0;
         for i in 0..self.collisions.sites().len() {
             if spawned >= MAX_SPAWNS_PER_FRAME || self.particles.len() >= self.max_particles {
                 break;
             }
             let site = self.collisions.sites()[i];
-            let spawn = if self.spawn_at_collision {
+            // With matter mechanics on, low-energy contacts fused and
+            // high-energy impacts shattered; only the middle band spawns.
+            if self.matter
+                && (site.energy <= FUSION_MAX_ENERGY || site.energy >= FISSION_MIN_ENERGY)
+            {
+                continue;
+            }
+            let spawn = if self.spawn_mode == SpawnMode::Collision {
                 // Eject the newborn outward, away from the collision.
-                self.free_position_beside(site, first_new)
+                self.free_position_beside(site, first_new, max_r)
                     .map(|(pos, out)| {
                         let (vx, vy) = self.ejection_velocity(out, site.energy);
                         (pos, vx, vy)
                     })
             } else {
                 // Classic center fountain: random direction and speed.
-                self.free_position_near_center(first_new).map(|pos| {
+                self.free_position_near_center(first_new, max_r).map(|pos| {
                     let angle = self.rng.random_range(0.0..std::f64::consts::TAU);
                     let speed = self
                         .rng
@@ -398,8 +544,14 @@ impl Simulation {
             };
 
             if let Some(((x, y), vx, vy)) = spawn {
-                self.particles
-                    .push(Particle::new_moving(&mut self.rng, x, y, vx, vy));
+                self.particles.push(Particle::new_moving(
+                    &mut self.rng,
+                    x,
+                    y,
+                    vx,
+                    vy,
+                    self.base_radius,
+                ));
                 self.spawn_times.push_back(now);
                 spawned += 1;
             }
@@ -439,13 +591,14 @@ impl Simulation {
         &mut self,
         site: SpawnSite,
         first_new: usize,
+        max_r: f64,
     ) -> Option<((f64, f64), (f64, f64))> {
-        let diameter = self.particle_radius * 2.0;
-        // Perpendicular offset: distance to each parent (at ~diameter/2
-        // along the normal) is sqrt(off^2 + (d/2)^2) > diameter. The
+        // Offsets are conservative against the largest particle in play:
+        // perpendicular distance to each parent (which sits along the
+        // normal) exceeds the largest possible contact distance. The
         // along-normal fallbacks sit beyond the far side of each parent.
-        let perp_offset = diameter + 0.5;
-        let normal_offset = 1.5 * diameter + 1.0;
+        let perp_offset = self.base_radius + max_r + 0.5;
+        let normal_offset = 2.0 * max_r + self.base_radius + 1.0;
         let (px, py) = (-site.ny, site.nx);
         // Randomize which side is tried first so spawns don't drift to one
         // side of the collision plane.
@@ -459,42 +612,43 @@ impl Simulation {
         ];
         candidates.into_iter().find_map(|((dx, dy), offset)| {
             let (x, y) = (site.x + dx * offset, site.y + dy * offset);
-            self.spawn_position_is_free(x, y, first_new)
+            self.spawn_position_is_free(x, y, first_new, max_r)
                 .then_some(((x, y), (dx, dy)))
         })
     }
 
     /// Pick a free spawn position near the screen center (default mode),
     /// trying a few jittered draws before giving up.
-    fn free_position_near_center(&mut self, first_new: usize) -> Option<(f64, f64)> {
+    fn free_position_near_center(&mut self, first_new: usize, max_r: f64) -> Option<(f64, f64)> {
         const CENTER_SPAWN_ATTEMPTS: usize = 4;
-        let jitter = SPAWN_JITTER.max(self.particle_radius * 2.0);
+        let jitter = SPAWN_JITTER.max(self.base_radius * 2.0);
         for _ in 0..CENTER_SPAWN_ATTEMPTS {
             let x = self.center_x + self.rng.random_range(-jitter..jitter);
             let y = self.center_y + self.rng.random_range(-jitter..jitter);
-            if self.spawn_position_is_free(x, y, first_new) {
+            if self.spawn_position_is_free(x, y, first_new, max_r) {
                 return Some((x, y));
             }
         }
         None
     }
 
-    /// A spawn position is usable when it lies inside the arena and at
-    /// least one diameter from every existing particle (checked via the
-    /// grid for pre-existing particles and linearly for this frame's
-    /// spawns, which the grid cannot see yet).
-    fn spawn_position_is_free(&self, x: f64, y: f64, first_new: usize) -> bool {
-        let diameter = self.particle_radius * 2.0;
-        let r = self.particle_radius;
+    /// A spawn position is usable when it lies inside the arena and clear
+    /// of every existing particle (checked via the grid for pre-existing
+    /// particles and linearly for this frame's spawns, which the grid
+    /// cannot see yet). The clearance is conservative: the new particle's
+    /// radius plus the largest radius in the population.
+    fn spawn_position_is_free(&self, x: f64, y: f64, first_new: usize, max_r: f64) -> bool {
+        let r = self.base_radius;
+        let clearance = r + max_r;
         if x < r || x > f64::from(self.width) - r || y < r || y > f64::from(self.height) - r {
             return false;
         }
         !self
             .grid
-            .any_within(&self.particles[..first_new], x, y, diameter)
+            .any_within(&self.particles[..first_new], x, y, clearance)
             && !self.particles[first_new..]
                 .iter()
-                .any(|p| p.distance_squared_from(x, y) < diameter * diameter)
+                .any(|p| p.distance_squared_from(x, y) < clearance * clearance)
     }
 
     /// Average position of this step's collisions.
@@ -630,7 +784,7 @@ mod tests {
             assert_eq!(s.particle_count(), 3, "every collision must spawn");
 
             let spawn = &s.particles[2];
-            let diameter = s.particle_radius() * 2.0;
+            let diameter = s.base_radius * 2.0;
             for parent in &s.particles[..2] {
                 let dist = parent.distance_squared_from(spawn.x, spawn.y).sqrt();
                 assert!(
@@ -804,6 +958,7 @@ mod tests {
                     &mut s.rng,
                     388.0 + f64::from(gx) * 2.0,
                     288.0 + f64::from(gy) * 2.0,
+                    1.5,
                 );
                 p.vx = 0.0;
                 p.vy = 0.0;
@@ -896,6 +1051,109 @@ mod tests {
         assert!(
             s.particles[1].vx < 0.0,
             "right particle accelerates toward the well"
+        );
+    }
+
+    #[test]
+    fn spawn_mode_off_never_spawns() {
+        let mut s = sim(&["--min-particles", "2", "--spawn-mode", "off"]);
+        arm_collision(&mut s, 200.0, 300.0);
+        let events = s.step(0.01, Instant::now(), None);
+        assert!(events.max_collision_energy > 0.0, "collision still happens");
+        assert_eq!(s.particle_count(), 2, "but nothing spawns");
+        assert!(s.spawn_times.is_empty());
+    }
+
+    /// Step until the population size changes (matter ops need a few steps
+    /// for the armed pair to reach contact).
+    fn step_until_count_changes(s: &mut Simulation, max_steps: usize) -> usize {
+        let before = s.particle_count();
+        for _ in 0..max_steps {
+            s.step(0.01, Instant::now(), None);
+            if s.particle_count() != before {
+                return s.particle_count();
+            }
+        }
+        panic!("population never changed within {max_steps} steps");
+    }
+
+    #[test]
+    fn slow_contact_fuses_conserving_area_and_momentum() {
+        let mut s = sim(&["--min-particles", "30", "--matter", "--spawn-mode", "off"]);
+        arm_collision(&mut s, 400.0, 300.0);
+        // Slow approach: closing speed 50 is below the fusion threshold.
+        s.particles[0].vx = 25.0;
+        s.particles[1].vx = -25.0;
+
+        let count = step_until_count_changes(&mut s, 50);
+        assert_eq!(count, 29, "fusion merges two particles into one");
+
+        let merged = s
+            .particles
+            .iter()
+            .find(|p| p.radius > s.base_radius + 0.1)
+            .expect("a merged particle must exist");
+        // Area conserved: r = sqrt(1.5^2 + 1.5^2).
+        let expected_r = (2.0f64 * 1.5 * 1.5).sqrt();
+        assert!((merged.radius - expected_r).abs() < 1e-9);
+        // Equal and opposite momenta cancel.
+        assert!(merged.vx.abs() < 1.0, "momentum conserved: {}", merged.vx);
+    }
+
+    #[test]
+    fn hard_impact_fissions_both_particles() {
+        let mut s = sim(&["--min-particles", "30", "--matter", "--spawn-mode", "off"]);
+        arm_collision(&mut s, 400.0, 300.0);
+        // Violent approach: closing speed 800 exceeds the fission threshold.
+        s.particles[0].vx = 400.0;
+        s.particles[1].vx = -400.0;
+
+        let count = step_until_count_changes(&mut s, 50);
+        assert_eq!(count, 32, "both participants split into two fragments");
+
+        let fragments = s
+            .particles
+            .iter()
+            .filter(|p| p.radius < s.base_radius - 0.1)
+            .count();
+        assert_eq!(fragments, 4, "four half-area fragments exist");
+        let frag = s
+            .particles
+            .iter()
+            .find(|p| p.radius < s.base_radius - 0.1)
+            .unwrap();
+        let expected_r = 1.5 / std::f64::consts::SQRT_2;
+        assert!((frag.radius - expected_r).abs() < 1e-9);
+    }
+
+    #[test]
+    fn matter_off_means_no_size_changes() {
+        let mut s = sim(&["--min-particles", "30", "--spawn-mode", "off"]);
+        arm_collision(&mut s, 400.0, 300.0);
+        s.particles[0].vx = 400.0;
+        s.particles[1].vx = -400.0;
+        for _ in 0..20 {
+            s.step(0.01, Instant::now(), None);
+        }
+        assert_eq!(s.particle_count(), 30);
+        assert!(s
+            .particles
+            .iter()
+            .all(|p| (p.radius - s.base_radius).abs() < 1e-12));
+    }
+
+    #[test]
+    fn flow_field_keeps_particles_moving_and_suppresses_stopped() {
+        let mut s = sim(&["--min-particles", "2", "--flow"]);
+        freeze(&mut s);
+        let now = Instant::now();
+        for _ in 0..=MOTION_STOPPED_FRAMES {
+            s.step(0.005, now, None);
+        }
+        assert!(!s.stopped(), "flow suppresses the stopped state");
+        assert!(
+            s.particles.iter().any(|p| p.speed() > 0.0),
+            "flow pushes particles"
         );
     }
 

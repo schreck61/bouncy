@@ -83,11 +83,16 @@ pub struct CollisionResult {
     pub ny: f64,
 }
 
-/// Where and how a collision happened, kept for spawning: the midpoint, the
+/// Where and how a collision happened, kept for spawning and for matter
+/// (fusion/fission) processing: the participants, the midpoint, the
 /// collision normal along which the parent particles separated, and the
-/// collision energy (which sets the ejected particle's speed).
+/// collision energy.
 #[derive(Copy, Clone)]
 pub struct SpawnSite {
+    /// Indices of the colliding pair, valid until the particle list is next
+    /// mutated (spawning/matter processing happens before any mutation).
+    pub i: usize,
+    pub j: usize,
     pub x: f64,
     pub y: f64,
     pub nx: f64,
@@ -95,12 +100,14 @@ pub struct SpawnSite {
     pub energy: f64,
 }
 
-/// A particle in the simulation with position, velocity, and color.
+/// A particle in the simulation with position, velocity, size, and color.
 pub struct Particle {
     pub x: f64,
     pub y: f64,
     pub vx: f64,
     pub vy: f64,
+    /// Radius in pixels; mass is proportional to area (radius squared).
+    pub radius: f64,
     pub color: [u8; 4],
     /// Marked for elimination by an active explosion.
     pub doomed: bool,
@@ -115,28 +122,35 @@ impl Particle {
     }
 
     /// Create a particle at a random position within the screen bounds.
-    pub fn new_random(rng: &mut impl Rng, width: u32, height: u32) -> Self {
+    pub fn new_random(rng: &mut impl Rng, width: u32, height: u32, radius: f64) -> Self {
         let x = rng.random_range(PARTICLE_MARGIN..(f64::from(width) - PARTICLE_MARGIN));
         let y = rng.random_range(PARTICLE_MARGIN..(f64::from(height) - PARTICLE_MARGIN));
-        Self::new_at_position(rng, x, y)
+        Self::new_at_position(rng, x, y, radius)
     }
 
     /// Create a particle at a specific position with a random velocity.
-    pub fn new_at_position(rng: &mut impl Rng, x: f64, y: f64) -> Self {
+    pub fn new_at_position(rng: &mut impl Rng, x: f64, y: f64, radius: f64) -> Self {
         let (vx, vy) = Self::random_velocity(rng);
-        Self::new_moving(rng, x, y, vx, vy)
+        Self::new_moving(rng, x, y, vx, vy, radius)
     }
 
     /// Create a particle with a specific position and velocity.
-    pub fn new_moving(rng: &mut impl Rng, x: f64, y: f64, vx: f64, vy: f64) -> Self {
+    pub fn new_moving(rng: &mut impl Rng, x: f64, y: f64, vx: f64, vy: f64, radius: f64) -> Self {
         Particle {
             x,
             y,
             vx,
             vy,
+            radius,
             color: random_bright_color(rng),
             doomed: false,
         }
+    }
+
+    /// Mass, proportional to area. The proportionality constant cancels in
+    /// every use, so area itself serves as the mass.
+    pub fn mass(&self) -> f64 {
+        self.radius * self.radius
     }
 
     /// Current speed in pixels per second.
@@ -152,7 +166,6 @@ impl Particle {
         dt: f64,
         width: u32,
         height: u32,
-        radius: f64,
         gravity_multiplier: f64,
         wall_elasticity: f64,
     ) {
@@ -162,6 +175,7 @@ impl Particle {
 
         let width_f = f64::from(width);
         let height_f = f64::from(height);
+        let radius = self.radius;
 
         if self.x <= radius {
             self.x = radius;
@@ -188,25 +202,26 @@ impl Particle {
     }
 }
 
-/// Attempt a collision between two particles of equal mass.
-/// Returns collision result if particles are touching and approaching.
+/// Attempt a collision between two particles, which may have unequal
+/// masses. Returns collision result if particles are touching (center
+/// distance within the sum of radii) and approaching.
 ///
 /// `particle_elasticity` is the coefficient of restitution: 1.0 = fully
-/// elastic (velocities along the normal are exchanged), 0.0 = perfectly
-/// inelastic (both particles leave with the common normal velocity). The
-/// per-particle impulse for equal masses is `dvn * (1 + e) / 2`.
+/// elastic, 0.0 = perfectly inelastic (both leave with the common normal
+/// velocity). The impulse uses the standard reduced-mass form
+/// `j = (1 + e) * dvn * m1*m2/(m1 + m2)`, which for equal masses reduces to
+/// the familiar per-particle velocity change of `dvn * (1 + e) / 2`.
 pub fn try_elastic_collision(
     p1: &mut Particle,
     p2: &mut Particle,
-    radius: f64,
     particle_elasticity: f64,
 ) -> Option<CollisionResult> {
-    let diameter = radius * 2.0;
+    let contact = p1.radius + p2.radius;
     let dx = p2.x - p1.x;
     let dy = p2.y - p1.y;
     let dist_sq = dx * dx + dy * dy;
 
-    if !(DISTANCE_SQ_EPSILON..=diameter * diameter).contains(&dist_sq) {
+    if !(DISTANCE_SQ_EPSILON..=contact * contact).contains(&dist_sq) {
         return None;
     }
 
@@ -227,19 +242,22 @@ pub fn try_elastic_collision(
 
     let energy = dvn;
 
-    let impulse = dvn * (1.0 + particle_elasticity) / 2.0;
-    p1.vx -= impulse * nx;
-    p1.vy -= impulse * ny;
-    p2.vx += impulse * nx;
-    p2.vy += impulse * ny;
+    let (m1, m2) = (p1.mass(), p2.mass());
+    let impulse = (1.0 + particle_elasticity) * dvn * (m1 * m2) / (m1 + m2);
+    p1.vx -= (impulse / m1) * nx;
+    p1.vy -= (impulse / m1) * ny;
+    p2.vx += (impulse / m2) * nx;
+    p2.vy += (impulse / m2) * ny;
 
-    let overlap = diameter - dist;
+    // Separate overlapping particles, the lighter one moving further.
+    let overlap = contact - dist;
     if overlap > 0.0 {
-        let sep = overlap / 2.0 + SEPARATION_PADDING;
-        p1.x -= sep * nx;
-        p1.y -= sep * ny;
-        p2.x += sep * nx;
-        p2.y += sep * ny;
+        let total = overlap + 2.0 * SEPARATION_PADDING;
+        let share1 = m2 / (m1 + m2);
+        p1.x -= total * share1 * nx;
+        p1.y -= total * share1 * ny;
+        p2.x += total * (1.0 - share1) * nx;
+        p2.y += total * (1.0 - share1) * ny;
     }
 
     Some(CollisionResult {
@@ -289,12 +307,21 @@ impl SpatialGrid {
         (cx, cy)
     }
 
-    /// Rebuild the grid from the current particle positions.
+    /// Rebuild the grid from the current particle positions. `max_radius`
+    /// is the largest particle radius present; the cell size must cover the
+    /// largest possible contact distance so that colliding pairs are always
+    /// in the same or adjacent cells.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn build(&mut self, particles: &[Particle], width: u32, height: u32, radius: f64) {
-        // Cells must be at least one diameter wide; larger cells trade a few
-        // extra narrow-phase tests for far fewer cells to clear per frame.
-        let cell_size = (radius * 4.0).max(12.0);
+    pub(crate) fn build(
+        &mut self,
+        particles: &[Particle],
+        width: u32,
+        height: u32,
+        max_radius: f64,
+    ) {
+        // Cells must be at least one max-diameter wide; larger cells trade a
+        // few extra narrow-phase tests for fewer cells to clear per frame.
+        let cell_size = (max_radius * 4.0).max(12.0);
         let cols = ((f64::from(width) / cell_size).ceil() as usize).max(1);
         let rows = ((f64::from(height) / cell_size).ceil() as usize).max(1);
 
@@ -458,6 +485,11 @@ impl Default for CollisionRecorder {
     }
 }
 
+/// The largest particle radius in the population (0.0 when empty).
+pub fn max_radius(particles: &[Particle]) -> f64 {
+    particles.iter().map(|p| p.radius).fold(0.0f64, f64::max)
+}
+
 /// Process all particle-particle collisions using the spatial grid.
 /// Returns the maximum collision energy and records spawn positions.
 pub fn handle_collisions(
@@ -466,7 +498,6 @@ pub fn handle_collisions(
     recorder: &mut CollisionRecorder,
     width: u32,
     height: u32,
-    radius: f64,
     particle_elasticity: f64,
 ) -> f64 {
     let mut max_energy = 0.0f64;
@@ -474,15 +505,17 @@ pub fn handle_collisions(
         return max_energy;
     }
 
-    grid.build(particles, width, height, radius);
+    grid.build(particles, width, height, max_radius(particles));
     grid.for_each_candidate_pair(|i, j| {
         let (p1, p2) = pair_mut(particles, i, j);
-        if let Some(result) = try_elastic_collision(p1, p2, radius, particle_elasticity) {
+        if let Some(result) = try_elastic_collision(p1, p2, particle_elasticity) {
             max_energy = max_energy.max(result.energy);
             recorder.record(
                 i,
                 j,
                 SpawnSite {
+                    i,
+                    j,
                     x: result.mid_x,
                     y: result.mid_y,
                     nx: result.nx,
@@ -526,32 +559,47 @@ pub fn update_physics(
     dt: f64,
     width: u32,
     height: u32,
-    radius: f64,
     gravity_multiplier: f64,
     wall_elasticity: f64,
 ) {
     for particle in particles {
-        particle.update(
-            dt,
-            width,
-            height,
-            radius,
-            gravity_multiplier,
-            wall_elasticity,
-        );
+        particle.update(dt, width, height, gravity_multiplier, wall_elasticity);
     }
 }
 
-/// Number of physics substeps needed so the fastest particle travels no more
-/// than one radius per step, capped at `MAX_SUBSTEPS`.
+/// Strength of the ambient flow field (pixels/s^2).
+pub const FLOW_STRENGTH: f64 = 350.0;
+
+/// Push every particle along a slowly-drifting swirl field. The field is a
+/// few layered sinusoids of position and time — cheap, smooth, divergence
+/// enough to look like wind currents, and fully deterministic.
+pub fn apply_flow(particles: &mut [Particle], t: f64, dt: f64) {
+    for p in particles {
+        let angle = (p.x * 0.008 + t * 0.35).sin() * 2.2
+            + (p.y * 0.011 - t * 0.23).cos() * 1.9
+            + (p.x * 0.002 - p.y * 0.003 + t * 0.11).sin() * 1.3;
+        p.vx += angle.cos() * FLOW_STRENGTH * dt;
+        p.vy += angle.sin() * FLOW_STRENGTH * dt;
+    }
+}
+
+/// Number of physics substeps needed so the fastest particle travels no
+/// more than one (smallest) radius per step, capped at `MAX_SUBSTEPS`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub fn substep_count(particles: &[Particle], dt: f64, radius: f64) -> u32 {
+pub fn substep_count(particles: &[Particle], dt: f64) -> u32 {
     let max_speed_sq = particles
         .iter()
         .map(|p| p.vx * p.vx + p.vy * p.vy)
         .fold(0.0f64, f64::max);
+    let min_radius = particles
+        .iter()
+        .map(|p| p.radius)
+        .fold(f64::INFINITY, f64::min);
+    if !min_radius.is_finite() {
+        return 1;
+    }
     let max_travel = max_speed_sq.sqrt() * dt;
-    ((max_travel / radius).ceil() as u32).clamp(1, MAX_SUBSTEPS)
+    ((max_travel / min_radius).ceil() as u32).clamp(1, MAX_SUBSTEPS)
 }
 
 /// Check if any particles have significant motion.
@@ -568,25 +616,30 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::SeedableRng;
 
+    const RADIUS: f64 = DEFAULT_PARTICLE_RADIUS;
+
     fn particle(x: f64, y: f64, vx: f64, vy: f64) -> Particle {
+        particle_r(x, y, vx, vy, RADIUS)
+    }
+
+    fn particle_r(x: f64, y: f64, vx: f64, vy: f64, radius: f64) -> Particle {
         Particle {
             x,
             y,
             vx,
             vy,
+            radius,
             color: [255, 255, 255, 255],
             doomed: false,
         }
     }
-
-    const RADIUS: f64 = DEFAULT_PARTICLE_RADIUS;
 
     #[test]
     fn elastic_collision_exchanges_normal_velocities() {
         // Head-on collision of equal masses at e=1.0 swaps velocities.
         let mut p1 = particle(0.0, 0.0, 100.0, 0.0);
         let mut p2 = particle(2.0, 0.0, -100.0, 0.0);
-        let result = try_elastic_collision(&mut p1, &mut p2, RADIUS, 1.0).unwrap();
+        let result = try_elastic_collision(&mut p1, &mut p2, 1.0).unwrap();
         assert!((p1.vx - (-100.0)).abs() < 1e-9);
         assert!((p2.vx - 100.0).abs() < 1e-9);
         assert!((result.energy - 200.0).abs() < 1e-9);
@@ -598,7 +651,7 @@ mod tests {
         // At e=0.0 both particles leave with the common normal velocity.
         let mut p1 = particle(0.0, 0.0, 100.0, 0.0);
         let mut p2 = particle(2.0, 0.0, -100.0, 0.0);
-        try_elastic_collision(&mut p1, &mut p2, RADIUS, 0.0).unwrap();
+        try_elastic_collision(&mut p1, &mut p2, 0.0).unwrap();
         assert!(
             p1.vx.abs() < 1e-9,
             "expected common velocity, got {}",
@@ -629,7 +682,7 @@ mod tests {
             );
             let before = (p1.vx + p2.vx, p1.vy + p2.vy);
             for e in [0.0, 0.5, 1.0, 1.5] {
-                try_elastic_collision(&mut p1, &mut p2, RADIUS, e);
+                try_elastic_collision(&mut p1, &mut p2, e);
                 let after = (p1.vx + p2.vx, p1.vy + p2.vy);
                 assert!((before.0 - after.0).abs() < 1e-9);
                 assert!((before.1 - after.1).abs() < 1e-9);
@@ -642,7 +695,7 @@ mod tests {
         let mut p1 = particle(0.0, 0.0, 300.0, 40.0);
         let mut p2 = particle(1.5, 1.5, -200.0, -80.0);
         let energy_before = p1.vx * p1.vx + p1.vy * p1.vy + p2.vx * p2.vx + p2.vy * p2.vy;
-        try_elastic_collision(&mut p1, &mut p2, RADIUS, 1.0).unwrap();
+        try_elastic_collision(&mut p1, &mut p2, 1.0).unwrap();
         let energy_after = p1.vx * p1.vx + p1.vy * p1.vy + p2.vx * p2.vx + p2.vy * p2.vy;
         assert!((energy_before - energy_after).abs() < 1e-6);
     }
@@ -651,14 +704,66 @@ mod tests {
     fn separating_particles_do_not_collide() {
         let mut p1 = particle(0.0, 0.0, -100.0, 0.0);
         let mut p2 = particle(2.0, 0.0, 100.0, 0.0);
-        assert!(try_elastic_collision(&mut p1, &mut p2, RADIUS, 1.0).is_none());
+        assert!(try_elastic_collision(&mut p1, &mut p2, 1.0).is_none());
     }
 
     #[test]
     fn distant_particles_do_not_collide() {
         let mut p1 = particle(0.0, 0.0, 100.0, 0.0);
         let mut p2 = particle(100.0, 0.0, -100.0, 0.0);
-        assert!(try_elastic_collision(&mut p1, &mut p2, RADIUS, 1.0).is_none());
+        assert!(try_elastic_collision(&mut p1, &mut p2, 1.0).is_none());
+    }
+
+    #[test]
+    fn unequal_mass_collision_conserves_momentum_and_energy() {
+        // Heavy (r=3, m=9) meets light (r=1, m=1) head-on, fully elastic.
+        let mut heavy = particle_r(0.0, 0.0, 100.0, 0.0, 3.0);
+        let mut light = particle_r(3.5, 0.0, -100.0, 0.0, 1.0);
+        let (m1, m2) = (heavy.mass(), light.mass());
+        let momentum_before = m1 * heavy.vx + m2 * light.vx;
+        let energy_before = m1 * heavy.vx * heavy.vx + m2 * light.vx * light.vx;
+
+        try_elastic_collision(&mut heavy, &mut light, 1.0).unwrap();
+
+        let momentum_after = m1 * heavy.vx + m2 * light.vx;
+        let energy_after = m1 * heavy.vx * heavy.vx + m2 * light.vx * light.vx;
+        assert!((momentum_before - momentum_after).abs() < 1e-9);
+        assert!((energy_before - energy_after).abs() < 1e-6);
+
+        // The heavy particle barely deflects; the light one rebounds hard.
+        assert!(
+            heavy.vx > 50.0,
+            "heavy keeps most of its speed: {}",
+            heavy.vx
+        );
+        assert!(light.vx > 200.0, "light rebounds fast: {}", light.vx);
+    }
+
+    #[test]
+    fn contact_distance_is_the_sum_of_radii() {
+        // r=2 and r=1: contact at 3.0.
+        let mut a = particle_r(0.0, 0.0, 100.0, 0.0, 2.0);
+        let mut b = particle_r(3.5, 0.0, -100.0, 0.0, 1.0);
+        assert!(try_elastic_collision(&mut a, &mut b, 1.0).is_none());
+
+        let mut a = particle_r(0.0, 0.0, 100.0, 0.0, 2.0);
+        let mut b = particle_r(2.9, 0.0, -100.0, 0.0, 1.0);
+        assert!(try_elastic_collision(&mut a, &mut b, 1.0).is_some());
+    }
+
+    #[test]
+    fn flow_field_moves_particles_smoothly() {
+        let mut particles = vec![
+            particle(100.0, 100.0, 0.0, 0.0),
+            particle(500.0, 300.0, 0.0, 0.0),
+        ];
+        apply_flow(&mut particles, 1.0, 0.01);
+        for p in &particles {
+            assert!(p.vx.is_finite() && p.vy.is_finite());
+            let dv = (p.vx * p.vx + p.vy * p.vy).sqrt();
+            assert!(dv > 0.0, "flow must push every particle");
+            assert!(dv <= FLOW_STRENGTH * 0.01 + 1e-9, "bounded by strength");
+        }
     }
 
     #[test]
@@ -713,7 +818,6 @@ mod tests {
                 &mut recorder,
                 width,
                 height,
-                RADIUS,
                 1.0,
             );
             assert_eq!(
@@ -735,15 +839,7 @@ mod tests {
         ];
         let mut grid = SpatialGrid::new();
         let mut recorder = CollisionRecorder::new();
-        handle_collisions(
-            &mut particles,
-            &mut grid,
-            &mut recorder,
-            width,
-            height,
-            RADIUS,
-            1.0,
-        );
+        handle_collisions(&mut particles, &mut grid, &mut recorder, width, height, 1.0);
         assert_eq!(recorder.sites().len(), 1);
     }
 
@@ -772,17 +868,8 @@ mod tests {
             recorder.clear();
             let mut contact_substeps = 0;
             for _ in 0..8 {
-                update_physics(
-                    particles,
-                    sub_dt,
-                    width,
-                    height,
-                    RADIUS,
-                    gravity_multiplier,
-                    0.0,
-                );
-                let energy =
-                    handle_collisions(particles, &mut grid, recorder, width, height, RADIUS, 0.0);
+                update_physics(particles, sub_dt, width, height, gravity_multiplier, 0.0);
+                let energy = handle_collisions(particles, &mut grid, recorder, width, height, 0.0);
                 if energy > 0.0 {
                     contact_substeps += 1;
                 }
@@ -844,7 +931,7 @@ mod tests {
     #[test]
     fn wall_bounce_reflects_velocity() {
         let mut p = particle(1.0, 50.0, -100.0, 0.0);
-        p.update(0.01, 200, 200, RADIUS, 0.0, 1.0);
+        p.update(0.01, 200, 200, 0.0, 1.0);
         assert!(p.vx > 0.0);
         assert!((p.x - RADIUS).abs() < 1e-9);
     }
@@ -852,14 +939,14 @@ mod tests {
     #[test]
     fn gravity_accelerates_downward() {
         let mut p = particle(100.0, 100.0, 0.0, 0.0);
-        p.update(0.1, 200, 200, RADIUS, 1.0, 1.0);
+        p.update(0.1, 200, 200, 1.0, 1.0);
         assert!((p.vy - GRAVITY * 0.1).abs() < 1e-9);
     }
 
     #[test]
     fn negative_gravity_accelerates_upward() {
         let mut p = particle(100.0, 100.0, 0.0, 0.0);
-        p.update(0.1, 200, 200, RADIUS, -1.0, 1.0);
+        p.update(0.1, 200, 200, -1.0, 1.0);
         assert!((p.vy + GRAVITY * 0.1).abs() < 1e-9);
     }
 
@@ -867,10 +954,10 @@ mod tests {
     fn substep_count_scales_with_speed() {
         let slow = vec![particle(50.0, 50.0, 10.0, 0.0)];
         let fast = vec![particle(50.0, 50.0, 600.0, 0.0)];
-        assert_eq!(substep_count(&slow, 0.008, RADIUS), 1);
-        assert!(substep_count(&fast, 0.008, RADIUS) > 1);
-        assert!(substep_count(&fast, 10.0, RADIUS) <= MAX_SUBSTEPS);
-        assert_eq!(substep_count(&[], 0.008, RADIUS), 1);
+        assert_eq!(substep_count(&slow, 0.008), 1);
+        assert!(substep_count(&fast, 0.008) > 1);
+        assert!(substep_count(&fast, 10.0) <= MAX_SUBSTEPS);
+        assert_eq!(substep_count(&[], 0.008), 1);
     }
 
     #[test]

@@ -200,7 +200,11 @@ impl App {
 
     /// Build the HUD overlay text for the current mode.
     fn hud_lines(&self, sim: &Simulation) -> Vec<String> {
-        let mut lines = vec![
+        let mut lines = Vec::new();
+        if let Some(preset) = self.config.preset {
+            lines.push(format!("Preset: {}", preset.label()));
+        }
+        lines.extend([
             format!("FPS: {:.1}", self.current_fps),
             format!("Particles: {}", sim.particle_count()),
             format!("Gravity: {}%  (Up/Down)", sim.gravity_percent),
@@ -217,7 +221,13 @@ impl App {
                     sim.explosion_threshold
                 )
             },
-        ];
+            format!("Spawn: {}  (B)", sim.spawn_mode.label()),
+            format!(
+                "Matter: {}  (X)   Flow: {}  (F)",
+                if sim.matter { "on" } else { "off" },
+                if sim.flow { "on" } else { "off" },
+            ),
+        ]);
 
         let mut flags = Vec::new();
         if self.paused {
@@ -243,6 +253,7 @@ impl App {
             for key_line in [
                 "P pause   N step   R reset   M mute",
                 "T trails   C colors   B spawn mode",
+                "X matter (fusion/fission)   F flow field",
                 "G hold: gravity well (Shift+G repels)",
                 "Click: burst   Right-click: explosion",
                 "H cycle HUD   Space/Esc/Q quit",
@@ -270,7 +281,6 @@ impl App {
         };
 
         let trails = self.trails;
-        let radius = sim.particle_radius();
         let color_mode = self.color_mode;
         let stopped = sim.stopped();
         let paused = self.paused;
@@ -284,7 +294,7 @@ impl App {
             if let Some(exp) = sim.explosion() {
                 render_explosion(frame, exp, width, height);
             }
-            render_particles(frame, sim.particles(), width, height, radius, color_mode);
+            render_particles(frame, sim.particles(), width, height, color_mode);
             if stopped {
                 draw_text_centered(frame, width, height, "STOPPED", 72.0, MESSAGE_COLOR);
             } else if paused {
@@ -402,15 +412,24 @@ impl App {
             }
             KeyCode::KeyB if !repeat => {
                 if let Some(ref mut sim) = self.sim {
-                    sim.spawn_at_collision = !sim.spawn_at_collision;
-                    println!(
-                        "Spawning at {}",
-                        if sim.spawn_at_collision {
-                            "collision points"
-                        } else {
-                            "center"
-                        }
-                    );
+                    sim.spawn_mode = sim.spawn_mode.next();
+                    println!("Spawn mode: {}", sim.spawn_mode.label());
+                }
+            }
+            KeyCode::KeyX if !repeat => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.matter = !sim.matter;
+                    println!("Matter mechanics {}", if sim.matter { "on" } else { "off" });
+                }
+            }
+            KeyCode::KeyF if !repeat => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.flow = !sim.flow;
+                    println!("Flow field {}", if sim.flow { "on" } else { "off" });
+                    if sim.flow {
+                        // The flow is about to move particles.
+                        sim.wake();
+                    }
                 }
             }
             KeyCode::KeyG => {

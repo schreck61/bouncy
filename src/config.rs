@@ -3,7 +3,8 @@
 
 //! Command line configuration.
 
-use clap::{Parser, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 /// How particles are colored.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -15,14 +16,216 @@ pub enum ColorMode {
     Velocity,
 }
 
+/// Where collision-triggered spawns appear.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum SpawnMode {
+    /// New particles appear near the screen center (classic fountain).
+    #[default]
+    Center,
+    /// New particles are ejected beside the collision that spawned them.
+    Collision,
+    /// Collisions do not spawn (fixed population; explosions never trigger).
+    Off,
+}
+
+impl SpawnMode {
+    /// Cycle for the B key: center -> collision -> off.
+    pub fn next(self) -> Self {
+        match self {
+            SpawnMode::Center => SpawnMode::Collision,
+            SpawnMode::Collision => SpawnMode::Off,
+            SpawnMode::Off => SpawnMode::Center,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SpawnMode::Center => "center",
+            SpawnMode::Collision => "at collisions",
+            SpawnMode::Off => "off",
+        }
+    }
+}
+
+/// Curated settings bundles. A preset supplies defaults; any option given
+/// explicitly on the command line overrides the preset's value for it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Preset {
+    /// Low gravity, energetic collision sprays, trails, velocity colors.
+    Fireworks,
+    /// Slow heavy blobs that merge and drift; fusion/fission enabled.
+    LavaLamp,
+    /// A fixed rack of large elastic balls; no spawning, no explosions.
+    Billiards,
+    /// Many tiny particles drifting on the flow field with soft walls.
+    Snow,
+}
+
+impl Preset {
+    pub fn label(self) -> &'static str {
+        match self {
+            Preset::Fireworks => "fireworks",
+            Preset::LavaLamp => "lava-lamp",
+            Preset::Billiards => "billiards",
+            Preset::Snow => "snow",
+        }
+    }
+
+    /// Apply this preset's bundle to `config`, skipping any field the user
+    /// set explicitly on the command line.
+    fn apply(self, config: &mut Config, matches: &ArgMatches) {
+        fn set<T>(matches: &ArgMatches, id: &str, field: &mut T, value: T) {
+            if matches.value_source(id) != Some(ValueSource::CommandLine) {
+                *field = value;
+            }
+        }
+
+        match self {
+            Preset::Fireworks => {
+                set(matches, "gravity", &mut config.gravity, 40);
+                set(
+                    matches,
+                    "spawn_mode",
+                    &mut config.spawn_mode,
+                    SpawnMode::Collision,
+                );
+                set(matches, "trails", &mut config.trails, true);
+                set(
+                    matches,
+                    "color_mode",
+                    &mut config.color_mode,
+                    ColorMode::Velocity,
+                );
+                set(
+                    matches,
+                    "wall_elasticity",
+                    &mut config.wall_elasticity,
+                    0.85,
+                );
+                set(
+                    matches,
+                    "explosion_threshold",
+                    &mut config.explosion_threshold,
+                    80,
+                );
+                set(
+                    matches,
+                    "min_particles",
+                    &mut config.min_particles,
+                    Some(20),
+                );
+            }
+            Preset::LavaLamp => {
+                set(matches, "matter", &mut config.matter, true);
+                set(matches, "gravity", &mut config.gravity, 10);
+                set(
+                    matches,
+                    "particle_elasticity",
+                    &mut config.particle_elasticity,
+                    0.2,
+                );
+                set(matches, "wall_elasticity", &mut config.wall_elasticity, 0.4);
+                set(matches, "particle_size", &mut config.particle_size, 5.0);
+                set(
+                    matches,
+                    "min_particles",
+                    &mut config.min_particles,
+                    Some(40),
+                );
+                set(
+                    matches,
+                    "spawn_mode",
+                    &mut config.spawn_mode,
+                    SpawnMode::Off,
+                );
+                set(
+                    matches,
+                    "explosion_threshold",
+                    &mut config.explosion_threshold,
+                    0,
+                );
+            }
+            Preset::Billiards => {
+                set(matches, "gravity", &mut config.gravity, 0);
+                set(matches, "particle_size", &mut config.particle_size, 7.0);
+                set(
+                    matches,
+                    "min_particles",
+                    &mut config.min_particles,
+                    Some(12),
+                );
+                set(
+                    matches,
+                    "spawn_mode",
+                    &mut config.spawn_mode,
+                    SpawnMode::Off,
+                );
+                set(
+                    matches,
+                    "explosion_threshold",
+                    &mut config.explosion_threshold,
+                    0,
+                );
+            }
+            Preset::Snow => {
+                set(matches, "flow", &mut config.flow, true);
+                set(matches, "gravity", &mut config.gravity, 25);
+                set(
+                    matches,
+                    "min_particles",
+                    &mut config.min_particles,
+                    Some(90),
+                );
+                set(matches, "wall_elasticity", &mut config.wall_elasticity, 0.1);
+                set(
+                    matches,
+                    "particle_elasticity",
+                    &mut config.particle_elasticity,
+                    0.05,
+                );
+                set(
+                    matches,
+                    "spawn_mode",
+                    &mut config.spawn_mode,
+                    SpawnMode::Off,
+                );
+                set(
+                    matches,
+                    "explosion_threshold",
+                    &mut config.explosion_threshold,
+                    0,
+                );
+            }
+        }
+    }
+}
+
 /// GPU-accelerated particle simulation with elastic collisions, gravity,
 /// and explosive chain reactions.
 #[derive(Parser, Clone, Debug)]
 #[command(name = "bouncy", version, about, after_help = CONTROLS_HELP)]
 pub struct Config {
-    /// Spawn new particles at collision points instead of screen center
-    #[arg(long)]
+    /// Apply a curated settings bundle; explicit options override its values
+    #[arg(long, value_enum)]
+    pub preset: Option<Preset>,
+
+    /// Where collision-triggered spawns appear
+    #[arg(long, value_enum, default_value_t = SpawnMode::Center)]
+    pub spawn_mode: SpawnMode,
+
+    /// Alias for --spawn-mode collision (kept for compatibility)
+    #[arg(long, conflicts_with = "spawn_mode")]
     pub spawn_at_collision: bool,
+
+    /// Enable matter mechanics: slow contacts fuse particles together,
+    /// hard impacts split them into fragments (toggle at runtime with X)
+    #[arg(long)]
+    pub matter: bool,
+
+    /// Enable the ambient flow field that pushes particles along drifting
+    /// currents (toggle at runtime with F)
+    #[arg(long)]
+    pub flow: bool,
 
     /// Set starting/minimum particle count
     #[arg(long, value_parser = clap::value_parser!(u32).range(2..=100))]
@@ -84,6 +287,40 @@ pub struct Config {
     pub verbose: bool,
 }
 
+impl Config {
+    /// The spawn mode, honoring the deprecated `--spawn-at-collision` alias.
+    pub fn effective_spawn_mode(&self) -> SpawnMode {
+        if self.spawn_at_collision {
+            SpawnMode::Collision
+        } else {
+            self.spawn_mode
+        }
+    }
+
+    /// Parse the process command line, then overlay the chosen preset onto
+    /// every option the user did not set explicitly.
+    pub fn resolve() -> Self {
+        match Self::try_resolve_from(std::env::args()) {
+            Ok(config) => config,
+            Err(e) => e.exit(),
+        }
+    }
+
+    /// Testable core of [`Config::resolve`].
+    pub fn try_resolve_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let matches = Self::command().try_get_matches_from(itr)?;
+        let mut config = Self::from_arg_matches(&matches)?;
+        if let Some(preset) = config.preset {
+            preset.apply(&mut config, &matches);
+        }
+        Ok(config)
+    }
+}
+
 const CONTROLS_HELP: &str = "Controls:
   Space, Escape, Q   Exit
   P                  Pause / resume
@@ -98,7 +335,9 @@ const CONTROLS_HELP: &str = "Controls:
   - / =              Adjust explosion threshold by 5 (0 = off)
   T                  Toggle motion trails
   C                  Cycle color mode
-  B                  Toggle spawn location (center / collision point)
+  B                  Cycle spawn mode (center / collision / off)
+  X                  Toggle matter mechanics (fusion/fission)
+  F                  Toggle the flow field
   G (hold)           Gravity well at the cursor; Shift+G repels
   Left click         Spawn a burst of particles at the cursor
   Right click        Trigger an explosion at the cursor
@@ -128,7 +367,7 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Config, clap::Error> {
-        Config::try_parse_from(std::iter::once("bouncy").chain(args.iter().copied()))
+        Config::try_resolve_from(std::iter::once("bouncy").chain(args.iter().copied()))
     }
 
     #[test]
@@ -234,5 +473,67 @@ mod tests {
     #[test]
     fn rejects_unknown_options() {
         assert!(parse(&["--bogus"]).is_err());
+    }
+
+    #[test]
+    fn spawn_mode_parses_and_alias_works() {
+        assert_eq!(
+            parse(&[]).unwrap().effective_spawn_mode(),
+            SpawnMode::Center
+        );
+        assert_eq!(
+            parse(&["--spawn-mode", "collision"])
+                .unwrap()
+                .effective_spawn_mode(),
+            SpawnMode::Collision
+        );
+        assert_eq!(
+            parse(&["--spawn-mode", "off"])
+                .unwrap()
+                .effective_spawn_mode(),
+            SpawnMode::Off
+        );
+        // Deprecated alias still selects collision mode.
+        assert_eq!(
+            parse(&["--spawn-at-collision"])
+                .unwrap()
+                .effective_spawn_mode(),
+            SpawnMode::Collision
+        );
+        // But it conflicts with the new flag.
+        assert!(parse(&["--spawn-at-collision", "--spawn-mode", "off"]).is_err());
+    }
+
+    #[test]
+    fn preset_applies_its_bundle() {
+        let config = parse(&["--preset", "billiards"]).unwrap();
+        assert_eq!(config.gravity, 0);
+        assert_eq!(config.particle_size, 7.0);
+        assert_eq!(config.min_particles, Some(12));
+        assert_eq!(config.spawn_mode, SpawnMode::Off);
+        assert_eq!(config.explosion_threshold, 0);
+
+        let config = parse(&["--preset", "lava-lamp"]).unwrap();
+        assert!(config.matter);
+        assert_eq!(config.gravity, 10);
+
+        let config = parse(&["--preset", "snow"]).unwrap();
+        assert!(config.flow);
+
+        let config = parse(&["--preset", "fireworks"]).unwrap();
+        assert_eq!(config.spawn_mode, SpawnMode::Collision);
+        assert!(config.trails);
+        assert_eq!(config.color_mode, ColorMode::Velocity);
+    }
+
+    #[test]
+    fn explicit_options_override_the_preset() {
+        let config = parse(&["--preset", "billiards", "--gravity", "50"]).unwrap();
+        assert_eq!(config.gravity, 50, "explicit flag wins");
+        assert_eq!(config.particle_size, 7.0, "rest of preset still applies");
+
+        let config = parse(&["--preset", "snow", "--min-particles", "10"]).unwrap();
+        assert_eq!(config.min_particles, Some(10));
+        assert!(config.flow);
     }
 }

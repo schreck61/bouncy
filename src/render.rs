@@ -71,22 +71,20 @@ fn particle_color(particle: &Particle, color_mode: ColorMode) -> [u8; 4] {
     }
 }
 
-/// Render all particles as filled squares/discs of the configured radius.
+/// Render all particles as filled squares/discs of their own radius.
 pub fn render_particles(
     frame: &mut [u8],
     particles: &[Particle],
     width: u32,
     height: u32,
-    radius: f64,
     color_mode: ColorMode,
 ) {
-    // Radius 1.5 draws the classic 3x3 square; larger radii draw discs.
-    #[allow(clippy::cast_possible_truncation)]
-    let r = (radius.round() as i32).max(1);
-    let disc = r > 1;
-    let r_sq = r * r;
-
     for particle in particles {
+        // Radius ~1.5 draws the classic 3x3 square; larger radii draw discs.
+        #[allow(clippy::cast_possible_truncation)]
+        let r = (particle.radius.round() as i32).max(1);
+        let disc = r > 1;
+        let r_sq = r * r;
         let cx = coord_to_pixel(particle.x);
         let cy = coord_to_pixel(particle.y);
         let color = particle_color(particle, color_mode);
@@ -424,28 +422,17 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(9);
         // Particles at the extreme corners must not panic.
         let mut particles = vec![
-            Particle::new_at_position(&mut rng, 0.0, 0.0),
-            Particle::new_at_position(&mut rng, 49.9, 39.9),
-            Particle::new_at_position(&mut rng, -5.0, -5.0),
+            Particle::new_at_position(&mut rng, 0.0, 0.0, 1.5),
+            Particle::new_at_position(&mut rng, 49.9, 39.9, 1.5),
+            Particle::new_at_position(&mut rng, -5.0, -5.0, 1.5),
         ];
         particles[0].color = [1, 2, 3, 255];
         for radius in [1.5, 5.0, 10.0] {
-            render_particles(
-                &mut frame,
-                &particles,
-                width,
-                height,
-                radius,
-                ColorMode::Solid,
-            );
-            render_particles(
-                &mut frame,
-                &particles,
-                width,
-                height,
-                radius,
-                ColorMode::Velocity,
-            );
+            for p in &mut particles {
+                p.radius = radius;
+            }
+            render_particles(&mut frame, &particles, width, height, ColorMode::Solid);
+            render_particles(&mut frame, &particles, width, height, ColorMode::Velocity);
         }
         assert!(frame.iter().any(|&b| b > 0));
     }

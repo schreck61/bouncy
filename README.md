@@ -55,7 +55,11 @@ cargo run --release -- --spawn-at-collision
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--spawn-at-collision` | Spawn new particles at collision points instead of screen center | Off |
+| `--preset <NAME>` | Apply a curated settings bundle: `fireworks`, `lava-lamp`, `billiards`, or `snow`; explicit options override the preset | None |
+| `--spawn-mode <MODE>` | Where collision spawns appear: `center`, `collision`, or `off` | center |
+| `--spawn-at-collision` | Alias for `--spawn-mode collision` (kept for compatibility) | Off |
+| `--matter` | Enable matter mechanics: slow contacts fuse particles, hard impacts split them | Off |
+| `--flow` | Enable the ambient flow field (drifting wind currents) | Off |
 | `--min-particles <N>` | Override the starting/minimum particle count (2-100) | Screen-based |
 | `--gravity <PERCENT>` | Set gravity as percentage of standard (-1000 to 1000); negative values cause upward gravity | 100 |
 | `--wall-elasticity <VALUE>` | Set wall bounce elasticity (0.0-1.5); 0.0 = sticks, 1.0 = elastic, >1.0 = adds energy | 1.0 |
@@ -90,7 +94,9 @@ cargo run --release -- --spawn-at-collision
 | `-` / `=` | Adjust the explosion threshold by 5 spawns/sec (0 = automatic explosions off) |
 | `T` | Toggle motion trails |
 | `C` | Cycle color mode (solid / velocity) |
-| `B` | Toggle spawn location (screen center / collision points) |
+| `B` | Cycle spawn mode (center / collision points / off) |
+| `X` | Toggle matter mechanics (fusion/fission) |
+| `F` | Toggle the flow field |
 | `G` (hold) | Gravity well: attract particles toward the cursor; `Shift+G` repels |
 | Left click | Spawn a burst of particles at the cursor |
 | Right click | Trigger an explosion centered at the cursor (kills every particle the ring reaches, down to a minimum of 2 survivors) |
@@ -110,9 +116,34 @@ When all particles stop moving (velocity below threshold for ~1 second), a "STOP
 The simulation uses a simple but effective physics model:
 
 - **Gravity**: Constant downward (or upward) acceleration applied to all particles
-- **Collisions**: Equal-mass particles exchange momentum along the collision normal using a coefficient of restitution: the per-particle impulse is `dvn * (1 + e) / 2`, so `e = 1.0` swaps normal velocities and `e = 0.0` leaves both particles moving together
+- **Collisions**: Particles exchange momentum along the collision normal using the reduced-mass impulse `j = (1 + e) · dvn · m₁m₂/(m₁ + m₂)`, with mass proportional to area — heavy particles plow through light ones, and unequal-size contacts behave correctly. `e = 1.0` is fully elastic; `e = 0.0` leaves both moving together
 - **Wall Bouncing**: Particles reflect off screen boundaries scaled by the wall elasticity
-- **Substepping**: Each frame is split into up to 8 physics substeps so that the fastest particle never travels more than one radius per step, preventing tunneling
+- **Substepping**: Each frame is split into up to 8 physics substeps so that the fastest particle never travels more than one (smallest) radius per step, preventing tunneling
+
+### Matter Mechanics (`--matter` / `X`)
+
+When enabled, collision energy decides each contact's outcome:
+
+- **Fusion** (slow contact): the two particles merge into one, conserving area, momentum, and blending color by mass. Fused giants grow up to 3x the base radius
+- **Fission** (hard impact): each participant shatters into two half-area fragments that recede perpendicular to the impact, down to a minimum of half the base radius
+- **In between**: an ordinary bounce (and a spawn, if spawning is on)
+
+With spawning off (`--preset lava-lamp` uses this), population and size distribution become emergent: slow regions coarsen into heavy blobs, violent regions shatter them back into dust.
+
+### The Flow Field (`--flow` / `F`)
+
+A slowly drifting field of layered sinusoids pushes particles along invisible currents — best appreciated with trails enabled or the `snow` preset.
+
+### Presets
+
+`--preset` bundles curated settings; any explicit option overrides the preset's value for it:
+
+| Preset | Character |
+|--------|-----------|
+| `fireworks` | Low gravity, collision sprays, trails, velocity colors, frequent explosions |
+| `lava-lamp` | Slow heavy blobs that merge and drift; matter mechanics, no explosions |
+| `billiards` | A fixed rack of large elastic balls; pure collision physics |
+| `snow` | Many tiny particles drifting on the flow field with soft walls |
 
 ### Collision Detection
 

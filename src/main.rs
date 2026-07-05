@@ -28,18 +28,22 @@ mod sim;
 mod text;
 
 use app::App;
-use clap::Parser;
 use config::Config;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 fn main() {
-    let config = Config::parse();
+    let config = Config::resolve();
 
     // Print configuration summary
-    if config.spawn_at_collision {
-        println!("Mode: Spawning particles at collision points");
-    } else {
-        println!("Mode: Spawning particles at center");
+    if let Some(preset) = config.preset {
+        println!("Preset: {}", preset.label());
+    }
+    println!("Spawn mode: {}", config.effective_spawn_mode().label());
+    if config.matter {
+        println!("Matter mechanics: fusion/fission enabled");
+    }
+    if config.flow {
+        println!("Flow field: enabled");
     }
     if config.gravity != 100 {
         println!("Gravity: {}%", config.gravity);
