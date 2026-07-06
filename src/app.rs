@@ -38,6 +38,13 @@ const TIME_SCALE_MIN: f64 = 0.1;
 const TIME_SCALE_MAX: f64 = 4.0;
 /// Simulated time for a single frame-step while paused (N key).
 const FRAME_STEP_DT: f64 = 1.0 / 120.0;
+/// Bullet time: fraction of the chosen time scale while an explosion ring
+/// gets under way (disable with --no-bullet-time).
+const BULLET_TIME_SCALE: f64 = 0.2;
+/// Wall-clock seconds the bullet-time dip holds at full slowdown.
+const BULLET_TIME_HOLD_SECS: f64 = 0.5;
+/// Wall-clock seconds the ramp back to the prior time scale takes.
+const BULLET_TIME_RAMP_SECS: f64 = 0.4;
 /// Consecutive failed presents before giving up (a few seconds at 60 FPS).
 const MAX_RENDER_FAILURES: u32 = 300;
 /// Seconds of cursor inactivity before the cursor is hidden.
@@ -107,6 +114,12 @@ pub struct App {
     well_direction: i8,
     shift_down: bool,
     time_scale: f64,
+    /// Bullet-time choreography: when the current slowdown started, if one
+    /// is active. Purely presentational — the simulation only sees a
+    /// smaller dt.
+    bullet_time_start: Option<Instant>,
+    /// Bullet time on explosions enabled (--no-bullet-time opts out).
+    bullet_time_enabled: bool,
     /// Cursor auto-hide state: what visibility we last set on the window.
     cursor_visible: bool,
     last_cursor_move: Instant,
@@ -124,6 +137,7 @@ impl App {
             trails: config.trails,
             color_mode: config.color_mode,
             verbose: config.verbose,
+            bullet_time_enabled: !config.no_bullet_time,
             audio: Audio::new(config.mute),
             sim: None,
             config,
@@ -142,6 +156,7 @@ impl App {
             well_direction: 0,
             shift_down: false,
             time_scale: 1.0,
+            bullet_time_start: None,
             cursor_visible: true,
             last_cursor_move: Instant::now(),
             window_focused: true,
@@ -196,7 +211,30 @@ impl App {
         }
         if events.explosion_started {
             self.audio.play_explosion();
+            self.start_bullet_time(now);
         }
+    }
+
+    /// Enter bullet time (an explosion ring just started), if enabled. A
+    /// ring starting during another ring's ramp restarts the dip.
+    fn start_bullet_time(&mut self, now: Instant) {
+        if self.bullet_time_enabled {
+            self.bullet_time_start = Some(now);
+        }
+    }
+
+    /// This frame's bullet-time multiplier on the time scale, expiring the
+    /// effect once the ramp back to full speed completes.
+    fn bullet_time_multiplier(&mut self, now: Instant) -> f64 {
+        let Some(start) = self.bullet_time_start else {
+            return 1.0;
+        };
+        let elapsed = now.duration_since(start).as_secs_f64();
+        if elapsed >= BULLET_TIME_HOLD_SECS + BULLET_TIME_RAMP_SECS {
+            self.bullet_time_start = None;
+            return 1.0;
+        }
+        bullet_time_factor(elapsed)
     }
 
     /// Build the HUD overlay text for the current mode.
@@ -248,6 +286,9 @@ impl App {
             flags.push("WELL: ATTRACT");
         } else if self.well_direction < 0 {
             flags.push("WELL: REPEL");
+        }
+        if self.bullet_time_start.is_some() {
+            flags.push("BULLET TIME");
         }
         if !flags.is_empty() {
             lines.push(flags.join("  "));
@@ -361,11 +402,12 @@ impl App {
         let dt = now.duration_since(self.last_time).as_secs_f64().min(0.05);
         self.last_time = now;
 
+        let time_scale = self.time_scale * self.bullet_time_multiplier(now);
         if !self.paused {
-            self.simulate(dt * self.time_scale, now);
+            self.simulate(dt * time_scale, now);
         } else if self.step_once {
             // Frame-step (N while paused): advance one fixed-size step.
-            self.simulate(FRAME_STEP_DT * self.time_scale, now);
+            self.simulate(FRAME_STEP_DT * time_scale, now);
         }
         self.step_once = false;
 
@@ -548,7 +590,21 @@ impl App {
         } else if button == MouseButton::Right && sim.trigger_manual_explosion(x, y) {
             println!("Explosion triggered at cursor");
             self.audio.play_explosion();
+            self.start_bullet_time(Instant::now());
         }
+    }
+}
+
+/// Bullet-time multiplier at `elapsed` wall-clock seconds since the
+/// explosion started: a hard dip to `BULLET_TIME_SCALE`, held for
+/// `BULLET_TIME_HOLD_SECS`, then a linear ramp back to full speed over
+/// `BULLET_TIME_RAMP_SECS`.
+fn bullet_time_factor(elapsed: f64) -> f64 {
+    if elapsed < BULLET_TIME_HOLD_SECS {
+        BULLET_TIME_SCALE
+    } else {
+        let t = ((elapsed - BULLET_TIME_HOLD_SECS) / BULLET_TIME_RAMP_SECS).clamp(0.0, 1.0);
+        BULLET_TIME_SCALE + (1.0 - BULLET_TIME_SCALE) * t
     }
 }
 
@@ -766,6 +822,32 @@ mod tests {
     fn physical_to_logical_conversion() {
         assert_eq!(physical_to_logical(3024, 2.0), 1512);
         assert_eq!(physical_to_logical(1920, 1.0), 1920);
+    }
+
+    #[test]
+    fn bullet_time_dips_holds_then_ramps_back() {
+        // The dip applies immediately and holds for the full window.
+        assert!((bullet_time_factor(0.0) - BULLET_TIME_SCALE).abs() < 1e-9);
+        assert!(
+            (bullet_time_factor(BULLET_TIME_HOLD_SECS * 0.99) - BULLET_TIME_SCALE).abs() < 1e-9
+        );
+
+        // Mid-ramp sits strictly between the dip and full speed.
+        let mid = bullet_time_factor(BULLET_TIME_HOLD_SECS + BULLET_TIME_RAMP_SECS / 2.0);
+        assert!(mid > BULLET_TIME_SCALE && mid < 1.0, "mid-ramp: {mid}");
+
+        // Fully recovered at the end of the ramp and beyond.
+        let done = BULLET_TIME_HOLD_SECS + BULLET_TIME_RAMP_SECS;
+        assert!((bullet_time_factor(done) - 1.0).abs() < 1e-9);
+        assert!((bullet_time_factor(100.0) - 1.0).abs() < 1e-9);
+
+        // Monotonic: time only speeds back up, never jumps backward.
+        let mut prev = 0.0;
+        for i in 0..200 {
+            let f = bullet_time_factor(f64::from(i) * 0.01);
+            assert!(f >= prev, "factor must not decrease (at {i})");
+            prev = f;
+        }
     }
 
     #[test]

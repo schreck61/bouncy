@@ -74,6 +74,7 @@ cargo run --release -- --spawn-at-collision
 | `--initial-speed <V>` | Top speed of newly created particles in px/sec (10-2000); they start at 50-100% of it | 600 |
 | `--color-mode <MODE>` | `solid` or `velocity` (hue follows speed) | solid |
 | `--explosion-threshold <N>` | Spawns per second that trigger an automatic explosion (0-1000); 0 disables automatic explosions (population is then capped at ~20% window coverage, at most 100,000 particles) | 30 |
+| `--no-bullet-time` | Disable the brief slow-motion dip when an explosion ring starts | Off |
 | `--seed <N>` | Seed the random number generator (reproducible starting conditions) | Random |
 | `--verbose` | Print per-second FPS statistics to stdout | Off |
 | `--help`, `-h` | Display help information | |
@@ -170,6 +171,8 @@ The simulation tracks spawn rate over a 1-second sliding window. When this rate 
 2. 99% of particles are marked for elimination
 3. Particles are killed when the ring reaches them
 4. A minimum number of particles survive based on screen size
+
+Every explosion ring (automatic or right-click) also triggers a moment of bullet time: the simulation runs at 0.2x the current time scale for the first half second (wall-clock), then ramps back up over 0.4s. It's pure presentation — physics is unchanged, just stepped with a smaller dt. Opt out with `--no-bullet-time`.
 
 ### Adaptive Particle Count
 

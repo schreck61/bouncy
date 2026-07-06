@@ -324,6 +324,10 @@ pub struct Config {
           value_parser = clap::value_parser!(u64).range(0..=1000))]
     pub explosion_threshold: u64,
 
+    /// Disable the brief bullet-time slowdown when an explosion ring starts
+    #[arg(long)]
+    pub no_bullet_time: bool,
+
     /// Seed the random number generator (reproducible starting conditions)
     #[arg(long)]
     pub seed: Option<u64>,
@@ -439,6 +443,12 @@ mod tests {
         assert_eq!(config.particle_size, 1.5);
         assert_eq!(config.color_mode, ColorMode::Solid);
         assert_eq!(config.seed, None);
+        assert!(!config.no_bullet_time, "bullet time is on by default");
+    }
+
+    #[test]
+    fn no_bullet_time_flag_parses() {
+        assert!(parse(&["--no-bullet-time"]).unwrap().no_bullet_time);
     }
 
     #[test]
