@@ -6,13 +6,7 @@ hotkey + a HUD stats line; presets bundle settings but explicit flags always win
 every mechanic lands with unit tests in the headless `Simulation` core (src/sim.rs);
 every bug fix ships with a regression test.
 
-## 1. Drawable walls
-
-Hold a key (e.g. `V`) and drag to paint static line-segment barriers particles
-bounce off; another key erases all. Biggest lift: segment-vs-circle collision in
-physics.rs (reflect velocity about segment normal, position correction), a
-`Vec<Segment>` in Sim, rendering, and spawn-clearance awareness. Turns the sim
-into pachinko/marble-run construction. Consider max segment count and HUD count.
+All numbered items have shipped; what remains is the opportunistic pile.
 
 ## Smaller / opportunistic
 

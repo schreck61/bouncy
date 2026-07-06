@@ -446,6 +446,8 @@ const CONTROLS_HELP: &str = "Controls:
   G (hold)           Gravity well at the cursor; Shift+G repels
   W                  Pin a persistent well at the cursor; Shift+W repels
   Shift+R            Clear all pinned wells
+  V (hold+drag)      Draw wall segments that particles bounce off
+  Shift+V            Clear all drawn walls
   Left click         Spawn a burst of particles at the cursor
   Right click        Trigger an explosion at the cursor
 

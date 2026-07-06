@@ -107,6 +107,8 @@ cargo run --release -- --spawn-at-collision
 | `G` (hold) | Gravity well: attract particles toward the cursor; `Shift+G` repels |
 | `W` | Pin a persistent gravity well at the cursor; `Shift+W` pins a repeller |
 | `Shift+R` | Clear all pinned wells |
+| `V` (hold + drag) | Draw wall segments that particles bounce off |
+| `Shift+V` | Clear all drawn walls |
 | Left click | Spawn a burst of particles at the cursor |
 | Right click | Trigger an explosion centered at the cursor (kills every particle the ring reaches, down to a minimum of 2 survivors) |
 
@@ -146,6 +148,10 @@ Holding `G` creates a temporary gravity well at the cursor (`Shift+G` repels). P
 ### The Flow Field (`--flow` / `F`)
 
 A slowly drifting field of currents that particles are *entrained into*: each particle is dragged toward the local current's velocity rather than being pushed by a force, so speeds stay bounded at the current's speed (with gentle gusts) instead of accumulating. Best appreciated with trails enabled or the `peace` preset.
+
+### Drawable Walls (`V`)
+
+Hold `V` and drag to paint static walls: the cursor path becomes a polyline of segments (up to 200) that particles bounce off under the same elasticity rule as the arena walls. `Shift+V` erases all walls; `R` (reset) clears them too. Collision-triggered spawns refuse positions inside a wall, so nothing materializes embedded in one. Combine with spawning and gravity for pachinko boards, funnels, and marble runs — this is a purely interactive tool, so it has no CLI flag.
 
 ### Kaleidoscope (`--kaleidoscope` / `K`)
 

@@ -8,9 +8,9 @@ use crate::audio::Audio;
 use crate::config::{ColorMode, Config};
 use crate::render::{
     create_render_context, dim_rect, fade_frame, kaleidoscope_frame, render_explosion,
-    render_particles, render_wells, RenderContext,
+    render_particles, render_segments, render_wells, RenderContext,
 };
-use crate::sim::{Simulation, Well, MAX_PINNED_WELLS};
+use crate::sim::{Simulation, Well, MAX_PINNED_WELLS, MAX_WALL_SEGMENTS};
 use crate::text::{draw_text, draw_text_centered, measure_text};
 use std::rc::Rc;
 use std::time::Instant;
@@ -49,6 +49,10 @@ const BULLET_TIME_RAMP_SECS: f64 = 0.4;
 const MAX_RENDER_FAILURES: u32 = 300;
 /// Seconds of cursor inactivity before the cursor is hidden.
 const CURSOR_HIDE_DELAY: f64 = 2.0;
+/// Minimum cursor travel (pixels) before the wall being drawn (held V)
+/// gains another segment; short strokes stay smooth without flooding the
+/// segment budget.
+const WALL_SEGMENT_MIN_LENGTH: f64 = 12.0;
 
 const HUD_FONT_SIZE: f32 = 16.0;
 const HUD_LINE_HEIGHT: f32 = 20.0;
@@ -114,6 +118,8 @@ pub struct App {
     cursor_y: f64,
     /// Cursor gravity well: 0 = off, 1 = attract (G held), -1 = repel (Shift+G).
     well_direction: i8,
+    /// Wall drawing (V held): where the next segment starts, if active.
+    wall_anchor: Option<(f64, f64)>,
     shift_down: bool,
     time_scale: f64,
     /// Bullet-time choreography: when the current slowdown started, if one
@@ -157,6 +163,7 @@ impl App {
             cursor_x: 0.0,
             cursor_y: 0.0,
             well_direction: 0,
+            wall_anchor: None,
             shift_down: false,
             time_scale: 1.0,
             bullet_time_start: None,
@@ -274,6 +281,10 @@ impl App {
                 sim.pinned_wells().len()
             ),
             format!(
+                "Walls: {}  (V draws, Shift+V clears)",
+                sim.wall_segments().len()
+            ),
+            format!(
                 "Music: {}  (S)   Kaleidoscope: {}  (K)",
                 if self.audio.is_music() { "on" } else { "off" },
                 if self.kaleidoscope { "on" } else { "off" },
@@ -311,6 +322,7 @@ impl App {
                 "S musical pings   K kaleidoscope",
                 "G hold: gravity well (Shift+G repels)",
                 "W pin well (Shift+W repel, Shift+R clear)",
+                "V hold+drag: draw walls (Shift+V clears)",
                 "Click: burst   Right-click: explosion",
                 "H cycle HUD   Space/Esc/Q quit",
             ] {
@@ -352,6 +364,7 @@ impl App {
                 render_explosion(frame, exp, width, height);
             }
             render_wells(frame, sim.pinned_wells(), width, height);
+            render_segments(frame, sim.wall_segments(), width, height);
             render_particles(frame, sim.particles(), width, height, color_mode);
             if kaleidoscope {
                 kaleidoscope_frame(frame, width, height);
@@ -384,7 +397,7 @@ impl App {
         let desired = cursor_should_be_visible(
             self.window_focused,
             self.cursor_inside,
-            self.well_direction != 0,
+            self.well_direction != 0 || self.wall_anchor.is_some(),
             idle,
         );
         if desired != self.cursor_visible {
@@ -439,6 +452,9 @@ impl App {
         if state == ElementState::Released {
             if key_code == KeyCode::KeyG {
                 self.well_direction = 0;
+            }
+            if key_code == KeyCode::KeyV {
+                self.wall_anchor = None;
             }
             return;
         }
@@ -518,6 +534,17 @@ impl App {
                 // The well moves particles; leave the stopped state if set.
                 if let Some(ref mut sim) = self.sim {
                     sim.wake();
+                }
+            }
+            KeyCode::KeyV if !repeat => {
+                if self.shift_down {
+                    if let Some(ref mut sim) = self.sim {
+                        let cleared = sim.clear_wall_segments();
+                        println!("Cleared {cleared} wall segments");
+                    }
+                } else {
+                    // Start drawing: segments are added as the cursor moves.
+                    self.wall_anchor = Some((self.cursor_x, self.cursor_y));
                 }
             }
             KeyCode::KeyW if !repeat => {
@@ -606,6 +633,29 @@ impl App {
         }
     }
 
+    /// Extend the wall being drawn (V held): each time the cursor gets far
+    /// enough from the anchor, drop a segment and move the anchor forward,
+    /// so a curved drag becomes a polyline.
+    fn extend_wall(&mut self) {
+        let Some((ax, ay)) = self.wall_anchor else {
+            return;
+        };
+        let (dx, dy) = (self.cursor_x - ax, self.cursor_y - ay);
+        if dx * dx + dy * dy < WALL_SEGMENT_MIN_LENGTH * WALL_SEGMENT_MIN_LENGTH {
+            return;
+        }
+        let Some(ref mut sim) = self.sim else {
+            return;
+        };
+        if sim.add_wall_segment(ax, ay, self.cursor_x, self.cursor_y) {
+            self.wall_anchor = Some((self.cursor_x, self.cursor_y));
+        } else {
+            // Stop the stroke at the cap instead of retrying every motion.
+            println!("Wall segment limit reached ({MAX_WALL_SEGMENTS})");
+            self.wall_anchor = None;
+        }
+    }
+
     /// Handle a mouse button press at the current cursor position.
     fn handle_mouse(&mut self, button: MouseButton) {
         let (x, y) = (self.cursor_x, self.cursor_y);
@@ -635,16 +685,17 @@ fn bullet_time_factor(elapsed: f64) -> f64 {
     }
 }
 
-/// Cursor auto-hide policy: visible while the window is unfocused, while the
-/// cursor is outside the window, while the gravity well is engaged, or until
-/// `CURSOR_HIDE_DELAY` seconds have passed since the last movement.
+/// Cursor auto-hide policy: visible while the window is unfocused, while
+/// the cursor is outside the window, while a cursor interaction (gravity
+/// well, wall drawing) is engaged, or until `CURSOR_HIDE_DELAY` seconds
+/// have passed since the last movement.
 fn cursor_should_be_visible(
     focused: bool,
     inside: bool,
-    well_active: bool,
+    interacting: bool,
     idle_secs: f64,
 ) -> bool {
-    !focused || !inside || well_active || idle_secs < CURSOR_HIDE_DELAY
+    !focused || !inside || interacting || idle_secs < CURSOR_HIDE_DELAY
 }
 
 /// Draw the HUD overlay lines top-left over a dark semi-transparent panel
@@ -775,6 +826,7 @@ impl ApplicationHandler for App {
                 self.cursor_y = position.y / self.scale_factor;
                 self.cursor_inside = true;
                 self.last_cursor_move = Instant::now();
+                self.extend_wall();
             }
             WindowEvent::CursorEntered { .. } => {
                 self.cursor_inside = true;
@@ -887,7 +939,7 @@ mod tests {
 
         // Any of these forces visibility.
         assert!(cursor_should_be_visible(true, true, false, recently)); // moving
-        assert!(cursor_should_be_visible(true, true, true, idle)); // well held
+        assert!(cursor_should_be_visible(true, true, true, idle)); // well held or wall drawing
         assert!(cursor_should_be_visible(false, true, false, idle)); // unfocused
         assert!(cursor_should_be_visible(true, false, false, idle)); // outside window
     }

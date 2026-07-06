@@ -6,7 +6,7 @@
 
 use crate::config::ColorMode;
 use crate::explosion::{Explosion, EXPLOSION_RING_WIDTH};
-use crate::physics::{color_component, hsv_to_rgba, Particle, INITIAL_VELOCITY};
+use crate::physics::{color_component, hsv_to_rgba, Particle, Segment, INITIAL_VELOCITY};
 use crate::sim::Well;
 use ouroboros::self_referencing;
 use pixels::{Pixels, SurfaceTexture};
@@ -105,6 +105,62 @@ pub fn render_particles(
                     frame[idx..idx + 4].copy_from_slice(&color);
                 }
             }
+        }
+    }
+}
+
+/// Color of drawn wall segments: warm sandstone, distinct from both the
+/// well markers and the random bright particle palette.
+const WALL_COLOR: [u8; 4] = [225, 195, 130, 255];
+
+/// Draw the drawn wall segments as 1-pixel lines, clipped to the frame.
+pub fn render_segments(frame: &mut [u8], segments: &[Segment], width: u32, height: u32) {
+    for seg in segments {
+        draw_line(
+            frame,
+            width,
+            height,
+            (seg.x1, seg.y1),
+            (seg.x2, seg.y2),
+            WALL_COLOR,
+        );
+    }
+}
+
+/// Bresenham line between two points, clipped per pixel to the frame.
+fn draw_line(
+    frame: &mut [u8],
+    width: u32,
+    height: u32,
+    from: (f64, f64),
+    to: (f64, f64),
+    color: [u8; 4],
+) {
+    let (mut x, mut y) = (coord_to_pixel(from.0), coord_to_pixel(from.1));
+    let (x_end, y_end) = (coord_to_pixel(to.0), coord_to_pixel(to.1));
+    let dx = (x_end - x).abs();
+    let dy = -(y_end - y).abs();
+    let sx = if x < x_end { 1 } else { -1 };
+    let sy = if y < y_end { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        // Bounds check: x/y are valid pixel coordinates after this check
+        #[allow(clippy::cast_sign_loss)]
+        if x >= 0 && (x as u32) < width && y >= 0 && (y as u32) < height {
+            let idx = ((y as u32) as usize * width as usize + (x as u32) as usize) * 4;
+            frame[idx..idx + 4].copy_from_slice(&color);
+        }
+        if x == x_end && y == y_end {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
         }
     }
 }
@@ -502,6 +558,42 @@ mod tests {
             render_particles(&mut frame, &particles, width, height, ColorMode::Velocity);
         }
         assert!(frame.iter().any(|&b| b > 0));
+    }
+
+    #[test]
+    fn render_segments_draws_lines_and_clips() {
+        let (width, height) = (50u32, 40u32);
+        let mut frame = vec![0u8; (width * height * 4) as usize];
+        let segments = [
+            Segment {
+                x1: 5.0,
+                y1: 10.0,
+                x2: 15.0,
+                y2: 10.0,
+            },
+            // Runs off both ends of the frame: must clip, not panic.
+            Segment {
+                x1: -10.0,
+                y1: -10.0,
+                x2: 70.0,
+                y2: 60.0,
+            },
+        ];
+        render_segments(&mut frame, &segments, width, height);
+
+        let px = |x: u32, y: u32| frame[((y * width + x) * 4) as usize];
+        assert_eq!(px(5, 10), WALL_COLOR[0], "line start drawn");
+        assert_eq!(px(10, 10), WALL_COLOR[0], "line middle drawn");
+        assert_eq!(px(15, 10), WALL_COLOR[0], "line end drawn");
+        assert_eq!(px(10, 9), 0, "above the line untouched");
+        // The clipped diagonal still leaves its on-screen trace: it must
+        // cross every row of the frame somewhere.
+        for y in 0..height {
+            assert!(
+                (0..width).any(|x| px(x, y) == WALL_COLOR[0]),
+                "diagonal missing from row {y}"
+            );
+        }
     }
 
     #[test]

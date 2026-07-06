@@ -8,8 +8,8 @@
 use crate::config::{Config, SpawnMode};
 use crate::explosion::{max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_WINDOW};
 use crate::physics::{
-    apply_attractor, apply_flow, handle_collisions, has_motion, max_radius, substep_count,
-    update_physics, CollisionRecorder, Particle, SpatialGrid, SpawnSite,
+    apply_attractor, apply_flow, collide_with_segments, handle_collisions, has_motion, max_radius,
+    substep_count, update_physics, CollisionRecorder, Particle, Segment, SpatialGrid, SpawnSite,
     COLLISION_ENERGY_NORMALIZER, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
 };
 use rand::rngs::StdRng;
@@ -64,6 +64,9 @@ const FISSION_KICK_FRACTION: f64 = 0.3;
 /// Maximum number of pinned gravity wells (the W key and --wells stop here;
 /// keep the clap range on --wells in sync).
 pub const MAX_PINNED_WELLS: usize = 16;
+/// Maximum number of drawn wall segments (held V). Enough for elaborate
+/// marble runs while keeping the per-substep segment sweep cheap.
+pub const MAX_WALL_SEGMENTS: usize = 200;
 /// Peak acceleration of each pinned well: half the held well's strength, so
 /// a constellation of pinned wells shapes orbits without overpowering the
 /// cursor well or flinging everything into the walls.
@@ -126,6 +129,8 @@ pub struct Simulation {
     particles: Vec<Particle>,
     /// Persistent gravity wells pinned with the W key (or --wells).
     pinned_wells: Vec<Well>,
+    /// Static wall segments drawn with the V key.
+    segments: Vec<Segment>,
     /// Attractors pinned at startup (--wells); reset restores this layout.
     initial_wells: usize,
     explosion: Option<Explosion>,
@@ -189,6 +194,7 @@ impl Simulation {
             flow: config.flow,
             particles: Vec::new(),
             pinned_wells: Vec::new(),
+            segments: Vec::new(),
             initial_wells: config.wells as usize,
             explosion: None,
             spawn_times: VecDeque::new(),
@@ -248,11 +254,12 @@ impl Simulation {
     }
 
     /// Reset to the initial population and clear all transient state,
-    /// restoring the startup well layout.
+    /// restoring the startup well layout and erasing drawn walls.
     pub fn reset(&mut self) {
         self.populate();
         self.pinned_wells.clear();
         self.place_initial_wells();
+        self.segments.clear();
         self.explosion = None;
         self.spawn_times.clear();
         self.collisions.clear();
@@ -276,6 +283,10 @@ impl Simulation {
 
     pub fn pinned_wells(&self) -> &[Well] {
         &self.pinned_wells
+    }
+
+    pub fn wall_segments(&self) -> &[Segment] {
+        &self.segments
     }
 
     pub fn stopped(&self) -> bool {
@@ -328,6 +339,23 @@ impl Simulation {
     pub fn clear_wells(&mut self) -> usize {
         let cleared = self.pinned_wells.len();
         self.pinned_wells.clear();
+        cleared
+    }
+
+    /// Add a drawn wall segment (held V). Returns false once the segment
+    /// limit is reached.
+    pub fn add_wall_segment(&mut self, x1: f64, y1: f64, x2: f64, y2: f64) -> bool {
+        if self.segments.len() >= MAX_WALL_SEGMENTS {
+            return false;
+        }
+        self.segments.push(Segment { x1, y1, x2, y2 });
+        true
+    }
+
+    /// Remove all drawn walls, returning how many segments were cleared.
+    pub fn clear_wall_segments(&mut self) -> usize {
+        let cleared = self.segments.len();
+        self.segments.clear();
         cleared
     }
 
@@ -413,6 +441,9 @@ impl Simulation {
                 gravity_multiplier,
                 self.wall_elasticity,
             );
+            if !self.segments.is_empty() {
+                collide_with_segments(&mut self.particles, &self.segments, self.wall_elasticity);
+            }
             let energy = handle_collisions(
                 &mut self.particles,
                 &mut self.grid,
@@ -759,8 +790,9 @@ impl Simulation {
     /// A spawn position is usable when it lies inside the arena and clear
     /// of every existing particle (checked via the grid for pre-existing
     /// particles and linearly for this frame's spawns, which the grid
-    /// cannot see yet). The clearance is conservative: the new particle's
-    /// radius plus the largest radius in the population.
+    /// cannot see yet) and of every drawn wall. The clearance is
+    /// conservative: the new particle's radius plus the largest radius in
+    /// the population.
     fn spawn_position_is_free(&self, x: f64, y: f64, first_new: usize, max_r: f64) -> bool {
         let r = self.base_radius;
         let clearance = r + max_r;
@@ -773,6 +805,10 @@ impl Simulation {
             && !self.particles[first_new..]
                 .iter()
                 .any(|p| p.distance_squared_from(x, y) < clearance * clearance)
+            && !self
+                .segments
+                .iter()
+                .any(|s| s.distance_to(x, y) < clearance)
     }
 
     /// Average position of this step's collisions.
@@ -1267,6 +1303,68 @@ mod tests {
     }
 
     #[test]
+    fn drawn_wall_deflects_particles() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.particles[1].x = 790.0;
+        s.particles[1].y = 10.0;
+        // Particle 0 flies right toward a vertical wall at x=400.
+        s.particles[0].x = 300.0;
+        s.particles[0].y = 300.0;
+        s.particles[0].vx = 200.0;
+        assert!(s.add_wall_segment(400.0, 250.0, 400.0, 350.0));
+
+        let now = Instant::now();
+        for _ in 0..100 {
+            s.step(0.01, now, None);
+            if s.particles[0].vx < 0.0 {
+                break;
+            }
+        }
+        assert!(s.particles[0].vx < 0.0, "particle must bounce back");
+        assert!(
+            s.particles[0].x < 400.0,
+            "and stay on its side of the wall: x={}",
+            s.particles[0].x
+        );
+    }
+
+    #[test]
+    fn wall_segment_count_is_capped() {
+        let mut s = sim(&["--min-particles", "2"]);
+        for i in 0..MAX_WALL_SEGMENTS {
+            #[allow(clippy::cast_precision_loss)]
+            let y = 10.0 + i as f64;
+            assert!(s.add_wall_segment(10.0, y, 20.0, y));
+        }
+        assert!(
+            !s.add_wall_segment(10.0, 500.0, 20.0, 500.0),
+            "cap must refuse the next segment"
+        );
+        assert_eq!(s.wall_segments().len(), MAX_WALL_SEGMENTS);
+
+        assert_eq!(s.clear_wall_segments(), MAX_WALL_SEGMENTS);
+        assert!(s.wall_segments().is_empty());
+    }
+
+    #[test]
+    fn spawns_are_blocked_near_walls() {
+        let mut s = sim(&["--min-particles", "2"]);
+        arm_collision(&mut s, 200.0, 300.0);
+        // Fence off the center spawn area (default mode spawns within a
+        // few pixels of (400, 300)): parallel walls 4px apart leave no
+        // point further than the spawn clearance from a wall.
+        for y in [292.0, 296.0, 300.0, 304.0, 308.0] {
+            s.add_wall_segment(380.0, y, 420.0, y);
+        }
+
+        let events = s.step(0.01, Instant::now(), None);
+        assert!(events.max_collision_energy > 0.0, "collision still happens");
+        assert_eq!(s.particle_count(), 2, "no spawn inside the wall fence");
+        assert!(s.spawn_times.is_empty());
+    }
+
+    #[test]
     fn single_startup_well_sits_at_the_center() {
         let s = sim(&["--wells", "1", "--min-particles", "2"]);
         let wells = s.pinned_wells();
@@ -1424,6 +1522,7 @@ mod tests {
         s.spawn_burst(400.0, 300.0);
         s.trigger_manual_explosion(400.0, 300.0);
         s.pin_well(100.0, 100.0, 1);
+        s.add_wall_segment(50.0, 50.0, 150.0, 50.0);
         s.stopped = true;
         s.spawn_times.push_back(Instant::now());
 
@@ -1433,6 +1532,7 @@ mod tests {
         assert!(!s.stopped());
         assert!(s.spawn_times.is_empty());
         assert!(s.pinned_wells().is_empty(), "no startup wells to restore");
+        assert!(s.wall_segments().is_empty(), "drawn walls are erased");
     }
 
     #[test]

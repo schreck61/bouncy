@@ -584,6 +584,91 @@ pub fn update_physics(
     }
 }
 
+/// A static wall segment drawn by the user (held V). Particles bounce off
+/// it under the same elasticity rule as the arena walls.
+#[derive(Copy, Clone)]
+pub struct Segment {
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+}
+
+impl Segment {
+    /// Distance from `(x, y)` to the nearest point of this segment.
+    pub fn distance_to(&self, x: f64, y: f64) -> f64 {
+        let (cx, cy) = self.closest_point(x, y);
+        let (dx, dy) = (x - cx, y - cy);
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// The point on the segment closest to `(x, y)`.
+    fn closest_point(&self, x: f64, y: f64) -> (f64, f64) {
+        let (abx, aby) = (self.x2 - self.x1, self.y2 - self.y1);
+        let len2 = abx * abx + aby * aby;
+        let t = if len2 > 0.0 {
+            (((x - self.x1) * abx + (y - self.y1) * aby) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0 // degenerate segment: a point
+        };
+        (self.x1 + t * abx, self.y1 + t * aby)
+    }
+}
+
+/// Bounce particles off the drawn wall segments. A particle overlapping a
+/// segment is pushed out along the contact normal (closest point to
+/// center), and its approaching velocity component reflects scaled by
+/// `wall_elasticity` — the arena-wall rule. A particle already receding
+/// only gets the position correction, so a bounce is never re-reflected
+/// back into the wall it just left.
+pub fn collide_with_segments(
+    particles: &mut [Particle],
+    segments: &[Segment],
+    wall_elasticity: f64,
+) {
+    for p in particles.iter_mut() {
+        for seg in segments {
+            // Cheap AABB reject before the exact closest-point test.
+            let r = p.radius;
+            if p.x < seg.x1.min(seg.x2) - r
+                || p.x > seg.x1.max(seg.x2) + r
+                || p.y < seg.y1.min(seg.y2) - r
+                || p.y > seg.y1.max(seg.y2) + r
+            {
+                continue;
+            }
+            let (cx, cy) = seg.closest_point(p.x, p.y);
+            let (dx, dy) = (p.x - cx, p.y - cy);
+            let d2 = dx * dx + dy * dy;
+            if d2 >= r * r {
+                continue;
+            }
+            // Contact normal from the wall toward the particle center. A
+            // dead-center hit has no direction; push out perpendicular to
+            // the segment (or straight up for a degenerate point segment).
+            let d = d2.sqrt();
+            let (nx, ny) = if d > 1e-9 {
+                (dx / d, dy / d)
+            } else {
+                let (abx, aby) = (seg.x2 - seg.x1, seg.y2 - seg.y1);
+                let len = (abx * abx + aby * aby).sqrt();
+                if len > 1e-9 {
+                    (-aby / len, abx / len)
+                } else {
+                    (0.0, -1.0)
+                }
+            };
+            p.x = cx + nx * r;
+            p.y = cy + ny * r;
+            let vn = p.vx * nx + p.vy * ny;
+            if vn < 0.0 {
+                p.vx -= (1.0 + wall_elasticity) * vn * nx;
+                p.vy -= (1.0 + wall_elasticity) * vn * ny;
+            }
+        }
+    }
+}
+
 /// Speed of the ambient flow field's currents (pixels/s). Gentle by design:
 /// the flow should read as drift, not wind tunnel.
 pub const FLOW_SPEED: f64 = 60.0;
@@ -658,6 +743,104 @@ mod tests {
             color: [255, 255, 255, 255],
             doomed: false,
         }
+    }
+
+    #[test]
+    fn particle_bounces_off_a_wall_segment() {
+        // Horizontal wall at y=100; particle overlaps it from above while
+        // falling. It must be pushed out to rest on the wall and reflect.
+        let wall = Segment {
+            x1: 50.0,
+            y1: 100.0,
+            x2: 150.0,
+            y2: 100.0,
+        };
+        let mut particles = vec![particle(100.0, 99.0, 30.0, 200.0)];
+        collide_with_segments(&mut particles, &[wall], 1.0);
+
+        let p = &particles[0];
+        assert!((p.y - (100.0 - RADIUS)).abs() < 1e-9, "pushed out: {}", p.y);
+        assert!((p.vy - (-200.0)).abs() < 1e-9, "reflected: {}", p.vy);
+        assert!((p.vx - 30.0).abs() < 1e-9, "tangential velocity untouched");
+    }
+
+    #[test]
+    fn segment_bounce_respects_wall_elasticity() {
+        let wall = Segment {
+            x1: 50.0,
+            y1: 100.0,
+            x2: 150.0,
+            y2: 100.0,
+        };
+        let mut particles = vec![particle(100.0, 99.0, 0.0, 200.0)];
+        collide_with_segments(&mut particles, &[wall], 0.5);
+        assert!(
+            (particles[0].vy - (-100.0)).abs() < 1e-9,
+            "half-elastic wall halves the rebound: {}",
+            particles[0].vy
+        );
+    }
+
+    #[test]
+    fn receding_particle_is_pushed_out_but_not_reflected() {
+        let wall = Segment {
+            x1: 50.0,
+            y1: 100.0,
+            x2: 150.0,
+            y2: 100.0,
+        };
+        // Overlapping but already moving away from the wall.
+        let mut particles = vec![particle(100.0, 99.0, 0.0, -50.0)];
+        collide_with_segments(&mut particles, &[wall], 1.0);
+        let p = &particles[0];
+        assert!((p.y - (100.0 - RADIUS)).abs() < 1e-9, "still pushed out");
+        assert!((p.vy - (-50.0)).abs() < 1e-9, "velocity left alone");
+    }
+
+    #[test]
+    fn segment_endpoints_and_degenerate_segments_are_safe() {
+        // Hit past the endpoint: the corner acts like a point obstacle.
+        let wall = Segment {
+            x1: 50.0,
+            y1: 100.0,
+            x2: 150.0,
+            y2: 100.0,
+        };
+        let mut particles = vec![particle(151.0, 100.0, -100.0, 0.0)];
+        collide_with_segments(&mut particles, &[wall], 1.0);
+        let p = &particles[0];
+        assert!(p.x >= 150.0 + RADIUS - 1e-9, "pushed off the endpoint");
+        assert!(p.vx > 0.0, "reflected off the corner");
+
+        // A zero-length segment exactly at the particle center must not
+        // produce NaN; the particle is pushed out along the fallback normal.
+        let point = Segment {
+            x1: 200.0,
+            y1: 200.0,
+            x2: 200.0,
+            y2: 200.0,
+        };
+        let mut particles = vec![particle(200.0, 200.0, 0.0, 0.0)];
+        collide_with_segments(&mut particles, &[point], 1.0);
+        let p = &particles[0];
+        assert!(p.x.is_finite() && p.y.is_finite() && p.vx.is_finite() && p.vy.is_finite());
+        assert!(
+            point.distance_to(p.x, p.y) >= RADIUS - 1e-9,
+            "no longer overlapping"
+        );
+    }
+
+    #[test]
+    fn segment_distance_measures_to_closest_point() {
+        let seg = Segment {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 10.0,
+            y2: 0.0,
+        };
+        assert!((seg.distance_to(5.0, 3.0) - 3.0).abs() < 1e-9, "broadside");
+        assert!((seg.distance_to(13.0, 4.0) - 5.0).abs() < 1e-9, "past end");
+        assert!((seg.distance_to(5.0, 0.0)).abs() < 1e-9, "on the segment");
     }
 
     #[test]
