@@ -250,8 +250,8 @@ impl App {
     /// Build the HUD overlay text for the current mode.
     fn hud_lines(&self, sim: &Simulation) -> Vec<String> {
         let mut lines = Vec::new();
-        if let Some(preset) = self.config.preset {
-            lines.push(format!("Preset: {}", preset.label()));
+        if let Some(ref preset) = self.config.preset {
+            lines.push(format!("Preset: {preset}"));
         }
         lines.extend([
             format!("FPS: {:.1}", self.current_fps),

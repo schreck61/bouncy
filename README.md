@@ -55,7 +55,9 @@ cargo run --release -- --spawn-at-collision
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--preset <NAME>` | Apply a curated settings bundle: `fireworks`, `blob`, `billiards`, `peace`, `orbits`, or `mandala`; explicit options override the preset | None |
+| `--preset <NAME>` | Apply a settings bundle: a built-in (`fireworks`, `blob`, `billiards`, `peace`, `orbits`, `mandala`) or a preset from the user presets file; explicit options override the preset | None |
+| `--presets-file <PATH>` | Load user presets from this TOML file instead of the platform default location | Platform config dir |
+| `--list-presets` | List built-in and user presets (and where the user file was loaded from), then exit | |
 | `--spawn-mode <MODE>` | Where collision spawns appear: `center`, `collision`, or `off` | center |
 | `--spawn-at-collision` | Alias for `--spawn-mode collision` (kept for compatibility) | Off |
 | `--matter` | Enable matter mechanics: slow contacts fuse particles, hard impacts split them | Off |
@@ -170,6 +172,38 @@ A rendering post-process that mirrors the top-left quadrant of the frame 4-fold 
 | `orbits` | Weightless particles slung around a binary system of pinned wells; trails paint the orbits |
 | `mandala` | The fireworks recipe under a kaleidoscope, minus gravity: symmetric blooms of trails |
 
+### Custom Presets
+
+You can define your own presets in a TOML file. Each top-level table is a preset; its keys are the command-line option names from `--help` (kebab-case; underscores also accepted), and an optional `base` key names a built-in preset to inherit from:
+
+```toml
+[pachinko]
+description = "Big slow balls under heavy gravity"
+base = "billiards"
+gravity = 80
+particle-size = 4.0
+
+[quiet-fireworks]
+description = "Fireworks without the noise, through a kaleidoscope"
+base = "fireworks"
+mute = true
+kaleidoscope = true
+```
+
+The optional `description` is shown by `--list-presets`, just like the built-in preset blurbs.
+
+The file is looked up in these locations (first match wins), or wherever `--presets-file` points. The XDG-style `~/.config` path is checked first on every platform, since that's where command-line users expect it; `$XDG_CONFIG_HOME` overrides `~/.config` when set:
+
+| Platform | Locations checked, in order |
+|----------|-----------------------------|
+| Linux | `~/.config/bouncy/presets.toml` |
+| macOS | `~/.config/bouncy/presets.toml`, then `~/Library/Application Support/bouncy/presets.toml` |
+| Windows | `~\.config\bouncy\presets.toml`, then `%APPDATA%\bouncy\presets.toml` |
+
+Run `--list-presets` to see every built-in and user preset along with the file they were loaded from — the quickest way to check that your file is being picked up.
+
+Preset values are validated by the same parser as the command line (same ranges, same error messages), and precedence is: explicit command-line flag > user preset value > `base` preset value > default. A few rules keep things predictable: user presets cannot share a name with a built-in (use `base` to build on one), `base` must name a built-in (no chaining user presets), and boolean options can only be enabled — like the command line itself, there is no way to switch one off. A missing default file is silently fine; a malformed file or invalid value is a loud error rather than a silently ignored preset.
+
 ### Collision Detection
 
 A uniform spatial grid (rebuilt each substep with zero steady-state allocations) bins particles into cells at least one diameter wide. Only particles in the same or adjacent cells are tested pairwise, making collision detection effectively linear in the particle count.
@@ -254,6 +288,8 @@ const PING_MAX_FREQ: f32 = 1500.0;
 - [`rodio`](https://crates.io/crates/rodio) - Audio playback
 - [`rand`](https://crates.io/crates/rand) - Random number generation
 - [`clap`](https://crates.io/crates/clap) - Command line argument parsing
+- [`toml`](https://crates.io/crates/toml) - User presets file parsing
+- [`dirs`](https://crates.io/crates/dirs) - Platform config directory discovery
 - [`pollster`](https://crates.io/crates/pollster) - Minimal async executor
 - [`ouroboros`](https://crates.io/crates/ouroboros) - Safe self-referential struct support
 - [`ab_glyph`](https://crates.io/crates/ab_glyph) - Font rendering

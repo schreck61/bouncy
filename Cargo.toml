@@ -20,6 +20,8 @@ softbuffer = "0.4"
 ouroboros = "0.18"
 clap = { version = "4.6", features = ["derive"] }
 ab_glyph = "0.2"
+toml = "0.8"
+dirs = "6"
 
 [profile.release]
 lto = "thin"

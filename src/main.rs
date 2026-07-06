@@ -23,6 +23,7 @@ mod audio;
 mod config;
 mod explosion;
 mod physics;
+mod presets;
 mod render;
 mod sim;
 mod text;
@@ -34,9 +35,14 @@ use winit::event_loop::{ControlFlow, EventLoop};
 fn main() {
     let config = Config::resolve();
 
+    if config.list_presets {
+        presets::print_list(config.presets_file.as_deref());
+        return;
+    }
+
     // Print configuration summary
-    if let Some(preset) = config.preset {
-        println!("Preset: {}", preset.label());
+    if let Some(ref preset) = config.preset {
+        println!("Preset: {preset}");
     }
     println!("Spawn mode: {}", config.effective_spawn_mode().label());
     if config.matter {

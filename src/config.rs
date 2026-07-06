@@ -281,11 +281,23 @@ impl Preset {
 /// GPU-accelerated particle simulation with elastic collisions, gravity,
 /// and explosive chain reactions.
 #[derive(Parser, Clone, Debug)]
-#[command(name = "bouncy", version, about, after_help = CONTROLS_HELP)]
+#[command(name = "bouncy", version, about, after_help = CONTROLS_HELP,
+          args_override_self = true)]
 pub struct Config {
-    /// Apply a curated settings bundle; explicit options override its values
-    #[arg(long, value_enum)]
-    pub preset: Option<Preset>,
+    /// Apply a settings bundle: a built-in preset (fireworks, blob,
+    /// billiards, peace, orbits, mandala) or one from the user presets
+    /// file (see --list-presets); explicit options override its values
+    #[arg(long, value_name = "NAME")]
+    pub preset: Option<String>,
+
+    /// Load user presets from this TOML file instead of the platform
+    /// default location
+    #[arg(long, value_name = "PATH")]
+    pub presets_file: Option<std::path::PathBuf>,
+
+    /// List built-in and user presets, then exit
+    #[arg(long)]
+    pub list_presets: bool,
 
     /// Where collision-triggered spawns appear
     #[arg(long, value_enum, default_value_t = SpawnMode::Center)]
@@ -409,17 +421,106 @@ impl Config {
         }
     }
 
-    /// Testable core of [`Config::resolve`].
+    /// Testable core of [`Config::resolve`]: parses the arguments and, when
+    /// the chosen preset is not a built-in, loads the user presets file.
     pub fn try_resolve_from<I, T>(itr: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
-        let matches = Self::command().try_get_matches_from(itr)?;
+        let args: Vec<std::ffi::OsString> = itr.into_iter().map(Into::into).collect();
+
+        // Peek at the arguments to learn the preset name and presets-file
+        // path; built-in presets never touch the filesystem.
+        let peek = {
+            let matches = Self::command().try_get_matches_from(&args)?;
+            Self::from_arg_matches(&matches)?
+        };
+        let needs_file = peek
+            .preset
+            .as_ref()
+            .is_some_and(|name| Preset::from_str(name, true).is_err());
+        let user = if needs_file {
+            crate::presets::load(peek.presets_file.as_deref()).map_err(|msg| {
+                Self::command().error(clap::error::ErrorKind::ValueValidation, msg)
+            })?
+        } else {
+            None
+        };
+        Self::try_resolve_with(&args, user.as_ref())
+    }
+
+    /// Core resolution with the user presets supplied by the caller, so
+    /// tests can inject them without touching the filesystem.
+    pub fn try_resolve_with(
+        args: &[std::ffi::OsString],
+        user: Option<&crate::presets::UserPresets>,
+    ) -> Result<Self, clap::Error> {
+        let matches = Self::command().try_get_matches_from(args)?;
         let mut config = Self::from_arg_matches(&matches)?;
-        if let Some(preset) = config.preset {
-            preset.apply(&mut config, &matches);
+        let Some(name) = config.preset.clone() else {
+            return Ok(config);
+        };
+
+        // Built-ins (including their old-name aliases) win over the file.
+        if let Ok(builtin) = Preset::from_str(&name, true) {
+            config.preset = Some(builtin.label().to_string());
+            builtin.apply(&mut config, &matches);
+            return Ok(config);
         }
+
+        let err = |msg: String| Self::command().error(clap::error::ErrorKind::ValueValidation, msg);
+        let Some(user) = user else {
+            let looked: Vec<String> = crate::presets::default_paths()
+                .iter()
+                .map(|p| format!("'{}'", p.display()))
+                .collect();
+            let looked = if looked.is_empty() {
+                String::new()
+            } else {
+                format!(" (looked for {})", looked.join(", "))
+            };
+            return Err(err(format!(
+                "unknown preset '{name}' and no user presets file was found{looked}; \
+                 see --list-presets"
+            )));
+        };
+        let Some(entry) = user.presets.get(&name) else {
+            let names: Vec<&str> = user.presets.keys().map(String::as_str).collect();
+            return Err(err(format!(
+                "unknown preset '{name}'; user presets in '{}': {}",
+                user.path.display(),
+                if names.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    names.join(", ")
+                }
+            )));
+        };
+
+        // Splice the preset's options in front of the user's arguments and
+        // re-parse: the same parser validates preset values, and because
+        // the user's own arguments come later, anything typed explicitly
+        // wins (args_override_self keeps the last occurrence).
+        let mut spliced: Vec<std::ffi::OsString> =
+            Vec::with_capacity(args.len() + entry.args.len());
+        spliced.push(args.first().cloned().unwrap_or_else(|| "bouncy".into()));
+        spliced.extend(entry.args.iter().map(std::ffi::OsString::from));
+        spliced.extend(args.iter().skip(1).cloned());
+
+        let matches = Self::command().try_get_matches_from(spliced).map_err(|e| {
+            err(format!(
+                "in preset '{name}' from '{}':\n{e}",
+                user.path.display()
+            ))
+        })?;
+        let mut config = Self::from_arg_matches(&matches)?;
+        if let Some(base) = entry.base {
+            // The base built-in fills every option neither the user preset
+            // nor the command line set (both count as explicit here).
+            base.apply(&mut config, &matches);
+        }
+        config.preset = Some(name);
         Ok(config)
     }
 }
@@ -679,14 +780,98 @@ mod tests {
 
     #[test]
     fn old_preset_names_still_work_as_aliases() {
+        let config = parse(&["--preset", "lava-lamp"]).unwrap();
+        assert_eq!(config.preset.as_deref(), Some("blob"), "canonical label");
+        assert!(config.matter, "blob bundle applied");
+        let config = parse(&["--preset", "snow"]).unwrap();
+        assert_eq!(config.preset.as_deref(), Some("peace"));
+        assert!(config.flow, "peace bundle applied");
+    }
+
+    /// Resolve `args` against user presets parsed from `toml` (no
+    /// filesystem involved).
+    fn parse_with(args: &[&str], toml: &str) -> Result<Config, clap::Error> {
+        let user = crate::presets::parse(toml, std::path::Path::new("/test/presets.toml"))
+            .expect("test presets must parse");
+        let args: Vec<std::ffi::OsString> = std::iter::once("bouncy")
+            .chain(args.iter().copied())
+            .map(Into::into)
+            .collect();
+        Config::try_resolve_with(&args, Some(&user))
+    }
+
+    const PACHINKO: &str = "[pachinko]\n\
+        base = \"billiards\"\n\
+        gravity = 80\n\
+        particle-size = 4.0\n";
+
+    #[test]
+    fn user_preset_applies_its_values_and_its_base() {
+        let config = parse_with(&["--preset", "pachinko"], PACHINKO).unwrap();
+        assert_eq!(config.preset.as_deref(), Some("pachinko"));
+        assert_eq!(config.gravity, 80, "preset value wins over base");
+        assert_eq!(config.particle_size, 4.0, "preset value wins over default");
         assert_eq!(
-            parse(&["--preset", "lava-lamp"]).unwrap().preset,
-            Some(Preset::Blob)
+            config.spawn_mode,
+            SpawnMode::Off,
+            "unset options fall through to the base (billiards)"
         );
-        assert_eq!(
-            parse(&["--preset", "snow"]).unwrap().preset,
-            Some(Preset::Peace)
+        assert_eq!(config.explosion_threshold, 0, "base value applied");
+        assert_eq!(config.wall_elasticity, 1.0, "everything else stays default");
+    }
+
+    #[test]
+    fn explicit_flags_override_a_user_preset() {
+        let config = parse_with(&["--preset", "pachinko", "--gravity", "10"], PACHINKO).unwrap();
+        assert_eq!(config.gravity, 10, "the command line always wins");
+        assert_eq!(config.particle_size, 4.0, "rest of the preset holds");
+        assert_eq!(config.spawn_mode, SpawnMode::Off, "and so does its base");
+    }
+
+    #[test]
+    fn user_preset_without_base_leaves_defaults_alone() {
+        let config = parse_with(&["--preset", "slow"], "[slow]\ninitial-speed = 60.0\n").unwrap();
+        assert_eq!(config.initial_speed, 60.0);
+        assert_eq!(config.gravity, 100, "defaults untouched");
+        assert_eq!(config.spawn_mode, SpawnMode::Center);
+    }
+
+    #[test]
+    fn user_preset_values_are_validated_like_the_command_line() {
+        let err = parse_with(&["--preset", "broken"], "[broken]\ngravity = 5000\n").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("broken"), "error names the preset: {msg}");
+
+        // Cross-option rules apply too: width requires height.
+        let err = parse_with(&["--preset", "sized"], "[sized]\nwidth = 800\n").unwrap_err();
+        assert!(err.to_string().contains("sized"), "{err}");
+    }
+
+    #[test]
+    fn unknown_preset_lists_the_available_user_presets() {
+        let err = parse_with(&["--preset", "nope"], PACHINKO).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown preset 'nope'"), "{msg}");
+        assert!(msg.contains("pachinko"), "lists what exists: {msg}");
+
+        let args: Vec<std::ffi::OsString> = ["bouncy", "--preset", "nope"]
+            .iter()
+            .map(Into::into)
+            .collect();
+        let err = Config::try_resolve_with(&args, None).unwrap_err();
+        assert!(
+            err.to_string().contains("no user presets file"),
+            "explains the missing file: {err}"
         );
+    }
+
+    #[test]
+    fn builtin_presets_win_over_the_user_file() {
+        // A built-in name resolves without consulting user presets even
+        // when a file is present.
+        let config = parse_with(&["--preset", "billiards"], PACHINKO).unwrap();
+        assert_eq!(config.preset.as_deref(), Some("billiards"));
+        assert_eq!(config.particle_size, 7.0);
     }
 
     #[test]
