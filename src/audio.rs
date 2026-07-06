@@ -6,7 +6,9 @@
 //! Audio is optional — if no output device is available the simulation runs
 //! silently. Pings are pre-generated at startup into a small set of pitch
 //! buckets so playback allocates nothing per collision, and are panned
-//! left/right based on where on screen the collision happened.
+//! left/right based on where on screen the collision happened. Musical mode
+//! (--music / S) swaps the linear pitch buckets for pentatonic scale
+//! degrees, turning collision showers into wind-chime melodies.
 
 use crate::physics::COLLISION_ENERGY_NORMALIZER;
 use rand::Rng;
@@ -20,6 +22,21 @@ const PING_MIN_FREQ: f32 = 300.0;
 const PING_MAX_FREQ: f32 = 1500.0;
 const PING_BUCKETS: usize = 16;
 const EXPLOSION_DURATION_MS: u64 = 800;
+
+// Musical mode (--music / S key): pings snap to a major-pentatonic scale,
+// with the collision energy picking the scale degree.
+/// Semitone offsets of the scale degrees, spanning two octaves up from the
+/// root and closing on the double octave.
+const PENTATONIC_SEMITONES: [f32; 11] =
+    [0.0, 2.0, 4.0, 7.0, 9.0, 12.0, 14.0, 16.0, 19.0, 21.0, 24.0];
+/// Root note of the scale (C4). Two octaves up lands on C6 (~1046 Hz),
+/// comfortably inside the continuous map's 300-1500 Hz band.
+const MUSIC_ROOT_FREQ: f32 = 261.63;
+
+/// Equal-temperament frequency of the scale degree at `index`.
+fn note_frequency(index: usize) -> f32 {
+    MUSIC_ROOT_FREQ * (PENTATONIC_SEMITONES[index] / 12.0).exp2()
+}
 
 /// Generate a ping sound with exponential decay at the given frequency.
 fn generate_ping(frequency: f32) -> SamplesBuffer {
@@ -74,16 +91,17 @@ fn generate_explosion() -> SamplesBuffer {
     SamplesBuffer::new(1, AUDIO_SAMPLE_RATE, samples)
 }
 
-/// Pick the pre-generated ping bucket for a normalized (0.0-1.0) energy.
-fn ping_bucket(energy_normalized: f32) -> usize {
-    // Bucket count is small; truncation is the intended floor behavior.
+/// Map a normalized (0.0-1.0) energy onto one of `count` pre-generated
+/// buffers: linear pitch buckets normally, scale degrees in musical mode.
+fn energy_index(energy_normalized: f32, count: usize) -> usize {
+    // Counts are small; truncation is the intended rounding behavior.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss
     )]
-    let bucket = (energy_normalized.clamp(0.0, 1.0) * (PING_BUCKETS - 1) as f32).round() as usize;
-    bucket.min(PING_BUCKETS - 1)
+    let index = (energy_normalized.clamp(0.0, 1.0) * (count - 1) as f32).round() as usize;
+    index.min(count - 1)
 }
 
 /// Constant-power stereo gains for a pan position (0.0 = left, 1.0 = right).
@@ -101,16 +119,19 @@ fn ping_audible(energy: f64) -> bool {
 }
 
 /// Audio output system. Holds the output stream (if a device is available),
-/// the mute state, and pre-generated ping buffers.
+/// the mute and musical-mode states, and pre-generated ping buffers for
+/// both modes (so toggling at runtime is instant and allocation-free).
 pub struct Audio {
     stream: Option<OutputStream>,
     muted: bool,
+    music: bool,
     pings: Vec<SamplesBuffer>,
+    notes: Vec<SamplesBuffer>,
 }
 
 impl Audio {
     /// Open the default audio device, degrading to silence if unavailable.
-    pub fn new(muted: bool) -> Self {
+    pub fn new(muted: bool, music: bool) -> Self {
         let stream = match OutputStreamBuilder::open_default_stream() {
             Ok(mut stream) => {
                 stream.log_on_drop(false);
@@ -129,11 +150,16 @@ impl Audio {
                 generate_ping(PING_MIN_FREQ + t * (PING_MAX_FREQ - PING_MIN_FREQ))
             })
             .collect();
+        let notes = (0..PENTATONIC_SEMITONES.len())
+            .map(|i| generate_ping(note_frequency(i)))
+            .collect();
 
         Audio {
             stream,
             muted,
+            music,
             pings,
+            notes,
         }
     }
 
@@ -147,10 +173,22 @@ impl Audio {
         self.muted
     }
 
-    /// Play a collision ping. Pitch follows collision energy; the sound is
-    /// panned by `pan` (0.0 = left edge of screen, 1.0 = right edge).
-    /// Contacts below the audibility floor are silent — a drifting field of
-    /// grazing particles should not produce a constant ticking.
+    /// Toggle musical mode; returns the new state.
+    pub fn toggle_music(&mut self) -> bool {
+        self.music = !self.music;
+        self.music
+    }
+
+    pub fn is_music(&self) -> bool {
+        self.music
+    }
+
+    /// Play a collision ping. Pitch follows collision energy — continuously
+    /// in the default mode, snapped to a pentatonic scale degree in musical
+    /// mode — and the sound is panned by `pan` (0.0 = left edge of screen,
+    /// 1.0 = right edge). Contacts below the audibility floor are silent —
+    /// a drifting field of grazing particles should not produce a constant
+    /// ticking.
     pub fn play_ping(&self, energy: f64, pan: f32) {
         if !ping_audible(energy) {
             return;
@@ -161,7 +199,8 @@ impl Audio {
         // f64->f32 truncation is acceptable for audio frequency calculation
         #[allow(clippy::cast_possible_truncation)]
         let energy_normalized = (energy / COLLISION_ENERGY_NORMALIZER).clamp(0.0, 1.0) as f32;
-        let ping = self.pings[ping_bucket(energy_normalized)].clone();
+        let buffers = if self.music { &self.notes } else { &self.pings };
+        let ping = buffers[energy_index(energy_normalized, buffers.len())].clone();
         let (left, right) = pan_gains(pan);
         stream
             .mixer()
@@ -199,11 +238,42 @@ mod tests {
     }
 
     #[test]
-    fn ping_buckets_cover_range() {
-        assert_eq!(ping_bucket(0.0), 0);
-        assert_eq!(ping_bucket(1.0), PING_BUCKETS - 1);
-        assert_eq!(ping_bucket(2.0), PING_BUCKETS - 1);
-        assert_eq!(ping_bucket(-1.0), 0);
+    fn energy_index_covers_the_full_range_for_both_modes() {
+        for count in [PING_BUCKETS, PENTATONIC_SEMITONES.len()] {
+            assert_eq!(energy_index(0.0, count), 0);
+            assert_eq!(energy_index(1.0, count), count - 1);
+            assert_eq!(energy_index(2.0, count), count - 1, "clamped above");
+            assert_eq!(energy_index(-1.0, count), 0, "clamped below");
+            let mid = energy_index(0.5, count);
+            assert!(
+                mid > 0 && mid < count - 1,
+                "mid energy picks a middle index"
+            );
+        }
+    }
+
+    #[test]
+    fn pentatonic_notes_span_two_octaves_and_stay_on_scale() {
+        let first = note_frequency(0);
+        let last = note_frequency(PENTATONIC_SEMITONES.len() - 1);
+        assert!((first - MUSIC_ROOT_FREQ).abs() < 1e-3, "starts at the root");
+        assert!(
+            (last - MUSIC_ROOT_FREQ * 4.0).abs() < 1e-2,
+            "ends two octaves up"
+        );
+
+        for (i, &expected_semitones) in PENTATONIC_SEMITONES.iter().enumerate() {
+            let f = note_frequency(i);
+            // Each note is an exact equal-temperament scale degree.
+            let semitones = 12.0 * (f / MUSIC_ROOT_FREQ).log2();
+            assert!(
+                (semitones - expected_semitones).abs() < 1e-3,
+                "degree {i} is {semitones} semitones"
+            );
+            if i > 0 {
+                assert!(f > note_frequency(i - 1), "scale ascends");
+            }
+        }
     }
 
     #[test]

@@ -109,6 +109,31 @@ pub fn render_particles(
     }
 }
 
+/// Mirror the frame 4-fold about the screen center (kaleidoscope): the
+/// top-left quadrant reflects into the other three. Runs as a post-process
+/// after all drawing but before the HUD, so overlay text stays readable.
+/// For odd dimensions the center row/column belong to the source quadrant.
+pub fn kaleidoscope_frame(frame: &mut [u8], width: u32, height: u32) {
+    let w = width as usize;
+    let h = height as usize;
+    let row_bytes = w * 4;
+    // Reflect the left half of each top-half row onto its right half...
+    for y in 0..h.div_ceil(2) {
+        let row = y * row_bytes;
+        for x in 0..w / 2 {
+            let src = row + x * 4;
+            let dst = row + (w - 1 - x) * 4;
+            frame.copy_within(src..src + 4, dst);
+        }
+    }
+    // ...then reflect the (now symmetric) top half onto the bottom.
+    for y in 0..h / 2 {
+        let src = y * row_bytes;
+        let dst = (h - 1 - y) * row_bytes;
+        frame.copy_within(src..src + row_bytes, dst);
+    }
+}
+
 /// Radius of the pinned-well marker ring in pixels.
 const WELL_MARKER_RADIUS: i32 = 7;
 /// Marker color for attracting wells (cool cyan: pulls inward).
@@ -477,6 +502,37 @@ mod tests {
             render_particles(&mut frame, &particles, width, height, ColorMode::Velocity);
         }
         assert!(frame.iter().any(|&b| b > 0));
+    }
+
+    #[test]
+    fn kaleidoscope_mirrors_four_fold_and_handles_odd_sizes() {
+        // Even size: a marked pixel appears in all four quadrants and
+        // stale content in the other quadrants is overwritten.
+        {
+            let (w, h) = (6u32, 4u32);
+            let mut frame = vec![0u8; (w * h * 4) as usize];
+            let idx = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+            frame[idx(1, 1)] = 200;
+            frame[idx(4, 2)] = 99; // stale pixel in the bottom-right quadrant
+            kaleidoscope_frame(&mut frame, w, h);
+            assert_eq!(frame[idx(1, 1)], 200, "source pixel survives");
+            assert_eq!(frame[idx(4, 1)], 200, "mirrored horizontally");
+            assert_eq!(frame[idx(1, 2)], 200, "mirrored vertically");
+            assert_eq!(frame[idx(4, 2)], 200, "stale content overwritten");
+        }
+
+        // Odd size: the center row/column belong to the source quadrant.
+        {
+            let (w, h) = (5u32, 5u32);
+            let mut frame = vec![0u8; (w * h * 4) as usize];
+            let idx = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+            frame[idx(2, 2)] = 150; // dead center
+            frame[idx(0, 2)] = 70; // center row, left edge
+            kaleidoscope_frame(&mut frame, w, h);
+            assert_eq!(frame[idx(2, 2)], 150, "center pixel survives");
+            assert_eq!(frame[idx(4, 2)], 70, "center row mirrors horizontally");
+            assert_eq!(frame[idx(0, 2)], 70, "left edge untouched");
+        }
     }
 
     #[test]

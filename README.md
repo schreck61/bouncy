@@ -55,7 +55,7 @@ cargo run --release -- --spawn-at-collision
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--preset <NAME>` | Apply a curated settings bundle: `fireworks`, `blob`, `billiards`, `peace`, or `orbits`; explicit options override the preset | None |
+| `--preset <NAME>` | Apply a curated settings bundle: `fireworks`, `blob`, `billiards`, `peace`, `orbits`, or `mandala`; explicit options override the preset | None |
 | `--spawn-mode <MODE>` | Where collision spawns appear: `center`, `collision`, or `off` | center |
 | `--spawn-at-collision` | Alias for `--spawn-mode collision` (kept for compatibility) | Off |
 | `--matter` | Enable matter mechanics: slow contacts fuse particles, hard impacts split them | Off |
@@ -69,12 +69,14 @@ cargo run --release -- --spawn-at-collision
 | `--height <N>` | Set window height in pixels (100-4320); must be used with `--width` | Fullscreen |
 | `--cpu` | Force CPU rendering (softbuffer) instead of GPU | Off |
 | `--mute` | Start with audio muted | Off |
+| `--music` | Quantize collision pings to a pentatonic scale (energy picks the note) | Off |
+| `--kaleidoscope` | Mirror the frame 4-fold around the screen center | Off |
 | `--trails` | Leave motion trails behind particles | Off |
 | `--particle-size <R>` | Particle radius in pixels (0.5-10.0) | 1.5 |
 | `--initial-speed <V>` | Top speed of newly created particles in px/sec (10-2000); they start at 50-100% of it | 600 |
 | `--color-mode <MODE>` | `solid` or `velocity` (hue follows speed) | solid |
 | `--explosion-threshold <N>` | Spawns per second that trigger an automatic explosion (0-1000); 0 disables automatic explosions (population is then capped at ~20% window coverage, at most 100,000 particles) | 30 |
-| `--no-bullet-time` | Disable the brief slow-motion dip when an explosion ring starts | Off |
+| `--bullet-time` | Slow time briefly (bullet time) whenever an explosion ring starts | Off |
 | `--seed <N>` | Seed the random number generator (reproducible starting conditions) | Random |
 | `--verbose` | Print per-second FPS statistics to stdout | Off |
 | `--help`, `-h` | Display help information | |
@@ -100,6 +102,8 @@ cargo run --release -- --spawn-at-collision
 | `B` | Cycle spawn mode (center / collision points / off) |
 | `X` | Toggle matter mechanics (fusion/fission) |
 | `F` | Toggle the flow field |
+| `S` | Toggle musical pings (pentatonic scale) |
+| `K` | Toggle kaleidoscope rendering |
 | `G` (hold) | Gravity well: attract particles toward the cursor; `Shift+G` repels |
 | `W` | Pin a persistent gravity well at the cursor; `Shift+W` pins a repeller |
 | `Shift+R` | Clear all pinned wells |
@@ -143,17 +147,22 @@ Holding `G` creates a temporary gravity well at the cursor (`Shift+G` repels). P
 
 A slowly drifting field of currents that particles are *entrained into*: each particle is dragged toward the local current's velocity rather than being pushed by a force, so speeds stay bounded at the current's speed (with gentle gusts) instead of accumulating. Best appreciated with trails enabled or the `peace` preset.
 
+### Kaleidoscope (`--kaleidoscope` / `K`)
+
+A rendering post-process that mirrors the top-left quadrant of the frame 4-fold around the screen center — physics is untouched; only the presented image is symmetric. The HUD and status text draw after the mirror, so they stay readable. Hypnotic with trails and collision sprays; the `mandala` preset bundles exactly that.
+
 ### Presets
 
 `--preset` bundles curated settings; any explicit option overrides the preset's value for it:
 
 | Preset | Character |
 |--------|-----------|
-| `fireworks` | Low gravity, collision sprays, trails, velocity colors, frequent explosions |
+| `fireworks` | Low gravity, collision sprays, trails, velocity colors, frequent slow-motion explosions |
 | `blob` | Slow heavy blobs that merge and drift; matter mechanics, no explosions |
 | `billiards` | A fixed rack of large elastic balls; pure collision physics |
 | `peace` | Many tiny particles drifting on the flow field with soft walls |
 | `orbits` | Weightless particles slung around a binary system of pinned wells; trails paint the orbits |
+| `mandala` | The fireworks recipe under a kaleidoscope, minus gravity: symmetric blooms of trails |
 
 ### Collision Detection
 
@@ -172,7 +181,7 @@ The simulation tracks spawn rate over a 1-second sliding window. When this rate 
 3. Particles are killed when the ring reaches them
 4. A minimum number of particles survive based on screen size
 
-Every explosion ring (automatic or right-click) also triggers a moment of bullet time: the simulation runs at 0.2x the current time scale for the first half second (wall-clock), then ramps back up over 0.4s. It's pure presentation — physics is unchanged, just stepped with a smaller dt. Opt out with `--no-bullet-time`.
+With `--bullet-time`, every explosion ring (automatic or right-click) also triggers a moment of bullet time: the simulation runs at 0.1x the current time scale for the first second (wall-clock), then ramps back up over 0.4s. It's pure presentation — physics is unchanged, just stepped with a smaller dt. The `fireworks` and `mandala` presets enable it.
 
 ### Adaptive Particle Count
 
@@ -201,6 +210,7 @@ Use `--min-particles <N>` to override this with a fixed count between 2 and 100.
 All sounds are generated programmatically:
 
 - **Collision Pings**: Sine wave with exponential decay, frequency mapped to collision energy (300-1500 Hz). Pings are pre-generated into pitch buckets at startup (no per-collision allocation) and stereo-panned to match the on-screen collision position
+- **Musical Mode** (`--music` / `S`): pings snap to a major-pentatonic scale instead — collision energy picks the degree across two octaves up from C4 — turning collision showers into wind-chime melodies. Per-note buffers are pre-generated alongside the linear buckets, so toggling is instant
 - **Explosion Rumble**: Low-frequency oscillators (40-80 Hz) mixed with noise, shaped with attack/decay envelope
 
 If no audio output device is available (e.g. headless machines), the simulation runs silently instead of failing.

@@ -64,6 +64,9 @@ pub enum Preset {
     /// Weightless particles slung around pinned gravity wells; trails
     /// paint the orbits.
     Orbits,
+    /// Kaleidoscope over weightless collision sprays: symmetric blooms
+    /// of trails.
+    Mandala,
 }
 
 impl Preset {
@@ -74,6 +77,7 @@ impl Preset {
             Preset::Billiards => "billiards",
             Preset::Peace => "peace",
             Preset::Orbits => "orbits",
+            Preset::Mandala => "mandala",
         }
     }
 
@@ -88,6 +92,7 @@ impl Preset {
 
         match self {
             Preset::Fireworks => {
+                set(matches, "bullet_time", &mut config.bullet_time, true);
                 set(matches, "gravity", &mut config.gravity, 40);
                 set(
                     matches,
@@ -204,6 +209,44 @@ impl Preset {
                     0,
                 );
             }
+            Preset::Mandala => {
+                // The fireworks recipe under a kaleidoscope, minus gravity:
+                // weightless sprays keep the bloom radially symmetric.
+                set(matches, "bullet_time", &mut config.bullet_time, true);
+                set(matches, "kaleidoscope", &mut config.kaleidoscope, true);
+                set(matches, "trails", &mut config.trails, true);
+                set(matches, "gravity", &mut config.gravity, 0);
+                set(
+                    matches,
+                    "spawn_mode",
+                    &mut config.spawn_mode,
+                    SpawnMode::Collision,
+                );
+                set(
+                    matches,
+                    "color_mode",
+                    &mut config.color_mode,
+                    ColorMode::Velocity,
+                );
+                set(
+                    matches,
+                    "wall_elasticity",
+                    &mut config.wall_elasticity,
+                    0.85,
+                );
+                set(
+                    matches,
+                    "explosion_threshold",
+                    &mut config.explosion_threshold,
+                    80,
+                );
+                set(
+                    matches,
+                    "min_particles",
+                    &mut config.min_particles,
+                    Some(20),
+                );
+            }
             Preset::Orbits => {
                 // A binary system of pinned wells with weightless particles
                 // launched slowly enough to stay bound; trails paint the
@@ -301,6 +344,16 @@ pub struct Config {
     #[arg(long)]
     pub mute: bool,
 
+    /// Quantize collision pings to a pentatonic scale — energy picks the
+    /// note (toggle at runtime with S)
+    #[arg(long)]
+    pub music: bool,
+
+    /// Mirror the frame 4-fold around the screen center (toggle at runtime
+    /// with K)
+    #[arg(long)]
+    pub kaleidoscope: bool,
+
     /// Leave motion trails behind particles instead of clearing each frame
     #[arg(long)]
     pub trails: bool,
@@ -324,9 +377,9 @@ pub struct Config {
           value_parser = clap::value_parser!(u64).range(0..=1000))]
     pub explosion_threshold: u64,
 
-    /// Disable the brief bullet-time slowdown when an explosion ring starts
+    /// Slow time briefly (bullet time) whenever an explosion ring starts
     #[arg(long)]
-    pub no_bullet_time: bool,
+    pub bullet_time: bool,
 
     /// Seed the random number generator (reproducible starting conditions)
     #[arg(long)]
@@ -388,6 +441,8 @@ const CONTROLS_HELP: &str = "Controls:
   B                  Cycle spawn mode (center / collision / off)
   X                  Toggle matter mechanics (fusion/fission)
   F                  Toggle the flow field
+  S                  Toggle musical pings (pentatonic scale)
+  K                  Toggle kaleidoscope rendering
   G (hold)           Gravity well at the cursor; Shift+G repels
   W                  Pin a persistent well at the cursor; Shift+W repels
   Shift+R            Clear all pinned wells
@@ -443,12 +498,20 @@ mod tests {
         assert_eq!(config.particle_size, 1.5);
         assert_eq!(config.color_mode, ColorMode::Solid);
         assert_eq!(config.seed, None);
-        assert!(!config.no_bullet_time, "bullet time is on by default");
+        assert!(!config.bullet_time, "bullet time is opt-in");
+        assert!(!config.music);
+        assert!(!config.kaleidoscope);
     }
 
     #[test]
-    fn no_bullet_time_flag_parses() {
-        assert!(parse(&["--no-bullet-time"]).unwrap().no_bullet_time);
+    fn music_and_kaleidoscope_flags_parse() {
+        assert!(parse(&["--music"]).unwrap().music);
+        assert!(parse(&["--kaleidoscope"]).unwrap().kaleidoscope);
+    }
+
+    #[test]
+    fn bullet_time_flag_parses() {
+        assert!(parse(&["--bullet-time"]).unwrap().bullet_time);
     }
 
     #[test]
@@ -592,6 +655,7 @@ mod tests {
         assert_eq!(config.spawn_mode, SpawnMode::Collision);
         assert!(config.trails);
         assert_eq!(config.color_mode, ColorMode::Velocity);
+        assert!(config.bullet_time, "fireworks slows down its explosions");
 
         let config = parse(&["--preset", "orbits"]).unwrap();
         assert_eq!(config.wells, 2);
@@ -600,6 +664,15 @@ mod tests {
         assert_eq!(config.initial_speed, 220.0);
         assert_eq!(config.spawn_mode, SpawnMode::Off);
         assert_eq!(config.explosion_threshold, 0);
+
+        let config = parse(&["--preset", "mandala"]).unwrap();
+        assert!(config.kaleidoscope);
+        assert!(config.bullet_time);
+        assert!(config.trails);
+        assert_eq!(config.gravity, 0);
+        assert_eq!(config.spawn_mode, SpawnMode::Collision);
+        assert_eq!(config.color_mode, ColorMode::Velocity);
+        assert_eq!(config.explosion_threshold, 80);
     }
 
     #[test]

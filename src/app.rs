@@ -7,8 +7,8 @@
 use crate::audio::Audio;
 use crate::config::{ColorMode, Config};
 use crate::render::{
-    create_render_context, dim_rect, fade_frame, render_explosion, render_particles, render_wells,
-    RenderContext,
+    create_render_context, dim_rect, fade_frame, kaleidoscope_frame, render_explosion,
+    render_particles, render_wells, RenderContext,
 };
 use crate::sim::{Simulation, Well, MAX_PINNED_WELLS};
 use crate::text::{draw_text, draw_text_centered, measure_text};
@@ -39,10 +39,10 @@ const TIME_SCALE_MAX: f64 = 4.0;
 /// Simulated time for a single frame-step while paused (N key).
 const FRAME_STEP_DT: f64 = 1.0 / 120.0;
 /// Bullet time: fraction of the chosen time scale while an explosion ring
-/// gets under way (disable with --no-bullet-time).
-const BULLET_TIME_SCALE: f64 = 0.2;
+/// gets under way (opt in with --bullet-time).
+const BULLET_TIME_SCALE: f64 = 0.1;
 /// Wall-clock seconds the bullet-time dip holds at full slowdown.
-const BULLET_TIME_HOLD_SECS: f64 = 0.5;
+const BULLET_TIME_HOLD_SECS: f64 = 1.0;
 /// Wall-clock seconds the ramp back to the prior time scale takes.
 const BULLET_TIME_RAMP_SECS: f64 = 0.4;
 /// Consecutive failed presents before giving up (a few seconds at 60 FPS).
@@ -87,6 +87,8 @@ pub struct App {
     config: Config,
     trails: bool,
     color_mode: ColorMode,
+    /// Kaleidoscope post-process enabled (K toggles).
+    kaleidoscope: bool,
     verbose: bool,
 
     // Subsystems
@@ -118,7 +120,7 @@ pub struct App {
     /// is active. Purely presentational — the simulation only sees a
     /// smaller dt.
     bullet_time_start: Option<Instant>,
-    /// Bullet time on explosions enabled (--no-bullet-time opts out).
+    /// Bullet time on explosions enabled (--bullet-time opts in).
     bullet_time_enabled: bool,
     /// Cursor auto-hide state: what visibility we last set on the window.
     cursor_visible: bool,
@@ -136,9 +138,10 @@ impl App {
         App {
             trails: config.trails,
             color_mode: config.color_mode,
+            kaleidoscope: config.kaleidoscope,
             verbose: config.verbose,
-            bullet_time_enabled: !config.no_bullet_time,
-            audio: Audio::new(config.mute),
+            bullet_time_enabled: config.bullet_time,
+            audio: Audio::new(config.mute, config.music),
             sim: None,
             config,
             render: None,
@@ -270,6 +273,11 @@ impl App {
                 "Wells: {}  (W pins, Shift+W repels)",
                 sim.pinned_wells().len()
             ),
+            format!(
+                "Music: {}  (S)   Kaleidoscope: {}  (K)",
+                if self.audio.is_music() { "on" } else { "off" },
+                if self.kaleidoscope { "on" } else { "off" },
+            ),
         ]);
 
         let mut flags = Vec::new();
@@ -300,6 +308,7 @@ impl App {
                 "P pause   N step   R reset   M mute",
                 "T trails   C colors   B spawn mode",
                 "X matter (fusion/fission)   F flow field",
+                "S musical pings   K kaleidoscope",
                 "G hold: gravity well (Shift+G repels)",
                 "W pin well (Shift+W repel, Shift+R clear)",
                 "Click: burst   Right-click: explosion",
@@ -329,6 +338,7 @@ impl App {
 
         let trails = self.trails;
         let color_mode = self.color_mode;
+        let kaleidoscope = self.kaleidoscope;
         let stopped = sim.stopped();
         let paused = self.paused;
 
@@ -343,6 +353,9 @@ impl App {
             }
             render_wells(frame, sim.pinned_wells(), width, height);
             render_particles(frame, sim.particles(), width, height, color_mode);
+            if kaleidoscope {
+                kaleidoscope_frame(frame, width, height);
+            }
             if stopped {
                 draw_text_centered(frame, width, height, "STOPPED", 72.0, MESSAGE_COLOR);
             } else if paused {
@@ -485,6 +498,20 @@ impl App {
                         sim.wake();
                     }
                 }
+            }
+            KeyCode::KeyS if !repeat => {
+                let music = self.audio.toggle_music();
+                println!(
+                    "Musical pings {}",
+                    if music { "on (pentatonic)" } else { "off" }
+                );
+            }
+            KeyCode::KeyK if !repeat => {
+                self.kaleidoscope = !self.kaleidoscope;
+                println!(
+                    "Kaleidoscope {}",
+                    if self.kaleidoscope { "on" } else { "off" }
+                );
             }
             KeyCode::KeyG => {
                 self.well_direction = if self.shift_down { -1 } else { 1 };

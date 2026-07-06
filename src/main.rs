@@ -48,6 +48,12 @@ fn main() {
     if config.wells > 0 {
         println!("Pinned wells: {}", config.wells);
     }
+    if config.music {
+        println!("Musical pings: pentatonic scale");
+    }
+    if config.kaleidoscope {
+        println!("Kaleidoscope: enabled");
+    }
     if config.gravity != 100 {
         println!("Gravity: {}%", config.gravity);
     }
