@@ -369,6 +369,33 @@ impl RenderContext {
         }
     }
 
+    /// Map a cursor position (physical window pixels) to simulation
+    /// coordinates, according to how each backend actually presents the
+    /// frame. The GPU renderer (pixels) scales the buffer by an *integer*
+    /// factor and centers it, so at fractional scale factors (Windows
+    /// 125%/150%) the frame is letterboxed — converting the cursor with
+    /// the window scale factor instead put interactions inches away from
+    /// the pointer. Asking the renderer to invert its own scaling matrix
+    /// is correct by construction. The CPU renderer stretches the frame
+    /// edge-to-edge, so its mapping is a plain ratio.
+    pub fn window_pos_to_sim(&self, x: f64, y: f64) -> (f64, f64) {
+        match self {
+            RenderContext::Gpu(ctx) => {
+                let pixels = ctx.borrow_pixels();
+                #[allow(clippy::cast_possible_truncation)]
+                let (px, py) = pixels
+                    .window_pos_to_pixel((x as f32, y as f32))
+                    .unwrap_or_else(|outside| pixels.clamp_pixel_pos(outside));
+                #[allow(clippy::cast_precision_loss)]
+                (px as f64, py as f64)
+            }
+            RenderContext::Cpu(ctx) => (
+                stretch_axis(x, ctx.width, ctx.physical_width),
+                stretch_axis(y, ctx.height, ctx.physical_height),
+            ),
+        }
+    }
+
     /// Resize the surface (for GPU backend only, when window size changes).
     pub fn resize_surface(&mut self, width: u32, height: u32) {
         if let RenderContext::Gpu(ctx) = self {
@@ -437,6 +464,12 @@ fn create_cpu_context(
     }
 }
 
+/// Map a physical window coordinate onto one axis of a `logical`-sized
+/// frame stretched across `physical` pixels (the CPU renderer's fill).
+fn stretch_axis(pos: f64, logical: u32, physical: u32) -> f64 {
+    pos * f64::from(logical) / f64::from(physical)
+}
+
 /// Precompute the physical->logical nearest-neighbor index map for one axis.
 fn scale_map(physical: u32, logical: u32) -> Vec<usize> {
     (0..physical as usize)
@@ -495,6 +528,19 @@ mod tests {
     use super::*;
     use rand::rngs::StdRng;
     use rand::SeedableRng;
+
+    #[test]
+    fn stretch_axis_maps_full_physical_range_onto_logical() {
+        // Regression context: the friend's 4K-at-150% setup (3840 physical,
+        // 2560 logical). The CPU renderer stretches edge-to-edge, so the
+        // mapping is a plain ratio; the GPU path instead asks pixels to
+        // invert its own (integer-scaled, centered) matrix.
+        assert_eq!(stretch_axis(0.0, 2560, 3840), 0.0);
+        assert_eq!(stretch_axis(1920.0, 2560, 3840), 1280.0, "center to center");
+        assert_eq!(stretch_axis(3840.0, 2560, 3840), 2560.0);
+        // Identity when logical == physical (scale factor 1).
+        assert_eq!(stretch_axis(123.0, 500, 500), 123.0);
+    }
 
     #[test]
     fn scale_map_covers_full_logical_range() {

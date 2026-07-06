@@ -20,6 +20,14 @@ All numbered items have shipped; what remains is the opportunistic pile.
 
 ## Tuning debts / watch items
 
+- Fractional display scales (Windows 125%/150%) letterbox the GPU render:
+  the pixels crate scales the frame by an integer factor and centers it, so
+  the simulation doesn't fill the window (invisible black bars on a black
+  background). Cursor mapping now accounts for it (window_pos_to_sim), but
+  the bars remain. Fixes if it bothers anyone: pick the buffer size so the
+  integer scale fills exactly (physical / round(scale)), or a custom
+  fill-scaling renderer.
+
 - Explosion threshold semantics under `--matter` (fusion/fission don't count
   toward the spawn window; only mid-band spawns do). Fine so far; revisit if
   matter+spawning feels off.

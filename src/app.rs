@@ -830,8 +830,14 @@ impl ApplicationHandler for App {
                 self.shift_down = modifiers.state().shift_key();
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_x = position.x / self.scale_factor;
-                self.cursor_y = position.y / self.scale_factor;
+                // Ask the renderer for the mapping: dividing by the scale
+                // factor is wrong whenever the GPU backend letterboxes
+                // (fractional scale factors present the frame smaller than
+                // the window, centered).
+                if let Some(ref render) = self.render {
+                    (self.cursor_x, self.cursor_y) =
+                        render.window_pos_to_sim(position.x, position.y);
+                }
                 self.cursor_inside = true;
                 self.last_cursor_move = Instant::now();
                 self.extend_wall();
