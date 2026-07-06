@@ -301,23 +301,85 @@ impl Simulation {
         self.frames_without_motion = 0;
     }
 
-    /// Spawn a burst of particles around `(x, y)` (left click), spread over
-    /// a small disc so they don't materialize inside each other.
+    /// Spawn a burst of particles around `(x, y)` (left click).
+    ///
+    /// The burst must not collide with itself: a self-collision registers
+    /// like any other and, in center spawn mode, teleports a phantom spawn
+    /// to the screen center the instant the user clicks elsewhere. Two
+    /// rules guarantee that. Placements are clearance-checked against the
+    /// local neighborhood and each other, so nothing materializes
+    /// overlapping; and every particle is ejected radially away from the
+    /// click with speed increasing with distance, a pure expansion field
+    /// in which pairwise distances never shrink — siblings cannot converge
+    /// no matter which frame boundaries fall where. (Random headings, the
+    /// previous behavior, closed the placement margin within one frame.)
+    ///
+    /// The placement disc widens when the first tries are occupied, and a
+    /// particle whose every candidate is blocked is skipped (a click into
+    /// solid-packed space adds fewer than the full burst).
     pub fn spawn_burst(&mut self, x: f64, y: f64) {
-        let spread = SPAWN_JITTER.max(self.base_radius * 4.0);
+        /// Placement tries per particle; the disc grows to ~3x base spread.
+        const BURST_PLACEMENT_ATTEMPTS: usize = 16;
+        let base_spread = SPAWN_JITTER.max(self.base_radius * 4.0);
+        let margin = 0.5;
+
+        // Gather the click's neighborhood once (positions and radii). The
+        // spatial grid can be stale between steps, and clicks are rare
+        // enough that one linear pass is cheaper than keeping it fresh.
+        let max_spread = base_spread * 3.0;
+        let reach = max_spread + self.base_radius + max_radius(&self.particles) + margin;
+        let mut occupied: Vec<(f64, f64, f64)> = self
+            .particles
+            .iter()
+            .filter(|p| p.distance_squared_from(x, y) < reach * reach)
+            .map(|p| (p.x, p.y, p.radius))
+            .collect();
+
+        let r = self.base_radius;
+        let (width_f, height_f) = (f64::from(self.width), f64::from(self.height));
         for _ in 0..CLICK_BURST_SIZE {
             if self.particles.len() >= self.max_particles {
                 break;
             }
-            let bx = x + self.rng.random_range(-spread..spread);
-            let by = y + self.rng.random_range(-spread..spread);
-            self.particles.push(Particle::new_at_position(
-                &mut self.rng,
-                bx,
-                by,
-                self.base_radius,
-                self.initial_speed,
-            ));
+            #[allow(clippy::cast_precision_loss)]
+            let spot = (0..BURST_PLACEMENT_ATTEMPTS).find_map(|attempt| {
+                let spread = base_spread
+                    + (max_spread - base_spread) * attempt as f64
+                        / (BURST_PLACEMENT_ATTEMPTS - 1) as f64;
+                let bx = x + self.rng.random_range(-spread..spread);
+                let by = y + self.rng.random_range(-spread..spread);
+                let in_bounds = bx >= r && bx <= width_f - r && by >= r && by <= height_f - r;
+                let clear = occupied.iter().all(|&(ox, oy, or)| {
+                    let (dx, dy) = (bx - ox, by - oy);
+                    let clearance = r + or + margin;
+                    dx * dx + dy * dy >= clearance * clearance
+                });
+                (in_bounds && clear).then_some((bx, by))
+            });
+            if let Some((bx, by)) = spot {
+                occupied.push((bx, by, r));
+                // Radial ejection: away from the click, faster with
+                // distance (50-100% of the initial speed), so the burst
+                // expands without internal collisions. A particle exactly
+                // on the click point picks a random direction.
+                let (dx, dy) = (bx - x, by - y);
+                let dist = (dx * dx + dy * dy).sqrt();
+                let (ux, uy) = if dist > 1e-9 {
+                    (dx / dist, dy / dist)
+                } else {
+                    let angle = self.rng.random_range(0.0..std::f64::consts::TAU);
+                    (angle.cos(), angle.sin())
+                };
+                let speed = self.initial_speed * (0.5 + 0.5 * (dist / max_spread).min(1.0));
+                self.particles.push(Particle::new_moving(
+                    &mut self.rng,
+                    bx,
+                    by,
+                    ux * speed,
+                    uy * speed,
+                    r,
+                ));
+            }
         }
         // Fresh particles are moving; leave the stopped state if we were in it.
         self.wake();
@@ -1136,6 +1198,117 @@ mod tests {
             "no spawn may be recorded when every position is occupied"
         );
         assert_eq!(s.particle_count(), before);
+    }
+
+    #[test]
+    fn click_burst_particles_never_materialize_overlapping() {
+        // Regression: burst particles used to be placed with no clearance
+        // check, so several materialized interpenetrating; the resulting
+        // instant collisions teleported phantom spawns to the screen
+        // center (in the default spawn mode) the moment the user clicked
+        // anywhere else.
+        for seed in ["1", "2", "3", "4", "5"] {
+            let mut s = Simulation::new(
+                &Config::try_parse_from(["bouncy", "--seed", seed, "--min-particles", "2"])
+                    .unwrap(),
+                800,
+                600,
+            );
+            freeze(&mut s);
+            // Park the base pair far from both the click and the center.
+            s.particles[0].x = 700.0;
+            s.particles[0].y = 500.0;
+            s.particles[1].x = 750.0;
+            s.particles[1].y = 550.0;
+
+            s.spawn_burst(100.0, 100.0);
+            assert_eq!(
+                s.particle_count(),
+                12,
+                "open space fits the full burst (seed {seed})"
+            );
+            for i in 0..s.particle_count() {
+                for j in i + 1..s.particle_count() {
+                    let (a, b) = (&s.particles[i], &s.particles[j]);
+                    let dist = a.distance_squared_from(b.x, b.y).sqrt();
+                    assert!(
+                        dist >= a.radius + b.radius,
+                        "{i} and {j} materialized overlapping (dist {dist:.2}, seed {seed})"
+                    );
+                }
+            }
+
+            // Every burst particle recedes from the click point, so the
+            // burst expands and siblings can never converge.
+            for p in &s.particles[2..] {
+                let outward = p.vx * (p.x - 100.0) + p.vy * (p.y - 100.0);
+                assert!(outward > 0.0, "ejected outward (seed {seed})");
+            }
+
+            // Ten frames at a real 120 FPS frame time: the burst disperses
+            // in open space without a single collision, so the center
+            // fountain stays quiet. (Random headings — the old behavior —
+            // produced center spawns on the very first frame.)
+            let now = Instant::now();
+            for frame in 1..=10 {
+                let events = s.step(1.0 / 120.0, now, None);
+                assert!(
+                    events.max_collision_energy == 0.0,
+                    "burst must not self-collide (frame {frame}, seed {seed})"
+                );
+            }
+            assert_eq!(s.particle_count(), 12, "no phantom spawns (seed {seed})");
+            assert!(s.spawn_times.is_empty());
+        }
+    }
+
+    #[test]
+    fn click_burst_near_the_corner_stays_in_bounds() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.spawn_burst(1.0, 1.0);
+        assert!(
+            s.particle_count() > 2,
+            "corner click still places particles"
+        );
+        for p in s.particles() {
+            assert!(p.x >= p.radius && p.x <= 800.0 - p.radius, "x={}", p.x);
+            assert!(p.y >= p.radius && p.y <= 600.0 - p.radius, "y={}", p.y);
+        }
+    }
+
+    #[test]
+    fn click_burst_into_packed_space_skips_rather_than_overlaps() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.particles[0].x = 700.0;
+        s.particles[0].y = 500.0;
+        s.particles[1].x = 750.0;
+        s.particles[1].y = 550.0;
+        // Pack a solid grid over the whole placement disc around the
+        // click: every candidate lies within clearance of some particle.
+        for gx in 0..23 {
+            for gy in 0..23 {
+                let mut p = Particle::new_at_position(
+                    &mut s.rng,
+                    78.0 + f64::from(gx) * 2.0,
+                    78.0 + f64::from(gy) * 2.0,
+                    1.5,
+                    600.0,
+                );
+                p.vx = 0.0;
+                p.vy = 0.0;
+                s.particles.push(p);
+            }
+        }
+        let before = s.particle_count();
+
+        s.spawn_burst(100.0, 100.0);
+        assert_eq!(
+            s.particle_count(),
+            before,
+            "solid-packed space places nothing rather than overlapping"
+        );
     }
 
     #[test]
