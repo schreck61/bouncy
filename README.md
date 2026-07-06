@@ -97,7 +97,7 @@ cargo run --release -- --spawn-at-collision
 | `Up` / `Down` | Adjust gravity by 10% |
 | `Left` / `Right` | Adjust particle elasticity by 0.05 |
 | `[` / `]` | Adjust wall elasticity by 0.05 |
-| `,` / `.` | Slow down / speed up time (0.1x to 4x) |
+| `,` / `.` | Slow down / speed up time in 0.05 steps (0.1x to 4x) |
 | `-` / `=` | Adjust the explosion threshold by 5 spawns/sec (0 = automatic explosions off) |
 | `T` | Toggle motion trails |
 | `C` | Cycle color mode (solid / velocity) |

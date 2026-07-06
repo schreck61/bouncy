@@ -535,7 +535,7 @@ const CONTROLS_HELP: &str = "Controls:
   Up / Down          Adjust gravity by 10%
   Left / Right       Adjust particle elasticity by 0.05
   [ / ]              Adjust wall elasticity by 0.05
-  , / .              Slow down / speed up time (0.1x-4x)
+  , / .              Slow down / speed up time by 0.05 (0.1x-4x)
   - / =              Adjust explosion threshold by 5 (0 = off)
   T                  Toggle motion trails
   C                  Cycle color mode

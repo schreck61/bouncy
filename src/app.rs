@@ -32,8 +32,12 @@ const ELASTICITY_STEP: f64 = 0.05;
 /// Runtime explosion-threshold adjustment step for the -/= keys.
 const THRESHOLD_STEP: usize = 5;
 const THRESHOLD_MAX: usize = 1000;
-/// Multiplicative step for time-scale adjustment (comma/period).
-const TIME_SCALE_STEP: f64 = 1.25;
+/// Additive step for time-scale adjustment (comma/period). Linear steps
+/// retrace exactly — speeding up and slowing down again always returns to
+/// the starting value — because the floor, 1.0, and the ceiling all sit
+/// on the same 0.05 grid. (The old multiplicative step could never reach
+/// 1.0 again after clamping at either end.)
+const TIME_SCALE_STEP: f64 = 0.05;
 const TIME_SCALE_MIN: f64 = 0.1;
 const TIME_SCALE_MAX: f64 = 4.0;
 /// Simulated time for a single frame-step while paused (N key).
@@ -603,14 +607,8 @@ impl App {
                     println!("Wall elasticity: {:.2}", sim.wall_elasticity);
                 }
             }
-            KeyCode::Period => {
-                self.time_scale = (self.time_scale * TIME_SCALE_STEP).min(TIME_SCALE_MAX);
-                println!("Time scale: {:.2}x", self.time_scale);
-            }
-            KeyCode::Comma => {
-                self.time_scale = (self.time_scale / TIME_SCALE_STEP).max(TIME_SCALE_MIN);
-                println!("Time scale: {:.2}x", self.time_scale);
-            }
+            KeyCode::Period => self.adjust_time_scale(TIME_SCALE_STEP),
+            KeyCode::Comma => self.adjust_time_scale(-TIME_SCALE_STEP),
             KeyCode::Equal => {
                 if let Some(ref mut sim) = self.sim {
                     sim.explosion_threshold =
@@ -631,6 +629,16 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Step the time scale by `delta` (comma/period), clamped to
+    /// [`TIME_SCALE_MIN`], [`TIME_SCALE_MAX`]. The result is snapped onto
+    /// the step grid so repeated float additions cannot drift — up and
+    /// down retrace each other exactly, always able to land back on 1.0.
+    fn adjust_time_scale(&mut self, delta: f64) {
+        let stepped = (self.time_scale + delta).clamp(TIME_SCALE_MIN, TIME_SCALE_MAX);
+        self.time_scale = (stepped / TIME_SCALE_STEP).round() * TIME_SCALE_STEP;
+        println!("Time scale: {:.2}x", self.time_scale);
     }
 
     /// Extend the wall being drawn (V held): each time the cursor gets far
@@ -927,6 +935,39 @@ mod tests {
             assert!(f >= prev, "factor must not decrease (at {i})");
             prev = f;
         }
+    }
+
+    #[test]
+    fn time_scale_steps_retrace_to_the_starting_point() {
+        // Regression: the old multiplicative step (x1.25) could never
+        // land back on 1.0 after clamping at either end of the range.
+        let config = Config::try_resolve_from(["bouncy"]).unwrap();
+        let mut app = App::new(config);
+        assert_eq!(app.time_scale, 1.0);
+
+        for _ in 0..10 {
+            app.adjust_time_scale(TIME_SCALE_STEP);
+        }
+        for _ in 0..10 {
+            app.adjust_time_scale(-TIME_SCALE_STEP);
+        }
+        assert_eq!(app.time_scale, 1.0, "up then down retraces exactly");
+
+        // Slamming into the floor keeps the value on the grid, so 1.0 is
+        // still reachable afterward — the reported bug.
+        for _ in 0..200 {
+            app.adjust_time_scale(-TIME_SCALE_STEP);
+        }
+        assert_eq!(app.time_scale, TIME_SCALE_MIN, "clamped at the floor");
+        for _ in 0..18 {
+            app.adjust_time_scale(TIME_SCALE_STEP);
+        }
+        assert_eq!(app.time_scale, 1.0, "floor back to 1.0 in 18 steps");
+
+        for _ in 0..200 {
+            app.adjust_time_scale(TIME_SCALE_STEP);
+        }
+        assert_eq!(app.time_scale, TIME_SCALE_MAX, "clamped at the ceiling");
     }
 
     #[test]
