@@ -5,7 +5,7 @@
 //! the winit event loop glue around the headless [`Simulation`] core.
 
 use crate::audio::Audio;
-use crate::config::{ColorMode, Config};
+use crate::config::{ColorMode, Config, ELASTICITY_MAX, EXPLOSION_THRESHOLD_MAX, GRAVITY_LIMIT};
 use crate::render::{
     create_render_context, dim_rect, fade_frame, kaleidoscope_frame, render_explosion,
     render_particles, render_segments, render_wells, RenderContext,
@@ -30,8 +30,7 @@ const GRAVITY_STEP: i32 = 10;
 /// Runtime elasticity adjustment step for arrow and bracket keys.
 const ELASTICITY_STEP: f64 = 0.05;
 /// Runtime explosion-threshold adjustment step for the -/= keys.
-const THRESHOLD_STEP: usize = 5;
-const THRESHOLD_MAX: usize = 1000;
+const THRESHOLD_STEP: i32 = 5;
 /// Additive step for time-scale adjustment (comma/period). Linear steps
 /// retrace exactly — speeding up and slowing down again always returns to
 /// the starting value — because the floor, 1.0, and the ceiling all sit
@@ -80,6 +79,37 @@ impl HudMode {
             HudMode::StatsAndKeys => HudMode::Hidden,
         }
     }
+}
+
+/// A runtime control action, decoupled from its input source. The
+/// keyboard dispatches these today; any future control surface (a GUI
+/// panel, a script, a replay) issues the same commands and gets
+/// identical behavior, logging included.
+#[derive(Copy, Clone, Debug)]
+pub enum Command {
+    TogglePause,
+    /// Advance one frame (only meaningful while paused).
+    StepFrame,
+    Reset,
+    ClearWells,
+    ClearWalls,
+    ToggleMute,
+    ToggleMusic,
+    CycleHud,
+    ToggleTrails,
+    CycleColorMode,
+    CycleSpawnMode,
+    ToggleMatter,
+    ToggleFlow,
+    ToggleKaleidoscope,
+    /// Step gravity by a signed percentage amount.
+    AdjustGravity(i32),
+    AdjustParticleElasticity(f64),
+    AdjustWallElasticity(f64),
+    AdjustTimeScale(f64),
+    AdjustExplosionThreshold(i32),
+    /// Pin a persistent gravity well at the cursor.
+    PinWell(Polarity),
 }
 
 /// Convert physical pixels to logical pixels given a scale factor.
@@ -468,7 +498,11 @@ impl App {
         self.update_fps_counter();
     }
 
-    /// Handle a key press or release.
+    /// Handle a key press or release: pure input mapping. Everything a
+    /// key *does* is a [`Command`] dispatched through [`App::apply`], so
+    /// any other control surface (a GUI panel, a script) can trigger the
+    /// identical behavior. Only inherently input-shaped state stays here:
+    /// exiting, the held-well lifetime, and the wall-drawing anchor.
     fn handle_key(
         &mut self,
         key_code: KeyCode,
@@ -485,173 +519,184 @@ impl App {
             }
             return;
         }
+        let shift_polarity = if self.shift_down {
+            Polarity::Repel
+        } else {
+            Polarity::Attract
+        };
 
         match key_code {
             KeyCode::Space | KeyCode::Escape | KeyCode::KeyQ => event_loop.exit(),
-            KeyCode::KeyP if !repeat => {
+            KeyCode::KeyG => {
+                // A stopped simulation self-wakes while the well is held.
+                self.held_well = Some(shift_polarity);
+            }
+            KeyCode::KeyV if !repeat => {
+                if self.shift_down {
+                    self.apply(Command::ClearWalls);
+                } else {
+                    // Start drawing: segments are added as the cursor moves.
+                    self.wall_anchor = Some((self.cursor_x, self.cursor_y));
+                }
+            }
+            KeyCode::KeyP if !repeat => self.apply(Command::TogglePause),
+            KeyCode::KeyN => self.apply(Command::StepFrame),
+            KeyCode::KeyR if !repeat => self.apply(if self.shift_down {
+                Command::ClearWells
+            } else {
+                Command::Reset
+            }),
+            KeyCode::KeyM if !repeat => self.apply(Command::ToggleMute),
+            KeyCode::KeyH if !repeat => self.apply(Command::CycleHud),
+            KeyCode::KeyT if !repeat => self.apply(Command::ToggleTrails),
+            KeyCode::KeyC if !repeat => self.apply(Command::CycleColorMode),
+            KeyCode::KeyB if !repeat => self.apply(Command::CycleSpawnMode),
+            KeyCode::KeyX if !repeat => self.apply(Command::ToggleMatter),
+            KeyCode::KeyF if !repeat => self.apply(Command::ToggleFlow),
+            KeyCode::KeyS if !repeat => self.apply(Command::ToggleMusic),
+            KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
+            KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
+            KeyCode::ArrowUp => self.apply(Command::AdjustGravity(GRAVITY_STEP)),
+            KeyCode::ArrowDown => self.apply(Command::AdjustGravity(-GRAVITY_STEP)),
+            KeyCode::ArrowRight => {
+                self.apply(Command::AdjustParticleElasticity(ELASTICITY_STEP));
+            }
+            KeyCode::ArrowLeft => {
+                self.apply(Command::AdjustParticleElasticity(-ELASTICITY_STEP));
+            }
+            KeyCode::BracketRight => self.apply(Command::AdjustWallElasticity(ELASTICITY_STEP)),
+            KeyCode::BracketLeft => self.apply(Command::AdjustWallElasticity(-ELASTICITY_STEP)),
+            KeyCode::Period => self.apply(Command::AdjustTimeScale(TIME_SCALE_STEP)),
+            KeyCode::Comma => self.apply(Command::AdjustTimeScale(-TIME_SCALE_STEP)),
+            KeyCode::Equal => self.apply(Command::AdjustExplosionThreshold(THRESHOLD_STEP)),
+            KeyCode::Minus => self.apply(Command::AdjustExplosionThreshold(-THRESHOLD_STEP)),
+            _ => {}
+        }
+    }
+
+    /// Run a closure over the simulation if it exists (it is None only
+    /// before the window opens).
+    fn with_sim(&mut self, f: impl FnOnce(&mut Simulation)) {
+        if let Some(ref mut sim) = self.sim {
+            f(sim);
+        }
+    }
+
+    /// Apply a runtime control action. Every parameter mutation and its
+    /// log line lives here, shared by all input paths; clamps use the
+    /// same limits as the CLI value parsers, so a hotkey can never reach
+    /// a value the command line would reject.
+    fn apply(&mut self, command: Command) {
+        match command {
+            Command::TogglePause => {
                 self.paused = !self.paused;
                 println!("{}", if self.paused { "Paused" } else { "Resumed" });
             }
-            KeyCode::KeyN if self.paused => self.step_once = true,
-            KeyCode::KeyR if !repeat => {
-                if let Some(ref mut sim) = self.sim {
-                    if self.shift_down {
-                        let cleared = sim.clear_wells();
-                        println!("Cleared {cleared} pinned wells");
-                    } else {
-                        println!("Simulation reset");
-                        sim.reset();
-                        self.paused = false;
-                    }
+            Command::StepFrame => {
+                if self.paused {
+                    self.step_once = true;
                 }
             }
-            KeyCode::KeyM if !repeat => {
+            Command::Reset => {
+                if let Some(ref mut sim) = self.sim {
+                    println!("Simulation reset");
+                    sim.reset();
+                    self.paused = false;
+                }
+            }
+            Command::ClearWells => self.with_sim(|sim| {
+                println!("Cleared {} pinned wells", sim.clear_wells());
+            }),
+            Command::ClearWalls => self.with_sim(|sim| {
+                println!("Cleared {} wall segments", sim.clear_wall_segments());
+            }),
+            Command::ToggleMute => {
                 let muted = self.audio.toggle_mute();
                 println!("Audio {}", if muted { "muted" } else { "unmuted" });
             }
-            KeyCode::KeyH if !repeat => self.hud_mode = self.hud_mode.next(),
-            KeyCode::KeyT if !repeat => {
-                self.trails = !self.trails;
-                println!("Trails {}", if self.trails { "on" } else { "off" });
-            }
-            KeyCode::KeyC if !repeat => {
-                self.color_mode = match self.color_mode {
-                    ColorMode::Solid => ColorMode::Velocity,
-                    ColorMode::Velocity => ColorMode::Solid,
-                };
-            }
-            KeyCode::KeyB if !repeat => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.spawn_mode = sim.spawn_mode.next();
-                    println!("Spawn mode: {}", sim.spawn_mode.label());
-                }
-            }
-            KeyCode::KeyX if !repeat => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.matter = !sim.matter;
-                    println!("Matter mechanics {}", if sim.matter { "on" } else { "off" });
-                }
-            }
-            KeyCode::KeyF if !repeat => {
-                if let Some(ref mut sim) = self.sim {
-                    // A stopped simulation self-wakes when the flow is on.
-                    sim.flow = !sim.flow;
-                    println!("Flow field {}", if sim.flow { "on" } else { "off" });
-                }
-            }
-            KeyCode::KeyS if !repeat => {
+            Command::ToggleMusic => {
                 let music = self.audio.toggle_music();
                 println!(
                     "Musical pings {}",
                     if music { "on (pentatonic)" } else { "off" }
                 );
             }
-            KeyCode::KeyK if !repeat => {
+            Command::CycleHud => self.hud_mode = self.hud_mode.next(),
+            Command::ToggleTrails => {
+                self.trails = !self.trails;
+                println!("Trails {}", if self.trails { "on" } else { "off" });
+            }
+            Command::CycleColorMode => {
+                self.color_mode = match self.color_mode {
+                    ColorMode::Solid => ColorMode::Velocity,
+                    ColorMode::Velocity => ColorMode::Solid,
+                };
+            }
+            Command::ToggleKaleidoscope => {
                 self.kaleidoscope = !self.kaleidoscope;
                 println!(
                     "Kaleidoscope {}",
                     if self.kaleidoscope { "on" } else { "off" }
                 );
             }
-            KeyCode::KeyG => {
-                // A stopped simulation self-wakes while the well is held.
-                self.held_well = Some(if self.shift_down {
-                    Polarity::Repel
+            Command::CycleSpawnMode => self.with_sim(|sim| {
+                sim.spawn_mode = sim.spawn_mode.next();
+                println!("Spawn mode: {}", sim.spawn_mode.label());
+            }),
+            Command::ToggleMatter => self.with_sim(|sim| {
+                sim.matter = !sim.matter;
+                println!("Matter mechanics {}", if sim.matter { "on" } else { "off" });
+            }),
+            Command::ToggleFlow => self.with_sim(|sim| {
+                // A stopped simulation self-wakes when the flow is on.
+                sim.flow = !sim.flow;
+                println!("Flow field {}", if sim.flow { "on" } else { "off" });
+            }),
+            Command::AdjustGravity(step) => self.with_sim(|sim| {
+                sim.gravity_percent =
+                    (sim.gravity_percent + step).clamp(-GRAVITY_LIMIT, GRAVITY_LIMIT);
+                println!("Gravity: {}%", sim.gravity_percent);
+            }),
+            Command::AdjustParticleElasticity(delta) => self.with_sim(|sim| {
+                sim.particle_elasticity =
+                    (sim.particle_elasticity + delta).clamp(0.0, ELASTICITY_MAX);
+                println!("Particle elasticity: {:.2}", sim.particle_elasticity);
+            }),
+            Command::AdjustWallElasticity(delta) => self.with_sim(|sim| {
+                sim.wall_elasticity = (sim.wall_elasticity + delta).clamp(0.0, ELASTICITY_MAX);
+                println!("Wall elasticity: {:.2}", sim.wall_elasticity);
+            }),
+            Command::AdjustTimeScale(delta) => self.adjust_time_scale(delta),
+            Command::AdjustExplosionThreshold(step) => self.with_sim(|sim| {
+                let magnitude = step.unsigned_abs() as usize;
+                sim.explosion_threshold = if step >= 0 {
+                    (sim.explosion_threshold + magnitude).min(EXPLOSION_THRESHOLD_MAX)
                 } else {
-                    Polarity::Attract
-                });
-            }
-            KeyCode::KeyV if !repeat => {
-                if self.shift_down {
-                    if let Some(ref mut sim) = self.sim {
-                        let cleared = sim.clear_wall_segments();
-                        println!("Cleared {cleared} wall segments");
-                    }
+                    sim.explosion_threshold.saturating_sub(magnitude)
+                };
+                if sim.explosion_threshold == 0 {
+                    println!("Explosion threshold: off");
                 } else {
-                    // Start drawing: segments are added as the cursor moves.
-                    self.wall_anchor = Some((self.cursor_x, self.cursor_y));
+                    println!("Explosion threshold: {}/s", sim.explosion_threshold);
                 }
-            }
-            KeyCode::KeyW if !repeat => {
-                if let Some(ref mut sim) = self.sim {
-                    let polarity = if self.shift_down {
-                        Polarity::Repel
-                    } else {
-                        Polarity::Attract
-                    };
-                    if sim.pin_well(self.cursor_x, self.cursor_y, polarity) {
+            }),
+            Command::PinWell(polarity) => {
+                let (x, y) = (self.cursor_x, self.cursor_y);
+                self.with_sim(|sim| {
+                    if sim.pin_well(x, y, polarity) {
                         println!(
-                            "Pinned {} well at ({:.0}, {:.0}); {} total (Shift+R clears)",
+                            "Pinned {} well at ({x:.0}, {y:.0}); {} total (Shift+R clears)",
                             match polarity {
                                 Polarity::Attract => "attracting",
                                 Polarity::Repel => "repelling",
                             },
-                            self.cursor_x,
-                            self.cursor_y,
                             sim.pinned_wells().len()
                         );
                     } else {
                         println!("Pinned well limit reached ({MAX_PINNED_WELLS})");
                     }
-                }
+                });
             }
-            KeyCode::ArrowUp => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.gravity_percent = (sim.gravity_percent + GRAVITY_STEP).min(1000);
-                    println!("Gravity: {}%", sim.gravity_percent);
-                }
-            }
-            KeyCode::ArrowDown => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.gravity_percent = (sim.gravity_percent - GRAVITY_STEP).max(-1000);
-                    println!("Gravity: {}%", sim.gravity_percent);
-                }
-            }
-            KeyCode::ArrowRight => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.particle_elasticity = (sim.particle_elasticity + ELASTICITY_STEP).min(1.5);
-                    println!("Particle elasticity: {:.2}", sim.particle_elasticity);
-                }
-            }
-            KeyCode::ArrowLeft => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.particle_elasticity = (sim.particle_elasticity - ELASTICITY_STEP).max(0.0);
-                    println!("Particle elasticity: {:.2}", sim.particle_elasticity);
-                }
-            }
-            KeyCode::BracketRight => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.wall_elasticity = (sim.wall_elasticity + ELASTICITY_STEP).min(1.5);
-                    println!("Wall elasticity: {:.2}", sim.wall_elasticity);
-                }
-            }
-            KeyCode::BracketLeft => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.wall_elasticity = (sim.wall_elasticity - ELASTICITY_STEP).max(0.0);
-                    println!("Wall elasticity: {:.2}", sim.wall_elasticity);
-                }
-            }
-            KeyCode::Period => self.adjust_time_scale(TIME_SCALE_STEP),
-            KeyCode::Comma => self.adjust_time_scale(-TIME_SCALE_STEP),
-            KeyCode::Equal => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.explosion_threshold =
-                        (sim.explosion_threshold + THRESHOLD_STEP).min(THRESHOLD_MAX);
-                    println!("Explosion threshold: {}/s", sim.explosion_threshold);
-                }
-            }
-            KeyCode::Minus => {
-                if let Some(ref mut sim) = self.sim {
-                    sim.explosion_threshold =
-                        sim.explosion_threshold.saturating_sub(THRESHOLD_STEP);
-                    if sim.explosion_threshold == 0 {
-                        println!("Explosion threshold: off");
-                    } else {
-                        println!("Explosion threshold: {}/s", sim.explosion_threshold);
-                    }
-                }
-            }
-            _ => {}
         }
     }
 
@@ -979,6 +1024,87 @@ mod tests {
             assert!(f >= prev, "factor must not decrease (at {i})");
             prev = f;
         }
+    }
+
+    /// An App with a live simulation, as if the window had opened.
+    fn test_app() -> App {
+        let config = Config::try_resolve_from(["bouncy", "--seed", "7"]).unwrap();
+        let mut app = App::new(config.clone());
+        app.sim = Some(Simulation::new(&config, 800, 600));
+        app
+    }
+
+    #[test]
+    fn command_clamps_agree_with_the_cli_limits() {
+        let mut app = test_app();
+
+        // Slam every adjustable parameter into both of its rails; the
+        // command clamps share their constants with the clap parsers, and
+        // this pins the agreement: the CLI accepts exactly the hotkey
+        // maximum and rejects one past it.
+        for _ in 0..500 {
+            app.apply(Command::AdjustGravity(GRAVITY_STEP));
+        }
+        assert_eq!(app.sim.as_ref().unwrap().gravity_percent, GRAVITY_LIMIT);
+        for _ in 0..500 {
+            app.apply(Command::AdjustGravity(-GRAVITY_STEP));
+        }
+        assert_eq!(app.sim.as_ref().unwrap().gravity_percent, -GRAVITY_LIMIT);
+        let max = GRAVITY_LIMIT.to_string();
+        assert!(Config::try_resolve_from(["bouncy", "--gravity", &max]).is_ok());
+        let over = (GRAVITY_LIMIT + 1).to_string();
+        assert!(Config::try_resolve_from(["bouncy", "--gravity", &over]).is_err());
+
+        for _ in 0..100 {
+            app.apply(Command::AdjustParticleElasticity(ELASTICITY_STEP));
+            app.apply(Command::AdjustWallElasticity(ELASTICITY_STEP));
+        }
+        let sim = app.sim.as_ref().unwrap();
+        assert_eq!(sim.particle_elasticity, ELASTICITY_MAX);
+        assert_eq!(sim.wall_elasticity, ELASTICITY_MAX);
+        let max = ELASTICITY_MAX.to_string();
+        assert!(Config::try_resolve_from(["bouncy", "--wall-elasticity", &max]).is_ok());
+
+        for _ in 0..500 {
+            app.apply(Command::AdjustExplosionThreshold(THRESHOLD_STEP));
+        }
+        assert_eq!(
+            app.sim.as_ref().unwrap().explosion_threshold,
+            EXPLOSION_THRESHOLD_MAX
+        );
+        for _ in 0..500 {
+            app.apply(Command::AdjustExplosionThreshold(-THRESHOLD_STEP));
+        }
+        assert_eq!(app.sim.as_ref().unwrap().explosion_threshold, 0);
+    }
+
+    #[test]
+    fn commands_toggle_and_act_like_their_hotkeys() {
+        let mut app = test_app();
+
+        app.apply(Command::TogglePause);
+        assert!(app.paused);
+        app.apply(Command::StepFrame);
+        assert!(app.step_once, "step-frame works while paused");
+        app.apply(Command::TogglePause);
+        assert!(!app.paused);
+
+        app.apply(Command::ToggleTrails);
+        assert!(app.trails);
+        app.apply(Command::CycleColorMode);
+        assert_eq!(app.color_mode, ColorMode::Velocity);
+        app.apply(Command::ToggleKaleidoscope);
+        assert!(app.kaleidoscope);
+
+        app.apply(Command::PinWell(Polarity::Repel));
+        assert_eq!(app.sim.as_ref().unwrap().pinned_wells().len(), 1);
+        app.apply(Command::ClearWells);
+        assert!(app.sim.as_ref().unwrap().pinned_wells().is_empty());
+
+        app.apply(Command::ToggleFlow);
+        assert!(app.sim.as_ref().unwrap().flow);
+        app.apply(Command::Reset);
+        assert!(!app.paused);
     }
 
     #[test]

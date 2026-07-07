@@ -5,6 +5,13 @@
 
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 
+/// Limits for runtime-adjustable parameters, shared between the clap
+/// value parsers and the hotkey/command clamps in the app layer so the
+/// two can never disagree.
+pub const GRAVITY_LIMIT: i32 = 1000;
+pub const ELASTICITY_MAX: f64 = 1.5;
+pub const EXPLOSION_THRESHOLD_MAX: usize = 1000;
+
 /// How particles are colored.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ColorMode {
@@ -245,7 +252,7 @@ pub struct Config {
 
     /// Gravity as a percentage of standard; negative values pull upward
     #[arg(long, default_value_t = 100, allow_negative_numbers = true,
-          value_parser = clap::value_parser!(i32).range(-1000..=1000))]
+          value_parser = clap::value_parser!(i32).range(i64::from(-GRAVITY_LIMIT)..=i64::from(GRAVITY_LIMIT)))]
     pub gravity: i32,
 
     /// Wall bounce elasticity: 0.0 = sticks, 1.0 = elastic, >1.0 = adds energy
@@ -302,7 +309,7 @@ pub struct Config {
     /// Spawns per second that trigger an automatic explosion; 0 disables
     /// automatic explosions entirely (right-click still works)
     #[arg(long, default_value_t = crate::explosion::SPAWN_RATE_THRESHOLD as u64,
-          value_parser = clap::value_parser!(u64).range(0..=1000))]
+          value_parser = clap::value_parser!(u64).range(0..=EXPLOSION_THRESHOLD_MAX as u64))]
     pub explosion_threshold: u64,
 
     /// Slow time briefly (bullet time) whenever an explosion ring starts
@@ -516,7 +523,7 @@ fn parse_range_f64(s: &str, name: &str, min: f64, max: f64) -> Result<f64, Strin
 }
 
 fn parse_elasticity(s: &str) -> Result<f64, String> {
-    parse_range_f64(s, "elasticity", 0.0, 1.5)
+    parse_range_f64(s, "elasticity", 0.0, ELASTICITY_MAX)
 }
 
 fn parse_particle_size(s: &str) -> Result<f64, String> {
