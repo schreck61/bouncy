@@ -20,6 +20,7 @@
 
 mod app;
 mod audio;
+mod color;
 mod config;
 mod explosion;
 mod physics;

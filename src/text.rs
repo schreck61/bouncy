@@ -77,7 +77,7 @@ pub fn draw_text(
             #[allow(clippy::cast_sign_loss)]
             if px >= 0 && (px as u32) < width && py >= 0 && (py as u32) < height {
                 let idx = ((py as u32) * width + (px as u32)) as usize * 4;
-                let alpha = u16::from(crate::physics::color_component(f64::from(
+                let alpha = u16::from(crate::color::color_component(f64::from(
                     coverage.clamp(0.0, 1.0) * 255.0,
                 )));
                 // Standard source-over blend; results always fit in u8.

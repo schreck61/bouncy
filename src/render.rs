@@ -4,9 +4,10 @@
 //! Frame rendering: GPU (pixels/wgpu) and CPU (softbuffer) backends plus the
 //! drawing routines for particles, explosions, and effects.
 
+use crate::color::{color_component, hsv_to_rgba};
 use crate::config::ColorMode;
 use crate::explosion::{Explosion, EXPLOSION_RING_WIDTH};
-use crate::physics::{color_component, hsv_to_rgba, Particle, Segment, INITIAL_VELOCITY};
+use crate::physics::{Particle, Segment, INITIAL_VELOCITY};
 use crate::sim::{Polarity, Well};
 use ouroboros::self_referencing;
 use pixels::{Pixels, SurfaceTexture};
