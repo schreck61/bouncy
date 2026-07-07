@@ -127,6 +127,7 @@ pub struct Audio {
     music: bool,
     pings: Vec<SamplesBuffer>,
     notes: Vec<SamplesBuffer>,
+    explosion: SamplesBuffer,
 }
 
 impl Audio {
@@ -160,6 +161,10 @@ impl Audio {
             music,
             pings,
             notes,
+            // Pre-generated like the pings; the rumble's noise component is
+            // identical across explosions, which is imperceptible under the
+            // oscillator mix.
+            explosion: generate_explosion(),
         }
     }
 
@@ -212,7 +217,7 @@ impl Audio {
         let Some(stream) = self.stream.as_ref().filter(|_| !self.muted) else {
             return;
         };
-        stream.mixer().add(generate_explosion());
+        stream.mixer().add(self.explosion.clone());
     }
 }
 

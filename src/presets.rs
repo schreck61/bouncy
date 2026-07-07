@@ -394,6 +394,20 @@ mod tests {
     }
 
     #[test]
+    fn labels_agree_with_clap_names() {
+        // label() is a hand-written copy of the kebab-case names clap
+        // derives; this pins the two together so a renamed variant cannot
+        // drift silently.
+        for preset in Preset::value_variants() {
+            assert_eq!(
+                preset.label(),
+                preset.to_possible_value().unwrap().get_name(),
+                "label() and the clap-derived name must agree"
+            );
+        }
+    }
+
+    #[test]
     fn parses_presets_into_cli_args_and_base() {
         let user = parse_str(
             "[pachinko]\n\

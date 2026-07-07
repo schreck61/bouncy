@@ -161,9 +161,9 @@ pub struct Config {
 
     /// Spawns per second that trigger an automatic explosion; 0 disables
     /// automatic explosions entirely (right-click still works)
-    #[arg(long, default_value_t = crate::explosion::SPAWN_RATE_THRESHOLD as u64,
-          value_parser = clap::value_parser!(u64).range(0..=EXPLOSION_THRESHOLD_MAX as u64))]
-    pub explosion_threshold: u64,
+    #[arg(long, default_value_t = crate::explosion::SPAWN_RATE_THRESHOLD,
+          value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(0..=EXPLOSION_THRESHOLD_MAX as u64))]
+    pub explosion_threshold: usize,
 
     /// Slow time briefly (bullet time) whenever an explosion ring starts
     #[arg(long)]

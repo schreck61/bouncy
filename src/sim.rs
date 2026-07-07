@@ -205,9 +205,7 @@ impl Simulation {
             gravity_percent: config.gravity,
             wall_elasticity: config.wall_elasticity,
             particle_elasticity: config.particle_elasticity,
-            // Bounded by EXPLOSION_THRESHOLD_MAX (1000), which fits usize.
-            #[allow(clippy::cast_possible_truncation)]
-            explosion_threshold: config.explosion_threshold as usize,
+            explosion_threshold: config.explosion_threshold,
             matter: config.matter,
             flow: config.flow,
             particles: Vec::new(),
