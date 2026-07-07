@@ -9,8 +9,8 @@ use crate::config::{Config, SpawnMode};
 use crate::explosion::{max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_WINDOW};
 use crate::physics::{
     apply_attractor, apply_flow, collide_with_segments, handle_collisions, has_motion, max_radius,
-    substep_count, update_physics, CollisionRecorder, Particle, ParticleId, Segment, SpatialGrid,
-    SpawnSite, COLLISION_ENERGY_NORMALIZER, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
+    pair_mut, substep_count, update_physics, CollisionRecorder, Particle, ParticleId, Segment,
+    SpatialGrid, SpawnSite, COLLISION_ENERGY_NORMALIZER, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -582,6 +582,27 @@ impl Simulation {
         events
     }
 
+    /// Transfer `mass` worth of matter from `src` into `dst`: the
+    /// mass-weighted position/velocity/color blend shared by full and
+    /// partial fusion. Area and momentum are conserved exactly; the
+    /// donor's own radius is left to the caller (full fusion kills it,
+    /// partial fusion shrinks it by the transfer).
+    fn absorb(dst: &mut Particle, src: &Particle, mass: f64) {
+        let dst_mass = dst.mass();
+        let total = dst_mass + mass;
+        dst.x = (dst.x * dst_mass + src.x * mass) / total;
+        dst.y = (dst.y * dst_mass + src.y * mass) / total;
+        dst.vx = (dst.vx * dst_mass + src.vx * mass) / total;
+        dst.vy = (dst.vy * dst_mass + src.vy * mass) / total;
+        dst.radius = total.sqrt();
+        for (c, &sc) in dst.color.iter_mut().zip(src.color.iter()).take(3) {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                *c = ((f64::from(*c) * dst_mass + f64::from(sc) * mass) / total) as u8;
+            }
+        }
+    }
+
     /// Apply fusion/fission outcomes to this step's collisions. Slow
     /// contacts merge (area, momentum, and blended color conserved); hard
     /// impacts shatter both participants into half-area fragments that fly
@@ -606,28 +627,12 @@ impl Simulation {
                 let (m1, m2) = (self.particles[i].mass(), self.particles[j].mass());
 
                 if m1 + m2 <= max_mass {
-                    // Full fusion: merge j into i, conserving area, momentum,
-                    // and mass-blended color.
+                    // Full fusion: i absorbs all of j.
                     if self.particles.len() - dead.len() <= 2 {
                         continue; // never fuse below the minimum population
                     }
-                    let mt = m1 + m2;
-                    let (pj_x, pj_y, pj_vx, pj_vy, pj_color) = {
-                        let p = &self.particles[j];
-                        (p.x, p.y, p.vx, p.vy, p.color)
-                    };
-                    let p = &mut self.particles[i];
-                    p.x = (p.x * m1 + pj_x * m2) / mt;
-                    p.y = (p.y * m1 + pj_y * m2) / mt;
-                    p.vx = (p.vx * m1 + pj_vx * m2) / mt;
-                    p.vy = (p.vy * m1 + pj_vy * m2) / mt;
-                    p.radius = mt.sqrt();
-                    for (c, &jc) in p.color.iter_mut().zip(pj_color.iter()).take(3) {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        {
-                            *c = ((f64::from(*c) * m1 + f64::from(jc) * m2) / mt) as u8;
-                        }
-                    }
+                    let (pi, pj) = pair_mut(&mut self.particles, i, j);
+                    Self::absorb(pi, pj, m2);
                     touched.insert(i);
                     touched.insert(j);
                     dead.push(j);
@@ -635,9 +640,7 @@ impl Simulation {
                 } else {
                     // Partial fusion at the cap: the larger particle absorbs
                     // mass from the smaller, up to the cap and never leaving
-                    // the smaller below the fragment minimum. The transferred
-                    // matter carries the smaller's velocity and position
-                    // share, so area and momentum are conserved exactly.
+                    // the smaller below the fragment minimum.
                     let (big, small) = if m1 >= m2 { (i, j) } else { (j, i) };
                     let (mb, ms) = (self.particles[big].mass(), self.particles[small].mass());
                     let min_mass = min_r * min_r;
@@ -645,24 +648,9 @@ impl Simulation {
                     if transfer <= 0.0 {
                         continue; // absorber full or donor at minimum: bounce
                     }
-                    let (ps_x, ps_y, ps_vx, ps_vy, ps_color) = {
-                        let p = &self.particles[small];
-                        (p.x, p.y, p.vx, p.vy, p.color)
-                    };
-                    let mb_new = mb + transfer;
-                    let p = &mut self.particles[big];
-                    p.x = (p.x * mb + ps_x * transfer) / mb_new;
-                    p.y = (p.y * mb + ps_y * transfer) / mb_new;
-                    p.vx = (p.vx * mb + ps_vx * transfer) / mb_new;
-                    p.vy = (p.vy * mb + ps_vy * transfer) / mb_new;
-                    p.radius = mb_new.sqrt();
-                    for (c, &sc) in p.color.iter_mut().zip(ps_color.iter()).take(3) {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        {
-                            *c = ((f64::from(*c) * mb + f64::from(sc) * transfer) / mb_new) as u8;
-                        }
-                    }
-                    self.particles[small].radius = (ms - transfer).sqrt();
+                    let (pb, ps) = pair_mut(&mut self.particles, big, small);
+                    Self::absorb(pb, ps, transfer);
+                    ps.radius = (ms - transfer).sqrt();
                     touched.insert(i);
                     touched.insert(j);
                     changed = true;

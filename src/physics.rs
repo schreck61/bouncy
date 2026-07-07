@@ -412,7 +412,11 @@ impl Default for SpatialGrid {
 }
 
 /// Borrow two distinct particles mutably by index.
-fn pair_mut(particles: &mut [Particle], i: usize, j: usize) -> (&mut Particle, &mut Particle) {
+pub(crate) fn pair_mut(
+    particles: &mut [Particle],
+    i: usize,
+    j: usize,
+) -> (&mut Particle, &mut Particle) {
     debug_assert!(i != j);
     let (lo, hi) = if i < j { (i, j) } else { (j, i) };
     let (left, right) = particles.split_at_mut(hi);
