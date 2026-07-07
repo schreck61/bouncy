@@ -14,7 +14,6 @@ categories = ["games", "graphics", "simulation"]
 pixels = "0.15"
 winit = "0.30"
 rand = "0.9"
-pollster = "0.4"
 rodio = { version = "0.21", default-features = false, features = ["playback"] }
 softbuffer = "0.4"
 ouroboros = "0.18"

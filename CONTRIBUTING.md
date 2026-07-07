@@ -79,8 +79,8 @@ git commit -s -m "Your commit message"
 
 ### Prerequisites
 
-- Rust 1.70 or later
-- A GPU with Vulkan, Metal, or DX12 support
+- Rust 1.85 or later (matches `rust-version` in Cargo.toml)
+- A GPU with Vulkan, Metal, or DX12 support (optional — CPU rendering is a fallback)
 - Git
 
 ### Setting Up Your Development Environment
@@ -103,7 +103,7 @@ git commit -s -m "Your commit message"
    cargo build
    ```
 
-5. Run the tests (when available):
+5. Run the tests:
    ```bash
    cargo test
    ```
@@ -165,6 +165,9 @@ Feature suggestions are welcome! Please open an issue with:
 
 ### Testing
 
+- Every new mechanic lands with unit tests in the headless `Simulation`
+  core (`src/sim.rs`) — gameplay logic must be testable without a window
+- Every bug fix ships with a regression test that names the bug it pins
 - Test your changes manually across different scenarios
 - Verify performance isn't negatively impacted (check FPS output)
 - Test both `--spawn-at-collision` and default modes if relevant
@@ -202,6 +205,7 @@ Feature suggestions are welcome! Please open an issue with:
 - [ ] Code compiles without warnings (`cargo build`)
 - [ ] Code is formatted (`cargo fmt`)
 - [ ] Code passes lints (`cargo clippy`)
+- [ ] All tests pass (`cargo test`), and new mechanics/bug fixes include tests
 - [ ] All commits are signed off (DCO)
 - [ ] Documentation is updated if needed
 - [ ] Changes are tested manually

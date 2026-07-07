@@ -262,16 +262,13 @@ Key constants can be modified in the source:
 ```rust
 // src/physics.rs
 const GRAVITY: f64 = 100.0;
-const DEFAULT_PARTICLE_RADIUS: f64 = 1.5;
-const INITIAL_VELOCITY: f64 = 600.0;
 const MOTION_VELOCITY_THRESHOLD: f64 = 1.0;  // Minimum velocity to be "moving"
 const MOTION_STOPPED_FRAMES: u32 = 60;       // ~1 second at 60fps
 
 // src/explosion.rs
-const SPAWN_RATE_THRESHOLD: usize = 30;
 const EXPLOSION_KILL_RATIO: f64 = 0.99;
 
-// src/app.rs
+// src/sim.rs
 const PIXELS_PER_PARTICLE: u64 = 375_000;
 const CLICK_BURST_SIZE: usize = 10;
 
@@ -279,6 +276,10 @@ const CLICK_BURST_SIZE: usize = 10;
 const PING_MIN_FREQ: f32 = 300.0;
 const PING_MAX_FREQ: f32 = 1500.0;
 ```
+
+(Particle size, initial speed, and the explosion threshold are no longer
+source-only constants — use `--particle-size`, `--initial-speed`, and
+`--explosion-threshold`.)
 
 ## Dependencies
 
@@ -290,7 +291,6 @@ const PING_MAX_FREQ: f32 = 1500.0;
 - [`clap`](https://crates.io/crates/clap) - Command line argument parsing
 - [`toml`](https://crates.io/crates/toml) - User presets file parsing
 - [`dirs`](https://crates.io/crates/dirs) - Platform config directory discovery
-- [`pollster`](https://crates.io/crates/pollster) - Minimal async executor
 - [`ouroboros`](https://crates.io/crates/ouroboros) - Safe self-referential struct support
 - [`ab_glyph`](https://crates.io/crates/ab_glyph) - Font rendering
 
@@ -309,8 +309,10 @@ Should work on:
 The application uses the modern `winit` 0.30 `ApplicationHandler` pattern, split into focused modules:
 
 - `main.rs` - Entry point and event loop setup
-- `config.rs` - Command line parsing (clap)
-- `app.rs` - Application state, input handling, HUD, and event loop glue
+- `config.rs` - Command line parsing (clap) and built-in presets
+- `presets.rs` - User-defined presets loaded from a TOML file
+- `app.rs` - Application shell: input handling, HUD, audio dispatch, and event loop glue around the simulation core
+- `sim.rs` - The headless simulation core: particles, spawning, explosions, and their orchestration. No windowing, rendering, or audio — the `App` layer owns those and drives this struct, which keeps every gameplay rule testable. **Every mechanic lands here, with unit tests.**
 - `physics.rs` - Particles, collisions, spatial grid, substepping
 - `explosion.rs` - Expanding-ring explosion mechanics
 - `render.rs` - `RenderContext` abstraction over GPU (pixels/wgpu) and CPU (softbuffer) backends, plus drawing routines
