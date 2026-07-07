@@ -3,8 +3,7 @@
 
 //! Command line configuration.
 
-use clap::parser::ValueSource;
-use clap::{ArgMatches, CommandFactory, FromArgMatches, Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 /// How particles are colored.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -81,199 +80,116 @@ impl Preset {
         }
     }
 
-    /// Apply this preset's bundle to `config`, skipping any field the user
-    /// set explicitly on the command line.
-    fn apply(self, config: &mut Config, matches: &ArgMatches) {
-        fn set<T>(matches: &ArgMatches, id: &str, field: &mut T, value: T) {
-            if matches.value_source(id) != Some(ValueSource::CommandLine) {
-                *field = value;
-            }
-        }
-
+    /// The preset's bundle as command-line arguments. Presets apply by
+    /// splicing these ahead of the user's real arguments and re-parsing,
+    /// exactly like user presets from the TOML file: built-in values pass
+    /// the same validation as the command line, and the same precedence
+    /// holds — explicit flag > preset > default. A test resolves every
+    /// variant to keep these lists valid.
+    fn args(self) -> &'static [&'static str] {
         match self {
-            Preset::Fireworks => {
-                set(matches, "bullet_time", &mut config.bullet_time, true);
-                set(matches, "gravity", &mut config.gravity, 40);
-                set(
-                    matches,
-                    "spawn_mode",
-                    &mut config.spawn_mode,
-                    SpawnMode::Collision,
-                );
-                set(matches, "trails", &mut config.trails, true);
-                set(
-                    matches,
-                    "color_mode",
-                    &mut config.color_mode,
-                    ColorMode::Velocity,
-                );
-                set(
-                    matches,
-                    "wall_elasticity",
-                    &mut config.wall_elasticity,
-                    0.85,
-                );
-                set(
-                    matches,
-                    "explosion_threshold",
-                    &mut config.explosion_threshold,
-                    80,
-                );
-                set(
-                    matches,
-                    "min_particles",
-                    &mut config.min_particles,
-                    Some(20),
-                );
-            }
-            Preset::Blob => {
-                set(matches, "matter", &mut config.matter, true);
-                // Weightless, lossless, and slow: blobs drift below the
-                // fusion threshold and merge instead of sinking into a pile.
-                set(matches, "gravity", &mut config.gravity, 0);
-                set(matches, "initial_speed", &mut config.initial_speed, 60.0);
-                set(matches, "particle_size", &mut config.particle_size, 5.0);
-                set(
-                    matches,
-                    "min_particles",
-                    &mut config.min_particles,
-                    Some(40),
-                );
-                set(
-                    matches,
-                    "spawn_mode",
-                    &mut config.spawn_mode,
-                    SpawnMode::Off,
-                );
-                set(
-                    matches,
-                    "explosion_threshold",
-                    &mut config.explosion_threshold,
-                    0,
-                );
-            }
-            Preset::Billiards => {
-                set(matches, "gravity", &mut config.gravity, 0);
-                set(matches, "particle_size", &mut config.particle_size, 7.0);
-                set(
-                    matches,
-                    "min_particles",
-                    &mut config.min_particles,
-                    Some(12),
-                );
-                set(
-                    matches,
-                    "spawn_mode",
-                    &mut config.spawn_mode,
-                    SpawnMode::Off,
-                );
-                set(
-                    matches,
-                    "explosion_threshold",
-                    &mut config.explosion_threshold,
-                    0,
-                );
-            }
-            Preset::Peace => {
-                set(matches, "flow", &mut config.flow, true);
-                // Gentle flakes: born slow, entrained by the flow, drifting
-                // down under light gravity. Silent by default - the constant
-                // grazing contacts would otherwise tick continuously (M
-                // unmutes at runtime).
-                set(matches, "mute", &mut config.mute, true);
-                set(matches, "initial_speed", &mut config.initial_speed, 40.0);
-                set(matches, "gravity", &mut config.gravity, 25);
-                set(
-                    matches,
-                    "min_particles",
-                    &mut config.min_particles,
-                    Some(90),
-                );
-                set(matches, "wall_elasticity", &mut config.wall_elasticity, 0.1);
-                set(
-                    matches,
-                    "particle_elasticity",
-                    &mut config.particle_elasticity,
-                    0.05,
-                );
-                set(
-                    matches,
-                    "spawn_mode",
-                    &mut config.spawn_mode,
-                    SpawnMode::Off,
-                );
-                set(
-                    matches,
-                    "explosion_threshold",
-                    &mut config.explosion_threshold,
-                    0,
-                );
-            }
-            Preset::Mandala => {
-                // The fireworks recipe under a kaleidoscope, minus gravity:
-                // weightless sprays keep the bloom radially symmetric.
-                set(matches, "bullet_time", &mut config.bullet_time, true);
-                set(matches, "kaleidoscope", &mut config.kaleidoscope, true);
-                set(matches, "trails", &mut config.trails, true);
-                set(matches, "gravity", &mut config.gravity, 0);
-                set(
-                    matches,
-                    "spawn_mode",
-                    &mut config.spawn_mode,
-                    SpawnMode::Collision,
-                );
-                set(
-                    matches,
-                    "color_mode",
-                    &mut config.color_mode,
-                    ColorMode::Velocity,
-                );
-                set(
-                    matches,
-                    "wall_elasticity",
-                    &mut config.wall_elasticity,
-                    0.85,
-                );
-                set(
-                    matches,
-                    "explosion_threshold",
-                    &mut config.explosion_threshold,
-                    80,
-                );
-                set(
-                    matches,
-                    "min_particles",
-                    &mut config.min_particles,
-                    Some(20),
-                );
-            }
-            Preset::Orbits => {
-                // A binary system of pinned wells with weightless particles
-                // launched slowly enough to stay bound; trails paint the
-                // orbit ribbons.
-                set(matches, "wells", &mut config.wells, 2);
-                set(matches, "gravity", &mut config.gravity, 0);
-                set(matches, "trails", &mut config.trails, true);
-                set(matches, "initial_speed", &mut config.initial_speed, 220.0);
-                set(
-                    matches,
-                    "min_particles",
-                    &mut config.min_particles,
-                    Some(40),
-                );
-                set(
-                    matches,
-                    "spawn_mode",
-                    &mut config.spawn_mode,
-                    SpawnMode::Off,
-                );
-                set(
-                    matches,
-                    "explosion_threshold",
-                    &mut config.explosion_threshold,
-                    0,
-                );
-            }
+            Preset::Fireworks => &[
+                "--bullet-time",
+                "--gravity",
+                "40",
+                "--spawn-mode",
+                "collision",
+                "--trails",
+                "--color-mode",
+                "velocity",
+                "--wall-elasticity",
+                "0.85",
+                "--explosion-threshold",
+                "80",
+                "--min-particles",
+                "20",
+            ],
+            // Weightless, lossless, and slow: blobs drift below the fusion
+            // threshold and merge instead of sinking into a pile.
+            Preset::Blob => &[
+                "--matter",
+                "--gravity",
+                "0",
+                "--initial-speed",
+                "60",
+                "--particle-size",
+                "5",
+                "--min-particles",
+                "40",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
+            ],
+            Preset::Billiards => &[
+                "--gravity",
+                "0",
+                "--particle-size",
+                "7",
+                "--min-particles",
+                "12",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
+            ],
+            // Gentle flakes: born slow, entrained by the flow, drifting down
+            // under light gravity. Silent by default — the constant grazing
+            // contacts would otherwise tick continuously (M unmutes).
+            Preset::Peace => &[
+                "--flow",
+                "--mute",
+                "--initial-speed",
+                "40",
+                "--gravity",
+                "25",
+                "--min-particles",
+                "90",
+                "--wall-elasticity",
+                "0.1",
+                "--particle-elasticity",
+                "0.05",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
+            ],
+            // A binary system of pinned wells with weightless particles
+            // launched slowly enough to stay bound; trails paint the orbits.
+            Preset::Orbits => &[
+                "--wells",
+                "2",
+                "--gravity",
+                "0",
+                "--trails",
+                "--initial-speed",
+                "220",
+                "--min-particles",
+                "40",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
+            ],
+            // The fireworks recipe under a kaleidoscope, minus gravity:
+            // weightless sprays keep the bloom radially symmetric.
+            Preset::Mandala => &[
+                "--bullet-time",
+                "--kaleidoscope",
+                "--trails",
+                "--gravity",
+                "0",
+                "--spawn-mode",
+                "collision",
+                "--color-mode",
+                "velocity",
+                "--wall-elasticity",
+                "0.85",
+                "--explosion-threshold",
+                "80",
+                "--min-particles",
+                "20",
+            ],
         }
     }
 }
@@ -457,15 +373,24 @@ impl Config {
         user: Option<&crate::presets::UserPresets>,
     ) -> Result<Self, clap::Error> {
         let matches = Self::command().try_get_matches_from(args)?;
-        let mut config = Self::from_arg_matches(&matches)?;
+        let config = Self::from_arg_matches(&matches)?;
         let Some(name) = config.preset.clone() else {
             return Ok(config);
         };
 
         // Built-ins (including their old-name aliases) win over the file.
         if let Ok(builtin) = Preset::from_str(&name, true) {
+            let mut config =
+                Self::parse_spliced(args, builtin.args().iter().copied()).map_err(|e| {
+                    Self::command().error(
+                        e.kind(),
+                        format!(
+                            "built-in preset '{}' failed to resolve (a bug): {e}",
+                            builtin.label()
+                        ),
+                    )
+                })?;
             config.preset = Some(builtin.label().to_string());
-            builtin.apply(&mut config, &matches);
             return Ok(config);
         }
 
@@ -498,30 +423,37 @@ impl Config {
             )));
         };
 
-        // Splice the preset's options in front of the user's arguments and
-        // re-parse: the same parser validates preset values, and because
-        // the user's own arguments come later, anything typed explicitly
-        // wins (args_override_self keeps the last occurrence).
-        let mut spliced: Vec<std::ffi::OsString> =
-            Vec::with_capacity(args.len() + entry.args.len());
-        spliced.push(args.first().cloned().unwrap_or_else(|| "bouncy".into()));
-        spliced.extend(entry.args.iter().map(std::ffi::OsString::from));
-        spliced.extend(args.iter().skip(1).cloned());
-
-        let matches = Self::command().try_get_matches_from(spliced).map_err(|e| {
+        // The base built-in's options go first, the user preset's second,
+        // so the preset overrides its base wherever both speak.
+        let injected = entry
+            .base
+            .iter()
+            .flat_map(|base| base.args().iter().copied())
+            .chain(entry.args.iter().map(String::as_str));
+        let mut config = Self::parse_spliced(args, injected).map_err(|e| {
             err(format!(
                 "in preset '{name}' from '{}':\n{e}",
                 user.path.display()
             ))
         })?;
-        let mut config = Self::from_arg_matches(&matches)?;
-        if let Some(base) = entry.base {
-            // The base built-in fills every option neither the user preset
-            // nor the command line set (both count as explicit here).
-            base.apply(&mut config, &matches);
-        }
         config.preset = Some(name);
         Ok(config)
+    }
+
+    /// Parse the command line with `injected` preset options spliced in
+    /// front of the user's own arguments and re-parse: the same parser
+    /// validates preset values, and because explicit arguments come later,
+    /// they always win (args_override_self keeps the last occurrence).
+    fn parse_spliced<'a>(
+        args: &[std::ffi::OsString],
+        injected: impl Iterator<Item = &'a str>,
+    ) -> Result<Self, clap::Error> {
+        let mut spliced: Vec<std::ffi::OsString> = Vec::with_capacity(args.len() + 16);
+        spliced.push(args.first().cloned().unwrap_or_else(|| "bouncy".into()));
+        spliced.extend(injected.map(std::ffi::OsString::from));
+        spliced.extend(args.iter().skip(1).cloned());
+        let matches = Self::command().try_get_matches_from(spliced)?;
+        Self::from_arg_matches(&matches)
     }
 }
 
@@ -733,6 +665,18 @@ mod tests {
         );
         // But it conflicts with the new flag.
         assert!(parse(&["--spawn-at-collision", "--spawn-mode", "off"]).is_err());
+    }
+
+    #[test]
+    fn every_builtin_preset_resolves_cleanly() {
+        // Built-in bundles are static CLI-arg lists; a typo in one would
+        // only surface at runtime, so resolve every variant here.
+        for preset in Preset::value_variants() {
+            let name = preset.label();
+            let config = parse(&["--preset", name])
+                .unwrap_or_else(|e| panic!("built-in '{name}' must resolve: {e}"));
+            assert_eq!(config.preset.as_deref(), Some(name));
+        }
     }
 
     #[test]
