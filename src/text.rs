@@ -68,10 +68,10 @@ pub fn draw_text(
         let bounds = outlined.px_bounds();
         outlined.draw(|gx, gy, coverage| {
             // Glyph-relative coords offset by the outline bounds give the
-            // frame pixel position.
-            #[allow(clippy::cast_possible_truncation)]
+            // frame pixel position; glyph extents are far below i32::MAX.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             let px = bounds.min.x as i32 + gx as i32;
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             let py = bounds.min.y as i32 + gy as i32;
 
             #[allow(clippy::cast_sign_loss)]

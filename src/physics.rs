@@ -107,7 +107,7 @@ pub type ParticleId = u64;
 /// A particle in the simulation with position, velocity, size, and color.
 pub struct Particle {
     /// Stable identity. Positions in the particle Vec are invalidated by
-    /// swap_remove (matter events) and retain (explosion kills), so any
+    /// `swap_remove` (matter events) and `retain` (explosion kills), so any
     /// feature that stores cross-frame references to a particle must hold
     /// its id, not its index. Ids are stamped by the Simulation; particles
     /// constructed outside one (tests) carry 0.
@@ -362,7 +362,10 @@ impl SpatialGrid {
             let cell = cy * cols + cx;
             self.next[i] = self.heads[cell];
             // Particle indices fit in i32: particle counts are far below i32::MAX.
-            self.heads[cell] = i as i32;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            {
+                self.heads[cell] = i as i32;
+            }
         }
     }
 
@@ -397,8 +400,14 @@ impl SpatialGrid {
     }
 
     /// Visit every pair of particle indices that could be colliding.
+    /// Grid dimensions are far below any integer limit, so the index casts
+    /// in the neighbor arithmetic are lossless.
+    #[allow(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap,
+        clippy::cast_possible_truncation
+    )]
     fn for_each_candidate_pair(&self, mut visit: impl FnMut(usize, usize)) {
-        #[allow(clippy::cast_sign_loss)]
         for cy in 0..self.rows {
             for cx in 0..self.cols {
                 let cell = cy * self.cols + cx;
@@ -560,7 +569,7 @@ pub const WELL_STRENGTH: f64 = 800.0;
 /// (no jitter at the center); outside it the pull falls off as 1/d^2.
 const WELL_SOFTENING: f64 = 120.0;
 /// Peak of d/(d^2+s^2)^(3/2), times s^2: at d = s/sqrt(2) the curve reaches
-/// 1/(sqrt(2) * 1.5^1.5 * s^2). Used to normalize the peak to WELL_STRENGTH.
+/// 1/(sqrt(2) * 1.5^1.5 * s^2). Used to normalize the peak to `WELL_STRENGTH`.
 const WELL_PEAK_FACTOR: f64 = 0.384_900_179_459_750_5;
 
 /// Pull (positive `strength`) or push (negative) every particle toward/away

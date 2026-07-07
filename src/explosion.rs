@@ -94,7 +94,7 @@ impl Explosion {
         self.killed_count += before - particles.len();
 
         if !self.active {
-            for p in particles.iter_mut() {
+            for p in &mut *particles {
                 p.doomed = false;
             }
         }
@@ -152,7 +152,7 @@ mod tests {
             EXPLOSION_KILL_RATIO,
             0,
         );
-        for p in particles.iter_mut() {
+        for p in &mut particles {
             p.doomed = true;
         }
         particles[0].x = 400.0;

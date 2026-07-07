@@ -242,7 +242,7 @@ pub struct Config {
 
     /// Pin this many attracting gravity wells around the screen center at
     /// startup (pin more at runtime with W; the range mirrors
-    /// MAX_PINNED_WELLS)
+    /// `MAX_PINNED_WELLS`)
     #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=16))]
     pub wells: u32,
 
@@ -450,7 +450,7 @@ impl Config {
     /// Parse the command line with `injected` preset options spliced in
     /// front of the user's own arguments and re-parse: the same parser
     /// validates preset values, and because explicit arguments come later,
-    /// they always win (args_override_self keeps the last occurrence).
+    /// they always win (`args_override_self` keeps the last occurrence).
     fn parse_spliced<'a>(
         args: &[std::ffi::OsString],
         injected: impl Iterator<Item = &'a str>,

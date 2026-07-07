@@ -22,5 +22,14 @@ ab_glyph = "0.2"
 toml = "0.8"
 dirs = "6"
 
+[lints.clippy]
+# Pedantic is enforced (CI runs clippy with -D warnings), with deliberate
+# exceptions chosen in the 2026-07 codebase review:
+pedantic = { level = "warn", priority = -1 }
+float_cmp = "allow"             # tests assert exact grid-snapped/clamped values
+similar_names = "allow"         # x1/x2, px/py physics naming is domain idiom
+struct_excessive_bools = "allow" # Config mirrors the CLI flag schema
+too_many_lines = "allow"        # match-heavy dispatchers read better whole
+
 [profile.release]
 lto = "thin"

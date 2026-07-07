@@ -217,7 +217,7 @@ pub fn print_list(explicit: Option<&Path>) {
                         .map_or_else(String::new, |b| format!("base: {}; ", b.label()));
                     format!("{base}{}", preset.args.join(" "))
                 });
-                println!("  {:<12} {info}", name);
+                println!("  {name:<12} {info}");
             }
         }
         Ok(None) => {

@@ -130,7 +130,7 @@ pub struct Simulation {
     width: u32,
     height: u32,
     /// Radius of newly spawned particles and the initial population; matter
-    /// mechanics diversify sizes between MIN/MAX_RADIUS_FACTOR of this.
+    /// mechanics diversify sizes between `MIN`/`MAX_RADIUS_FACTOR` of this.
     base_radius: f64,
     /// Top speed of newly created particles (they start at 50-100% of it).
     initial_speed: f64,
@@ -205,6 +205,8 @@ impl Simulation {
             gravity_percent: config.gravity,
             wall_elasticity: config.wall_elasticity,
             particle_elasticity: config.particle_elasticity,
+            // Bounded by EXPLOSION_THRESHOLD_MAX (1000), which fits usize.
+            #[allow(clippy::cast_possible_truncation)]
             explosion_threshold: config.explosion_threshold as usize,
             matter: config.matter,
             flow: config.flow,
@@ -1116,8 +1118,8 @@ mod tests {
         let mut s = sim(&["--min-particles", "2"]);
         freeze(&mut s);
         let now = Instant::now();
-        let old = now - Duration::from_millis(1500);
-        let recent = now - Duration::from_millis(500);
+        let old = now.checked_sub(Duration::from_millis(1500)).unwrap();
+        let recent = now.checked_sub(Duration::from_millis(500)).unwrap();
         s.spawn_times.extend([old, old, recent]);
 
         s.step(0.001, now, None);
