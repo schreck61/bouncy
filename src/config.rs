@@ -93,6 +93,11 @@ pub struct Config {
     #[arg(long)]
     pub flow: bool,
 
+    /// Give every particle gravity proportional to its mass, so clumps
+    /// attract and accrete (toggle at runtime with A)
+    #[arg(long)]
+    pub self_gravity: bool,
+
     /// Pin this many attracting gravity wells around the screen center at
     /// startup (pin more at runtime with W; the range mirrors
     /// `MAX_PINNED_WELLS`)
@@ -200,6 +205,9 @@ impl Config {
         }
         if self.flow {
             println!("Flow field: enabled");
+        }
+        if self.self_gravity {
+            println!("Self-gravity: mass attracts mass");
         }
         if self.wells > 0 {
             println!("Pinned wells: {}", self.wells);
@@ -375,6 +383,7 @@ pub const CONTROLS: &[(&str, &str)] = &[
     ("B", "Cycle spawn mode (center / collision / off)"),
     ("X", "Toggle matter mechanics (fusion/fission)"),
     ("F", "Toggle the flow field"),
+    ("A", "Toggle self-gravity (mass attracts mass)"),
     ("S", "Toggle musical pings (pentatonic scale)"),
     ("K", "Toggle kaleidoscope rendering"),
     ("G (hold)", "Gravity well at the cursor; Shift+G repels"),
@@ -451,6 +460,7 @@ mod tests {
         assert!(!config.bullet_time, "bullet time is opt-in");
         assert!(!config.music);
         assert!(!config.kaleidoscope);
+        assert!(!config.self_gravity);
     }
 
     #[test]
@@ -638,6 +648,15 @@ mod tests {
         assert_eq!(config.gravity, 0);
         assert!(config.trails);
         assert_eq!(config.initial_speed, 220.0);
+        assert_eq!(config.spawn_mode, SpawnMode::Off);
+        assert_eq!(config.explosion_threshold, 0);
+
+        let config = parse(&["--preset", "accretion"]).unwrap();
+        assert!(config.self_gravity);
+        assert!(config.matter);
+        assert!(config.trails);
+        assert_eq!(config.gravity, 0);
+        assert_eq!(config.particle_elasticity, 0.6);
         assert_eq!(config.spawn_mode, SpawnMode::Off);
         assert_eq!(config.explosion_threshold, 0);
 

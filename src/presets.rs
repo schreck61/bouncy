@@ -50,6 +50,9 @@ pub enum Preset {
     /// Kaleidoscope over weightless collision sprays: symmetric blooms
     /// of trails.
     Mandala,
+    /// Self-gravitating dust with dissipative collisions: clumps form,
+    /// fuse, and sweep their orbits clean.
+    Accretion,
 }
 
 impl Preset {
@@ -61,6 +64,7 @@ impl Preset {
             Preset::Peace => "peace",
             Preset::Orbits => "orbits",
             Preset::Mandala => "mandala",
+            Preset::Accretion => "accretion",
         }
     }
 
@@ -173,6 +177,32 @@ impl Preset {
                 "80",
                 "--min-particles",
                 "20",
+            ],
+            // Dissipation is what makes self-gravity clump: sub-elastic
+            // collisions bleed off the energy that would otherwise keep
+            // dust swinging through the cluster forever, and matter mode
+            // fuses whatever slows into contact. No global gravity, no
+            // spawning - the population evolves purely by accretion.
+            Preset::Accretion => &[
+                "--self-gravity",
+                "--matter",
+                "--trails",
+                "--gravity",
+                "0",
+                "--particle-elasticity",
+                "0.6",
+                "--wall-elasticity",
+                "0.75",
+                "--particle-size",
+                "2.5",
+                "--initial-speed",
+                "80",
+                "--min-particles",
+                "100",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
             ],
         }
     }

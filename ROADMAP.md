@@ -16,7 +16,12 @@ All numbered items have shipped; what remains is the opportunistic pile.
 - Comets: occasional fast heavy particle streaking through (matter mode makes
   it shatter things) - could be a timed ambient event or a middle-click.
 - Particle springs/links: click two particles to bind with a spring; molecule
-  building. Medium effort, niche payoff.
+  building. Medium effort, niche payoff. (Stable particle ids landed in the
+  2026-07 review work, so the identity problem is already solved.)
+- Self-gravity far-field tier: the pairwise force pass is O(n²), intended
+  for preset-scale populations. For thousands of self-gravitating
+  particles, accumulate per-cell mass and center of mass over the existing
+  spatial grid and treat far cells as point masses (one-level Barnes-Hut).
 
 ## Tuning debts / watch items
 

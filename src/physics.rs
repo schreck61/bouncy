@@ -652,6 +652,45 @@ pub fn collide_with_segments(
     }
 }
 
+/// Gravitational constant for particle self-gravity, in pixel/mass units
+/// (masses are areas: ~2.25 for a default particle). Tuned for
+/// screen-scale dynamics: a single pair barely drifts together, but a
+/// clustered population collapses in seconds — collective attraction is
+/// the point.
+pub const SELF_GRAVITY_G: f64 = 2500.0;
+/// Plummer softening length for self-gravity (pixels): caps the 1/d²
+/// singularity so close encounters swing by instead of slingshotting to
+/// infinity. Pairs this close are in collision range anyway.
+const SELF_GRAVITY_SOFTENING: f64 = 10.0;
+
+/// Apply mutual Newtonian gravity between every particle pair, softened
+/// like the cursor well and applied symmetrically (Newton's third law),
+/// so momentum is conserved exactly and heavier particles both pull
+/// harder and yield less. O(n²) per substep by design: correct and fast
+/// for the preset-scale populations self-gravity runs with (~5k pair
+/// evaluations at 100 particles); the documented next tier for thousands
+/// of particles is a far-field approximation over the spatial grid
+/// (per-cell mass and center of mass).
+pub fn apply_self_gravity(particles: &mut [Particle], dt: f64) {
+    let s2 = SELF_GRAVITY_SOFTENING * SELF_GRAVITY_SOFTENING;
+    for i in 0..particles.len() {
+        let (left, right) = particles.split_at_mut(i + 1);
+        let pi = &mut left[i];
+        for pj in &mut *right {
+            let dx = pj.x - pi.x;
+            let dy = pj.y - pi.y;
+            let softened = dx * dx + dy * dy + s2;
+            // a_i = G * m_j * d / (d² + s²)^(3/2), and symmetrically for j.
+            let scale = SELF_GRAVITY_G * dt / (softened * softened.sqrt());
+            let (fx, fy) = (dx * scale, dy * scale);
+            pi.vx += fx * pj.mass();
+            pi.vy += fy * pj.mass();
+            pj.vx -= fx * pi.mass();
+            pj.vy -= fy * pi.mass();
+        }
+    }
+}
+
 /// Speed of the ambient flow field's currents (pixels/s). Gentle by design:
 /// the flow should read as drift, not wind tunnel.
 pub const FLOW_SPEED: f64 = 60.0;
@@ -727,6 +766,60 @@ mod tests {
             color: [255, 255, 255, 255],
             doomed: false,
         }
+    }
+
+    #[test]
+    fn self_gravity_attracts_pairs_and_conserves_momentum() {
+        let mut particles = vec![
+            particle(100.0, 300.0, 0.0, 0.0),
+            particle(300.0, 300.0, 0.0, 0.0),
+        ];
+        apply_self_gravity(&mut particles, 0.1);
+        assert!(particles[0].vx > 0.0, "left particle pulled right");
+        assert!(particles[1].vx < 0.0, "right particle pulled left");
+        assert!(
+            particles[0].vy.abs() < 1e-12 && particles[1].vy.abs() < 1e-12,
+            "no lateral force for a horizontal pair"
+        );
+        // Equal masses: velocities are exactly opposite (momentum zero).
+        assert!((particles[0].vx + particles[1].vx).abs() < 1e-12);
+    }
+
+    #[test]
+    fn heavier_particles_pull_harder_and_accelerate_less() {
+        // m = 9 vs m = 2.25: the light particle must gain more speed, and
+        // total momentum must stay zero.
+        let mut particles = vec![
+            particle_r(100.0, 300.0, 0.0, 0.0, 3.0),
+            particle(300.0, 300.0, 0.0, 0.0),
+        ];
+        apply_self_gravity(&mut particles, 0.1);
+        let (heavy, light) = (&particles[0], &particles[1]);
+        assert!(
+            light.vx.abs() > heavy.vx.abs() * 3.0,
+            "light particle accelerates ~4x more: heavy={}, light={}",
+            heavy.vx,
+            light.vx
+        );
+        let momentum = heavy.mass() * heavy.vx + light.mass() * light.vx;
+        assert!(momentum.abs() < 1e-9, "momentum conserved: {momentum}");
+    }
+
+    #[test]
+    fn self_gravity_softening_caps_close_encounters() {
+        // A near-overlapping pair must receive a finite, modest kick, not
+        // a slingshot: the softened force peaks near the softening length.
+        let mut close = vec![
+            particle(400.0, 300.0, 0.0, 0.0),
+            particle(400.5, 300.0, 0.0, 0.0),
+        ];
+        apply_self_gravity(&mut close, 0.01);
+        assert!(close[0].vx.is_finite());
+        assert!(
+            close[0].vx.abs() < 10.0,
+            "softening keeps the kick modest: {}",
+            close[0].vx
+        );
     }
 
     #[test]

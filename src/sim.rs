@@ -10,8 +10,8 @@ use crate::explosion::{EXPLOSION_KILL_RATIO, Explosion, SPAWN_RATE_WINDOW, max_r
 use crate::physics::{
     COLLISION_ENERGY_NORMALIZER, CollisionRecorder, MOTION_STOPPED_FRAMES, Particle, ParticleId,
     Segment, SpatialGrid, SpawnSite, WELL_STRENGTH, apply_attractor, apply_flow,
-    collide_with_segments, handle_collisions, has_motion, max_radius, pair_mut, substep_count,
-    update_physics,
+    apply_self_gravity, collide_with_segments, handle_collisions, has_motion, max_radius, pair_mut,
+    substep_count, update_physics,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -147,6 +147,8 @@ pub struct Simulation {
     pub matter: bool,
     /// Ambient flow field enabled.
     pub flow: bool,
+    /// Mutual particle gravity enabled (mass attracts mass).
+    pub self_gravity: bool,
 
     // State
     particles: Vec<Particle>,
@@ -209,6 +211,7 @@ impl Simulation {
             explosion_threshold: config.explosion_threshold,
             matter: config.matter,
             flow: config.flow,
+            self_gravity: config.self_gravity,
             particles: Vec::new(),
             pinned_wells: Vec::new(),
             segments: Vec::new(),
@@ -499,7 +502,7 @@ impl Simulation {
             // Ambient influences revive a stopped simulation on their own:
             // the held or pinned wells and the flow field all inject
             // motion, so callers need not remember to wake() first.
-            if well.is_some() || self.flow || !self.pinned_wells.is_empty() {
+            if well.is_some() || self.flow || self.self_gravity || !self.pinned_wells.is_empty() {
                 self.wake();
             } else {
                 return events;
@@ -533,6 +536,9 @@ impl Simulation {
                     w.polarity.signum() * PINNED_WELL_STRENGTH,
                     sub_dt,
                 );
+            }
+            if self.self_gravity {
+                apply_self_gravity(&mut self.particles, sub_dt);
             }
             if self.flow {
                 apply_flow(&mut self.particles, self.sim_time, sub_dt);
@@ -576,8 +582,9 @@ impl Simulation {
         }
 
         events.explosion_started = self.handle_spawning(now);
-        events.motion_stopped =
-            self.check_motion(well.is_some() || self.flow || !self.pinned_wells.is_empty());
+        events.motion_stopped = self.check_motion(
+            well.is_some() || self.flow || self.self_gravity || !self.pinned_wells.is_empty(),
+        );
         events
     }
 
@@ -1554,6 +1561,37 @@ mod tests {
         if let Some(index) = s.find_particle(tracked) {
             assert_eq!(s.particles()[index].id, tracked);
         }
+    }
+
+    #[test]
+    fn self_gravity_draws_particles_together_and_suppresses_stopped() {
+        let mut s = sim(&["--min-particles", "2", "--self-gravity"]);
+        freeze(&mut s);
+        s.particles[0].x = 300.0;
+        s.particles[0].y = 300.0;
+        s.particles[1].x = 500.0;
+        s.particles[1].y = 300.0;
+        let gap_before = s.particles[1].x - s.particles[0].x;
+
+        let now = Instant::now();
+        for _ in 0..=MOTION_STOPPED_FRAMES {
+            s.step(0.01, now, None);
+        }
+        assert!(!s.stopped(), "self-gravity suppresses the stopped state");
+        assert!(s.particles[0].vx > 0.0, "left particle falls right");
+        assert!(s.particles[1].vx < 0.0, "right particle falls left");
+        assert!(
+            s.particles[1].x - s.particles[0].x < gap_before,
+            "the pair drifts together"
+        );
+
+        // Toggling it off lets motion detection resume.
+        s.self_gravity = false;
+        freeze(&mut s);
+        for _ in 0..=MOTION_STOPPED_FRAMES {
+            s.step(0.001, now, None);
+        }
+        assert!(s.stopped(), "without ambient forces the sim can stop again");
     }
 
     #[test]

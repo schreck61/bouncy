@@ -101,6 +101,7 @@ pub enum Command {
     CycleSpawnMode,
     ToggleMatter,
     ToggleFlow,
+    ToggleSelfGravity,
     ToggleKaleidoscope,
     /// Step gravity by a signed percentage amount.
     AdjustGravity(i32),
@@ -387,9 +388,10 @@ impl App {
             },
             format!("Spawn: {}  (B)", sim.spawn_mode.label()),
             format!(
-                "Matter: {}  (X)   Flow: {}  (F)",
+                "Matter: {}  (X)   Flow: {}  (F)   Self-grav: {}  (A)",
                 if sim.matter { "on" } else { "off" },
                 if sim.flow { "on" } else { "off" },
+                if sim.self_gravity { "on" } else { "off" },
             ),
             format!(
                 "Wells: {}  (W pins, Shift+W repels)",
@@ -436,7 +438,7 @@ impl App {
             for key_line in [
                 "P pause   N step   R reset   M mute",
                 "T trails   C colors   B spawn mode",
-                "X matter (fusion/fission)   F flow field",
+                "X matter (fusion/fission)   F flow   A self-gravity",
                 "S musical pings   K kaleidoscope",
                 "G hold: gravity well (Shift+G repels)",
                 "W pin well (Shift+W repel, Shift+R clear)",
@@ -613,6 +615,7 @@ impl App {
             KeyCode::KeyB if !repeat => self.apply(Command::CycleSpawnMode),
             KeyCode::KeyX if !repeat => self.apply(Command::ToggleMatter),
             KeyCode::KeyF if !repeat => self.apply(Command::ToggleFlow),
+            KeyCode::KeyA if !repeat => self.apply(Command::ToggleSelfGravity),
             KeyCode::KeyS if !repeat => self.apply(Command::ToggleMusic),
             KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
             KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
@@ -711,6 +714,14 @@ impl App {
                 // A stopped simulation self-wakes when the flow is on.
                 sim.flow = !sim.flow;
                 println!("Flow field {}", if sim.flow { "on" } else { "off" });
+            }),
+            Command::ToggleSelfGravity => self.with_sim(|sim| {
+                // Also an ambient force: a stopped simulation self-wakes.
+                sim.self_gravity = !sim.self_gravity;
+                println!(
+                    "Self-gravity {}",
+                    if sim.self_gravity { "on" } else { "off" }
+                );
             }),
             Command::AdjustGravity(step) => self.with_sim(|sim| {
                 sim.gravity_percent =
@@ -1160,6 +1171,8 @@ mod tests {
 
         app.apply(Command::ToggleFlow);
         assert!(app.sim.as_ref().unwrap().flow);
+        app.apply(Command::ToggleSelfGravity);
+        assert!(app.sim.as_ref().unwrap().self_gravity);
         app.apply(Command::Reset);
         assert!(!app.paused);
     }
