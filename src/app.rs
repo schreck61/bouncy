@@ -218,6 +218,26 @@ impl App {
         };
         let events = sim.step(dt, now, well);
 
+        // The headless core reports what happened; presentation (logging,
+        // audio, choreography) is this layer's job.
+        if events.explosion_started {
+            println!(
+                "EXPLOSION! Spawn rate exceeded {}/s; will kill {} of {} particles",
+                sim.explosion_threshold,
+                sim.explosion().map_or(0, |e| e.doomed_count),
+                sim.particle_count()
+            );
+        }
+        if let Some(killed) = events.explosion_completed {
+            println!(
+                "Explosion complete: killed {killed}, {} remaining",
+                sim.particle_count()
+            );
+        }
+        if events.motion_stopped {
+            println!("All motion has stopped");
+        }
+
         if events.max_collision_energy > 0.0 {
             #[allow(clippy::cast_possible_truncation)]
             self.audio
@@ -511,12 +531,9 @@ impl App {
             }
             KeyCode::KeyF if !repeat => {
                 if let Some(ref mut sim) = self.sim {
+                    // A stopped simulation self-wakes when the flow is on.
                     sim.flow = !sim.flow;
                     println!("Flow field {}", if sim.flow { "on" } else { "off" });
-                    if sim.flow {
-                        // The flow is about to move particles.
-                        sim.wake();
-                    }
                 }
             }
             KeyCode::KeyS if !repeat => {
@@ -534,11 +551,8 @@ impl App {
                 );
             }
             KeyCode::KeyG => {
+                // A stopped simulation self-wakes while the well is held.
                 self.well_direction = if self.shift_down { -1 } else { 1 };
-                // The well moves particles; leave the stopped state if set.
-                if let Some(ref mut sim) = self.sim {
-                    sim.wake();
-                }
             }
             KeyCode::KeyV if !repeat => {
                 if self.shift_down {
@@ -673,7 +687,11 @@ impl App {
         if button == MouseButton::Left {
             sim.spawn_burst(x, y);
         } else if button == MouseButton::Right && sim.trigger_manual_explosion(x, y) {
-            println!("Explosion triggered at cursor");
+            println!(
+                "Explosion at cursor; will kill {} of {} particles",
+                sim.explosion().map_or(0, |e| e.doomed_count),
+                sim.particle_count()
+            );
             self.audio.play_explosion();
             self.start_bullet_time(Instant::now());
         }
@@ -793,7 +811,17 @@ impl ApplicationHandler for App {
             physical_size.width, physical_size.height, width, height, scale_factor
         );
 
-        self.sim = Some(Simulation::new(&self.config, width, height));
+        let sim = Simulation::new(&self.config, width, height);
+        println!(
+            "Base particle count{}: {}",
+            if self.config.min_particles.is_some() {
+                " (override)"
+            } else {
+                " for this screen"
+            },
+            sim.base_particle_count()
+        );
+        self.sim = Some(sim);
         self.last_time = Instant::now();
         self.fps_timer = Instant::now();
         self.frame_count = 0;

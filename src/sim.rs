@@ -81,7 +81,8 @@ pub fn calculate_particle_count(width: u32, height: u32) -> usize {
 }
 
 /// What happened during one simulation step, for the caller to react to
-/// (sound effects, logging). The simulation itself has no audio dependency.
+/// (sound effects, logging). The simulation itself has no audio or
+/// terminal dependency — everything user-facing is reported here.
 #[derive(Default)]
 pub struct StepEvents {
     /// Highest collision energy this step (0.0 if no collisions).
@@ -90,6 +91,11 @@ pub struct StepEvents {
     pub collision_pan: f64,
     /// An automatic explosion was triggered this step.
     pub explosion_started: bool,
+    /// An explosion finished this step; carries its total kill count.
+    pub explosion_completed: Option<usize>,
+    /// The simulation declared all motion stopped this step (fires once
+    /// per transition into the stopped state).
+    pub motion_stopped: bool,
 }
 
 /// A gravity well: the transient cursor well (held G) passed into each
@@ -161,14 +167,6 @@ impl Simulation {
         let base_particle_count = config
             .min_particles
             .map_or_else(|| calculate_particle_count(width, height), |n| n as usize);
-        println!(
-            "Base particle count{}: {base_particle_count}",
-            if config.min_particles.is_some() {
-                " (override)"
-            } else {
-                " for this screen"
-            },
-        );
 
         // Cap the population at ~20% area coverage: one particle per four
         // diameter-squared tiles of window area.
@@ -287,6 +285,12 @@ impl Simulation {
 
     pub fn wall_segments(&self) -> &[Segment] {
         &self.segments
+    }
+
+    /// The initial and minimum particle count (screen-derived, or the
+    /// --min-particles override).
+    pub fn base_particle_count(&self) -> usize {
+        self.base_particle_count
     }
 
     pub fn stopped(&self) -> bool {
@@ -445,11 +449,6 @@ impl Simulation {
             kill_ratio,
             min_survivors,
         );
-        println!(
-            "Explosion will kill {} of {} particles",
-            explosion.doomed_count,
-            self.particles.len()
-        );
         self.explosion = Some(explosion);
         self.spawn_times.clear();
     }
@@ -461,10 +460,17 @@ impl Simulation {
     pub fn step(&mut self, dt: f64, now: Instant, well: Option<Well>) -> StepEvents {
         let mut events = StepEvents::default();
         if self.stopped {
-            return events;
+            // Ambient influences revive a stopped simulation on their own:
+            // the held or pinned wells and the flow field all inject
+            // motion, so callers need not remember to wake() first.
+            if well.is_some() || self.flow || !self.pinned_wells.is_empty() {
+                self.wake();
+            } else {
+                return events;
+            }
         }
 
-        self.update_explosion(dt);
+        events.explosion_completed = self.update_explosion(dt);
         self.sim_time += dt;
 
         let gravity_multiplier = f64::from(self.gravity_percent) / 100.0;
@@ -534,7 +540,8 @@ impl Simulation {
         }
 
         events.explosion_started = self.handle_spawning(now);
-        self.check_motion(well.is_some() || self.flow || !self.pinned_wells.is_empty());
+        events.motion_stopped =
+            self.check_motion(well.is_some() || self.flow || !self.pinned_wells.is_empty());
         events
     }
 
@@ -670,20 +677,17 @@ impl Simulation {
     }
 
     /// Update explosion state, processing kills and checking completion.
-    fn update_explosion(&mut self, dt: f64) {
-        if let Some(ref mut exp) = self.explosion {
-            exp.update(dt);
-            exp.process_kills(&mut self.particles);
-
-            if !exp.active {
-                println!(
-                    "Explosion complete: killed {}, {} remaining",
-                    exp.killed_count,
-                    self.particles.len()
-                );
-                self.explosion = None;
-            }
+    /// Returns the total kill count when the explosion completed this step.
+    fn update_explosion(&mut self, dt: f64) -> Option<usize> {
+        let exp = self.explosion.as_mut()?;
+        exp.update(dt);
+        exp.process_kills(&mut self.particles);
+        if exp.active {
+            return None;
         }
+        let killed = exp.killed_count;
+        self.explosion = None;
+        Some(killed)
     }
 
     /// Handle particle spawning from collisions, potentially triggering an
@@ -706,11 +710,6 @@ impl Simulation {
 
         // Explode instead of spawning once the window fills up.
         if self.explosion_threshold > 0 && self.spawn_times.len() >= self.explosion_threshold {
-            println!(
-                "EXPLOSION! Spawn rate {} per second exceeded threshold, {} total particles",
-                self.spawn_times.len(),
-                self.particles.len()
-            );
             // In collision-spawning mode the action is wherever particles
             // are densest; center the blast on the recent collisions.
             let (ex, ey) = if self.spawn_mode == SpawnMode::Collision {
@@ -887,21 +886,24 @@ impl Simulation {
         Some((sx / n, sy / n))
     }
 
-    /// Check if all particles have stopped moving. An active gravity well is
-    /// about to move them, so it suppresses the check.
-    fn check_motion(&mut self, well_active: bool) {
+    /// Check if all particles have stopped moving. An active gravity well
+    /// is about to move them, so it suppresses the check. Returns true on
+    /// the transition into the stopped state (once stopped, `step` returns
+    /// early, so this fires exactly once per stop).
+    fn check_motion(&mut self, well_active: bool) -> bool {
         if self.explosion.is_some() || well_active {
-            return;
+            return false;
         }
         if has_motion(&self.particles) {
             self.frames_without_motion = 0;
         } else {
             self.frames_without_motion += 1;
             if self.frames_without_motion >= MOTION_STOPPED_FRAMES {
-                println!("All motion has stopped");
                 self.stopped = true;
+                return true;
             }
         }
+        false
     }
 }
 
@@ -1332,12 +1334,17 @@ mod tests {
 
         let now = Instant::now();
         let mut steps = 0;
+        let mut completed = None;
         while s.explosion().is_some() {
-            s.step(0.05, now, None);
+            let events = s.step(0.05, now, None);
+            if events.explosion_completed.is_some() {
+                completed = events.explosion_completed;
+            }
             steps += 1;
             assert!(steps < 100, "explosion must complete");
         }
         assert_eq!(s.particle_count(), 2, "manual blast leaves 2 survivors");
+        assert_eq!(completed, Some(48), "completion event reports the kills");
     }
 
     #[test]
@@ -1544,6 +1551,51 @@ mod tests {
         assert_eq!(wells.len(), 1);
         assert!((wells[0].x - 400.0).abs() < 1e-9);
         assert!((wells[0].y - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stopping_is_reported_once_and_ambient_forces_self_wake() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        let now = Instant::now();
+
+        // The transition into the stopped state fires the event exactly once.
+        let mut stop_events = 0;
+        for _ in 0..=2 * MOTION_STOPPED_FRAMES {
+            if s.step(0.001, now, None).motion_stopped {
+                stop_events += 1;
+            }
+        }
+        assert!(s.stopped());
+        assert_eq!(
+            stop_events, 1,
+            "motion_stopped fires on the transition only"
+        );
+
+        // Enabling the flow revives the stopped simulation without any
+        // caller-side wake() bookkeeping.
+        s.flow = true;
+        s.step(0.005, now, None);
+        assert!(!s.stopped(), "flow self-wakes a stopped simulation");
+
+        // Same for the held well.
+        s.flow = false;
+        for _ in 0..=MOTION_STOPPED_FRAMES {
+            s.step(0.001, now, None);
+        }
+        // (Flow gave particles some velocity; re-freeze to stop again.)
+        freeze(&mut s);
+        for _ in 0..=MOTION_STOPPED_FRAMES {
+            s.step(0.001, now, None);
+        }
+        assert!(s.stopped());
+        let well = Well {
+            x: 400.0,
+            y: 300.0,
+            direction: 1,
+        };
+        s.step(0.001, now, Some(well));
+        assert!(!s.stopped(), "a held well self-wakes a stopped simulation");
     }
 
     #[test]
