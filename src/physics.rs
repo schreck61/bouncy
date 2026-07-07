@@ -100,8 +100,18 @@ pub struct SpawnSite {
     pub energy: f64,
 }
 
+/// Stable particle identity, unique within one `Simulation` run and never
+/// reused.
+pub type ParticleId = u64;
+
 /// A particle in the simulation with position, velocity, size, and color.
 pub struct Particle {
+    /// Stable identity. Positions in the particle Vec are invalidated by
+    /// swap_remove (matter events) and retain (explosion kills), so any
+    /// feature that stores cross-frame references to a particle must hold
+    /// its id, not its index. Ids are stamped by the Simulation; particles
+    /// constructed outside one (tests) carry 0.
+    pub id: ParticleId,
     pub x: f64,
     pub y: f64,
     pub vx: f64,
@@ -146,9 +156,11 @@ impl Particle {
         Self::new_moving(rng, x, y, vx, vy, radius)
     }
 
-    /// Create a particle with a specific position and velocity.
+    /// Create a particle with a specific position and velocity. The id is
+    /// 0 (unstamped) until the owning Simulation assigns one.
     pub fn new_moving(rng: &mut impl Rng, x: f64, y: f64, vx: f64, vy: f64, radius: f64) -> Self {
         Particle {
+            id: 0,
             x,
             y,
             vx,
@@ -735,6 +747,7 @@ mod tests {
 
     fn particle_r(x: f64, y: f64, vx: f64, vy: f64, radius: f64) -> Particle {
         Particle {
+            id: 0,
             x,
             y,
             vx,

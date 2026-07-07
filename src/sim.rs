@@ -9,8 +9,8 @@ use crate::config::{Config, SpawnMode};
 use crate::explosion::{max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_WINDOW};
 use crate::physics::{
     apply_attractor, apply_flow, collide_with_segments, handle_collisions, has_motion, max_radius,
-    substep_count, update_physics, CollisionRecorder, Particle, Segment, SpatialGrid, SpawnSite,
-    COLLISION_ENERGY_NORMALIZER, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
+    substep_count, update_physics, CollisionRecorder, Particle, ParticleId, Segment, SpatialGrid,
+    SpawnSite, COLLISION_ENERGY_NORMALIZER, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -153,6 +153,8 @@ pub struct Simulation {
     pinned_wells: Vec<Well>,
     /// Static wall segments drawn with the V key.
     segments: Vec<Segment>,
+    /// Next stable particle id to stamp (monotonic, never reused).
+    next_particle_id: ParticleId,
     /// Attractors pinned at startup (--wells); reset restores this layout.
     initial_wells: usize,
     explosion: Option<Explosion>,
@@ -209,6 +211,7 @@ impl Simulation {
             particles: Vec::new(),
             pinned_wells: Vec::new(),
             segments: Vec::new(),
+            next_particle_id: 1,
             initial_wells: config.wells as usize,
             explosion: None,
             spawn_times: VecDeque::new(),
@@ -254,17 +257,38 @@ impl Simulation {
     }
 
     fn populate(&mut self) {
-        self.particles = (0..self.base_particle_count)
-            .map(|_| {
-                Particle::new_random(
-                    &mut self.rng,
-                    self.width,
-                    self.height,
-                    self.base_radius,
-                    self.initial_speed,
-                )
-            })
-            .collect();
+        self.particles.clear();
+        for _ in 0..self.base_particle_count {
+            let p = Particle::new_random(
+                &mut self.rng,
+                self.width,
+                self.height,
+                self.base_radius,
+                self.initial_speed,
+            );
+            let p = self.stamp(p);
+            self.particles.push(p);
+        }
+    }
+
+    /// Assign the next stable id to a freshly constructed particle. Every
+    /// particle entering the population passes through here, so ids are
+    /// unique for the lifetime of the simulation and features may keep
+    /// cross-frame references by id where Vec indices would dangle.
+    fn stamp(&mut self, mut particle: Particle) -> Particle {
+        particle.id = self.next_particle_id;
+        self.next_particle_id += 1;
+        particle
+    }
+
+    /// Find the current index of the particle with `id`, if it is still
+    /// alive. A linear scan: intended for occasional lookups (user
+    /// interactions, future spring endpoints), not per-substep work.
+    /// No in-app caller yet — this is the id-resolution API that
+    /// cross-frame features build on; tests exercise it.
+    #[allow(dead_code)]
+    pub fn find_particle(&self, id: ParticleId) -> Option<usize> {
+        self.particles.iter().position(|p| p.id == id)
     }
 
     /// Reset to the initial population and clear all transient state,
@@ -391,14 +415,9 @@ impl Simulation {
                     (angle.cos(), angle.sin())
                 };
                 let speed = self.initial_speed * (0.5 + 0.5 * (dist / max_spread).min(1.0));
-                self.particles.push(Particle::new_moving(
-                    &mut self.rng,
-                    bx,
-                    by,
-                    ux * speed,
-                    uy * speed,
-                    r,
-                ));
+                let p = Particle::new_moving(&mut self.rng, bx, by, ux * speed, uy * speed, r);
+                let p = self.stamp(p);
+                self.particles.push(p);
             }
         }
         // Fresh particles are moving; leave the stopped state if we were in it.
@@ -665,6 +684,7 @@ impl Simulation {
                     parent.vx += px * kick;
                     parent.vy += py * kick;
                     let twin = Particle {
+                        id: 0, // stamped below, once the parent borrow ends
                         x: parent.x - 2.0 * px * offset,
                         y: parent.y - 2.0 * py * offset,
                         vx: parent.vx - 2.0 * px * kick,
@@ -673,6 +693,7 @@ impl Simulation {
                         color: parent.color,
                         doomed: false,
                     };
+                    let twin = self.stamp(twin);
                     self.particles.push(twin);
                     touched.insert(idx);
                     changed = true;
@@ -776,14 +797,9 @@ impl Simulation {
             };
 
             if let Some(((x, y), vx, vy)) = spawn {
-                self.particles.push(Particle::new_moving(
-                    &mut self.rng,
-                    x,
-                    y,
-                    vx,
-                    vy,
-                    self.base_radius,
-                ));
+                let p = Particle::new_moving(&mut self.rng, x, y, vx, vy, self.base_radius);
+                let p = self.stamp(p);
+                self.particles.push(p);
                 self.spawn_times.push_back(now);
                 spawned += 1;
             }
@@ -1502,6 +1518,52 @@ mod tests {
             .pinned_wells()
             .iter()
             .all(|w| w.polarity == Polarity::Attract));
+    }
+
+    #[test]
+    fn particle_ids_are_unique_stable_and_survive_population_churn() {
+        use std::collections::HashSet;
+        let mut s = sim(&["--min-particles", "30", "--matter"]);
+
+        // Every sim-owned particle is stamped with a distinct nonzero id.
+        let initial: HashSet<u64> = s.particles().iter().map(|p| p.id).collect();
+        assert_eq!(initial.len(), 30);
+        assert!(!initial.contains(&0), "sim particles are always stamped");
+
+        // find_particle resolves an id to its current index.
+        let tracked = s.particles()[5].id;
+        assert_eq!(
+            s.find_particle(tracked).map(|i| s.particles()[i].id),
+            Some(tracked)
+        );
+        assert_eq!(s.find_particle(u64::MAX), None);
+
+        // Churn the population hard: bursts (spawns), matter fission
+        // (swap_remove + fresh fragments), and an explosion (retain).
+        s.spawn_burst(400.0, 300.0);
+        arm_collision(&mut s, 400.0, 300.0);
+        s.particles[0].vx = 400.0;
+        s.particles[1].vx = -400.0;
+        let now = Instant::now();
+        for _ in 0..20 {
+            s.step(0.01, now, None);
+        }
+        s.trigger_manual_explosion(400.0, 300.0);
+        while s.explosion().is_some() {
+            s.step(0.05, now, None);
+        }
+
+        // Ids stay unique across all of it, and any survivor of the churn
+        // still resolves by id even though its index moved.
+        let survivors: HashSet<u64> = s.particles().iter().map(|p| p.id).collect();
+        assert_eq!(survivors.len(), s.particle_count(), "ids never collide");
+        assert!(
+            !survivors.contains(&0),
+            "churn never produces unstamped ids"
+        );
+        if let Some(index) = s.find_particle(tracked) {
+            assert_eq!(s.particles()[index].id, tracked);
+        }
     }
 
     #[test]
