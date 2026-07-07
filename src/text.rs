@@ -3,7 +3,7 @@
 
 //! Bitmap text rendering onto RGBA frames using an embedded font.
 
-use ab_glyph::{point, Font, FontRef, Glyph, PxScale, ScaleFont};
+use ab_glyph::{Font, FontRef, Glyph, PxScale, ScaleFont, point};
 use std::sync::OnceLock;
 
 /// Embedded font data (Liberation Sans Bold - SIL Open Font License).

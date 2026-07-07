@@ -1,22 +1,7 @@
 // Copyright (c) 2026 James O. Schreckengast
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
+// Licensed under the MIT License. See LICENSE for details.
+
+//! Entry point: parse the command line and run the winit event loop.
 
 mod app;
 mod audio;
@@ -41,38 +26,7 @@ fn main() {
         return;
     }
 
-    // Print configuration summary
-    if let Some(ref preset) = config.preset {
-        println!("Preset: {preset}");
-    }
-    println!("Spawn mode: {}", config.effective_spawn_mode().label());
-    if config.matter {
-        println!("Matter mechanics: fusion/fission enabled");
-    }
-    if config.flow {
-        println!("Flow field: enabled");
-    }
-    if config.wells > 0 {
-        println!("Pinned wells: {}", config.wells);
-    }
-    if config.music {
-        println!("Musical pings: pentatonic scale");
-    }
-    if config.kaleidoscope {
-        println!("Kaleidoscope: enabled");
-    }
-    if config.gravity != 100 {
-        println!("Gravity: {}%", config.gravity);
-    }
-    if (config.wall_elasticity - 1.0).abs() > f64::EPSILON {
-        println!("Wall elasticity: {}", config.wall_elasticity);
-    }
-    if (config.particle_elasticity - 1.0).abs() > f64::EPSILON {
-        println!("Particle elasticity: {}", config.particle_elasticity);
-    }
-    if let Some(seed) = config.seed {
-        println!("Random seed: {seed}");
-    }
+    config.print_summary();
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);

@@ -236,7 +236,7 @@ pub fn load(explicit: Option<&Path>) -> Result<Option<UserPresets>, String> {
                 return Err(format!(
                     "cannot read presets file '{}': {e}",
                     path.display()
-                ))
+                ));
             }
         }
     }
@@ -504,9 +504,11 @@ mod tests {
         let err = parse_str("[a]\ngravity = [1, 2]\n").unwrap_err();
         assert!(err.contains("unsupported value type"), "{err}");
 
-        assert!(parse_str("not valid toml [")
-            .unwrap_err()
-            .contains("invalid TOML"));
+        assert!(
+            parse_str("not valid toml [")
+                .unwrap_err()
+                .contains("invalid TOML")
+        );
     }
 
     #[test]

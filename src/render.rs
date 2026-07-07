@@ -6,8 +6,8 @@
 
 use crate::color::{color_component, hsv_to_rgba};
 use crate::config::ColorMode;
-use crate::explosion::{Explosion, EXPLOSION_RING_WIDTH};
-use crate::physics::{Particle, Segment, INITIAL_VELOCITY};
+use crate::explosion::{EXPLOSION_RING_WIDTH, Explosion};
+use crate::physics::{INITIAL_VELOCITY, Particle, Segment};
 use crate::sim::{Polarity, Well};
 use ouroboros::self_referencing;
 use pixels::{Pixels, SurfaceTexture};
@@ -81,6 +81,9 @@ fn particle_color(particle: &Particle, color_mode: ColorMode) -> [u8; 4] {
         ColorMode::Solid => particle.color,
         ColorMode::Velocity => {
             // Map speed to hue: 240 (blue, slow) down to 0 (red, fast).
+            // Normalized against the INITIAL_VELOCITY constant, not the
+            // --initial-speed setting, so slow presets render mostly blue
+            // (a known cosmetic debt: see the ROADMAP watch items).
             let t = (particle.speed() / (INITIAL_VELOCITY * 1.5)).clamp(0.0, 1.0);
             hsv_to_rgba(240.0 * (1.0 - t), 0.8, 1.0)
         }
@@ -528,8 +531,8 @@ pub fn create_render_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     #[test]
     fn stretch_axis_maps_full_physical_range_onto_logical() {

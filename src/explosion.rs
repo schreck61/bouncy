@@ -4,8 +4,8 @@
 //! Expanding ring explosions that cull the particle population.
 
 use crate::physics::Particle;
-use rand::seq::SliceRandom;
 use rand::Rng;
+use rand::seq::SliceRandom;
 
 pub const SPAWN_RATE_WINDOW: f64 = 1.0;
 pub const SPAWN_RATE_THRESHOLD: usize = 30;
@@ -104,8 +104,8 @@ impl Explosion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     fn make_particles(n: usize) -> Vec<Particle> {
         let mut rng = StdRng::seed_from_u64(3);

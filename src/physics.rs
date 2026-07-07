@@ -707,8 +707,8 @@ pub fn has_motion(particles: &[Particle]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     const RADIUS: f64 = DEFAULT_PARTICLE_RADIUS;
 

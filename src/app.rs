@@ -7,10 +7,10 @@
 use crate::audio::Audio;
 use crate::config::{ColorMode, Config, ELASTICITY_MAX, EXPLOSION_THRESHOLD_MAX, GRAVITY_LIMIT};
 use crate::render::{
-    create_render_context, dim_rect, fade_frame, kaleidoscope_frame, render_explosion,
-    render_particles, render_segments, render_wells, RenderContext,
+    RenderContext, create_render_context, dim_rect, fade_frame, kaleidoscope_frame,
+    render_explosion, render_particles, render_segments, render_wells,
 };
-use crate::sim::{Polarity, Simulation, Well, MAX_PINNED_WELLS, MAX_WALL_SEGMENTS};
+use crate::sim::{MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, Simulation, Well};
 use crate::text::{draw_text, draw_text_centered, measure_text};
 use std::rc::Rc;
 use std::time::Instant;

@@ -52,8 +52,8 @@ pub fn random_bright_color(rng: &mut impl Rng) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::StdRng;
     use rand::SeedableRng;
+    use rand::rngs::StdRng;
 
     #[test]
     fn hsv_produces_valid_bright_colors() {

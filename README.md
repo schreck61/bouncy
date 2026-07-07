@@ -309,8 +309,9 @@ Should work on:
 The application uses the modern `winit` 0.30 `ApplicationHandler` pattern, split into focused modules:
 
 - `main.rs` - Entry point and event loop setup
-- `config.rs` - Command line parsing (clap) and built-in presets
-- `presets.rs` - User-defined presets loaded from a TOML file
+- `config.rs` - Command line parsing (clap)
+- `presets.rs` - Built-in preset bundles and user-defined presets from a TOML file
+- `color.rs` - HSV/RGBA color conversion helpers
 - `app.rs` - Application shell: input handling, HUD, audio dispatch, and event loop glue around the simulation core
 - `sim.rs` - The headless simulation core: particles, spawning, explosions, and their orchestration. No windowing, rendering, or audio — the `App` layer owns those and drives this struct, which keeps every gameplay rule testable. **Every mechanic lands here, with unit tests.**
 - `physics.rs` - Particles, collisions, spatial grid, substepping

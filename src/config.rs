@@ -188,6 +188,42 @@ impl Config {
         }
     }
 
+    /// Print a startup summary of every setting that differs from the
+    /// defaults (plus the preset and seed when given).
+    pub fn print_summary(&self) {
+        if let Some(ref preset) = self.preset {
+            println!("Preset: {preset}");
+        }
+        println!("Spawn mode: {}", self.effective_spawn_mode().label());
+        if self.matter {
+            println!("Matter mechanics: fusion/fission enabled");
+        }
+        if self.flow {
+            println!("Flow field: enabled");
+        }
+        if self.wells > 0 {
+            println!("Pinned wells: {}", self.wells);
+        }
+        if self.music {
+            println!("Musical pings: pentatonic scale");
+        }
+        if self.kaleidoscope {
+            println!("Kaleidoscope: enabled");
+        }
+        if self.gravity != 100 {
+            println!("Gravity: {}%", self.gravity);
+        }
+        if (self.wall_elasticity - 1.0).abs() > f64::EPSILON {
+            println!("Wall elasticity: {}", self.wall_elasticity);
+        }
+        if (self.particle_elasticity - 1.0).abs() > f64::EPSILON {
+            println!("Particle elasticity: {}", self.particle_elasticity);
+        }
+        if let Some(seed) = self.seed {
+            println!("Random seed: {seed}");
+        }
+    }
+
     /// Parse the process command line, then overlay the chosen preset onto
     /// every option the user did not set explicitly.
     pub fn resolve() -> Self {

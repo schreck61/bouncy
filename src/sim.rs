@@ -6,11 +6,12 @@
 //! those and drives this struct, which keeps every gameplay rule testable.
 
 use crate::config::{Config, SpawnMode};
-use crate::explosion::{max_radius_from, Explosion, EXPLOSION_KILL_RATIO, SPAWN_RATE_WINDOW};
+use crate::explosion::{EXPLOSION_KILL_RATIO, Explosion, SPAWN_RATE_WINDOW, max_radius_from};
 use crate::physics::{
-    apply_attractor, apply_flow, collide_with_segments, handle_collisions, has_motion, max_radius,
-    pair_mut, substep_count, update_physics, CollisionRecorder, Particle, ParticleId, Segment,
-    SpatialGrid, SpawnSite, COLLISION_ENERGY_NORMALIZER, MOTION_STOPPED_FRAMES, WELL_STRENGTH,
+    COLLISION_ENERGY_NORMALIZER, CollisionRecorder, MOTION_STOPPED_FRAMES, Particle, ParticleId,
+    Segment, SpatialGrid, SpawnSite, WELL_STRENGTH, apply_attractor, apply_flow,
+    collide_with_segments, handle_collisions, has_motion, max_radius, pair_mut, substep_count,
+    update_physics,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -1502,10 +1503,11 @@ mod tests {
         assert_eq!(s.pinned_wells().len(), 4);
         s.reset();
         assert_eq!(s.pinned_wells().len(), 3, "reset restores startup wells");
-        assert!(s
-            .pinned_wells()
-            .iter()
-            .all(|w| w.polarity == Polarity::Attract));
+        assert!(
+            s.pinned_wells()
+                .iter()
+                .all(|w| w.polarity == Polarity::Attract)
+        );
     }
 
     #[test]
@@ -1792,10 +1794,11 @@ mod tests {
             s.step(0.01, Instant::now(), None);
         }
         assert_eq!(s.particle_count(), 30);
-        assert!(s
-            .particles
-            .iter()
-            .all(|p| (p.radius - s.base_radius).abs() < 1e-12));
+        assert!(
+            s.particles
+                .iter()
+                .all(|p| (p.radius - s.base_radius).abs() < 1e-12)
+        );
     }
 
     #[test]
