@@ -10,7 +10,7 @@ use crate::render::{
     create_render_context, dim_rect, fade_frame, kaleidoscope_frame, render_explosion,
     render_particles, render_segments, render_wells, RenderContext,
 };
-use crate::sim::{Simulation, Well, MAX_PINNED_WELLS, MAX_WALL_SEGMENTS};
+use crate::sim::{Polarity, Simulation, Well, MAX_PINNED_WELLS, MAX_WALL_SEGMENTS};
 use crate::text::{draw_text, draw_text_centered, measure_text};
 use std::rc::Rc;
 use std::time::Instant;
@@ -120,8 +120,8 @@ pub struct App {
     hud_mode: HudMode,
     cursor_x: f64,
     cursor_y: f64,
-    /// Cursor gravity well: 0 = off, 1 = attract (G held), -1 = repel (Shift+G).
-    well_direction: i8,
+    /// Cursor gravity well while G is held (Shift+G repels).
+    held_well: Option<Polarity>,
     /// Wall drawing (V held): where the next segment starts, if active.
     wall_anchor: Option<(f64, f64)>,
     shift_down: bool,
@@ -166,7 +166,7 @@ impl App {
             hud_mode: HudMode::Hidden,
             cursor_x: 0.0,
             cursor_y: 0.0,
-            well_direction: 0,
+            held_well: None,
             wall_anchor: None,
             shift_down: false,
             time_scale: 1.0,
@@ -185,10 +185,10 @@ impl App {
 
     /// The gravity well input for this frame, if held.
     fn well(&self) -> Option<Well> {
-        (self.well_direction != 0).then_some(Well {
+        self.held_well.map(|polarity| Well {
             x: self.cursor_x,
             y: self.cursor_y,
-            direction: self.well_direction,
+            polarity,
         })
     }
 
@@ -325,10 +325,10 @@ impl App {
         if sim.stopped() {
             flags.push("STOPPED");
         }
-        if self.well_direction > 0 {
-            flags.push("WELL: ATTRACT");
-        } else if self.well_direction < 0 {
-            flags.push("WELL: REPEL");
+        match self.held_well {
+            Some(Polarity::Attract) => flags.push("WELL: ATTRACT"),
+            Some(Polarity::Repel) => flags.push("WELL: REPEL"),
+            None => {}
         }
         if self.bullet_time_start.is_some() {
             flags.push("BULLET TIME");
@@ -339,6 +339,9 @@ impl App {
 
         if self.hud_mode == HudMode::StatsAndKeys {
             lines.push(String::new());
+            // Curated compressed lines (screen space); the canonical list
+            // is config::CONTROLS, which --help renders and a test checks
+            // against the README.
             for key_line in [
                 "P pause   N step   R reset   M mute",
                 "T trails   C colors   B spawn mode",
@@ -421,7 +424,7 @@ impl App {
         let desired = cursor_should_be_visible(
             self.window_focused,
             self.cursor_inside,
-            self.well_direction != 0 || self.wall_anchor.is_some(),
+            self.held_well.is_some() || self.wall_anchor.is_some(),
             idle,
         );
         if desired != self.cursor_visible {
@@ -475,7 +478,7 @@ impl App {
     ) {
         if state == ElementState::Released {
             if key_code == KeyCode::KeyG {
-                self.well_direction = 0;
+                self.held_well = None;
             }
             if key_code == KeyCode::KeyV {
                 self.wall_anchor = None;
@@ -552,7 +555,11 @@ impl App {
             }
             KeyCode::KeyG => {
                 // A stopped simulation self-wakes while the well is held.
-                self.well_direction = if self.shift_down { -1 } else { 1 };
+                self.held_well = Some(if self.shift_down {
+                    Polarity::Repel
+                } else {
+                    Polarity::Attract
+                });
             }
             KeyCode::KeyV if !repeat => {
                 if self.shift_down {
@@ -567,14 +574,17 @@ impl App {
             }
             KeyCode::KeyW if !repeat => {
                 if let Some(ref mut sim) = self.sim {
-                    let direction = if self.shift_down { -1 } else { 1 };
-                    if sim.pin_well(self.cursor_x, self.cursor_y, direction) {
+                    let polarity = if self.shift_down {
+                        Polarity::Repel
+                    } else {
+                        Polarity::Attract
+                    };
+                    if sim.pin_well(self.cursor_x, self.cursor_y, polarity) {
                         println!(
                             "Pinned {} well at ({:.0}, {:.0}); {} total (Shift+R clears)",
-                            if direction > 0 {
-                                "attracting"
-                            } else {
-                                "repelling"
+                            match polarity {
+                                Polarity::Attract => "attracting",
+                                Polarity::Repel => "repelling",
                             },
                             self.cursor_x,
                             self.cursor_y,

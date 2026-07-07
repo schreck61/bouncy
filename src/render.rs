@@ -7,7 +7,7 @@
 use crate::config::ColorMode;
 use crate::explosion::{Explosion, EXPLOSION_RING_WIDTH};
 use crate::physics::{color_component, hsv_to_rgba, Particle, Segment, INITIAL_VELOCITY};
-use crate::sim::Well;
+use crate::sim::{Polarity, Well};
 use ouroboros::self_referencing;
 use pixels::{Pixels, SurfaceTexture};
 use std::num::NonZeroU32;
@@ -35,6 +35,17 @@ fn color_component_f32(v: f32) -> u8 {
     v.clamp(0.0, 255.0) as u8
 }
 
+/// Write `color` at `(x, y)` if it lies inside the frame: the single home
+/// for the bounds check and index arithmetic every drawing routine needs.
+#[inline]
+#[allow(clippy::cast_sign_loss)]
+fn put_pixel(frame: &mut [u8], width: u32, height: u32, x: i32, y: i32, color: [u8; 4]) {
+    if x >= 0 && (x as u32) < width && y >= 0 && (y as u32) < height {
+        let idx = ((y as u32) as usize * width as usize + (x as u32) as usize) * 4;
+        frame[idx..idx + 4].copy_from_slice(&color);
+    }
+}
+
 /// Fade the frame toward black, leaving motion trails.
 /// Multiplies every channel by ~7/8 using integer math.
 pub fn fade_frame(frame: &mut [u8]) {
@@ -49,6 +60,9 @@ pub fn fade_frame(frame: &mut [u8]) {
 /// ~30%.
 pub fn dim_rect(frame: &mut [u8], width: u32, height: u32, rect: (u32, u32, u32, u32), keep: u16) {
     let (x0, y0, w, h) = rect;
+    // Clamp the origin too: an x0 beyond the frame would invert the row
+    // slice bounds below and panic.
+    let x0 = x0.min(width);
     let x1 = x0.saturating_add(w).min(width);
     let y1 = y0.saturating_add(h).min(height);
     for y in y0.min(height)..y1 {
@@ -81,7 +95,8 @@ pub fn render_particles(
     color_mode: ColorMode,
 ) {
     for particle in particles {
-        // Radius ~1.5 draws the classic 3x3 square; larger radii draw discs.
+        // The radius rounds to the nearest integer: radius 1 draws a 3x3
+        // square, while the default 1.5 rounds up to a 13-pixel disc.
         #[allow(clippy::cast_possible_truncation)]
         let r = (particle.radius.round() as i32).max(1);
         let disc = r > 1;
@@ -95,15 +110,7 @@ pub fn render_particles(
                 if disc && dx * dx + dy * dy > r_sq {
                     continue;
                 }
-                let px = cx + dx;
-                let py = cy + dy;
-
-                // Bounds check: px/py are valid pixel coordinates after this check
-                #[allow(clippy::cast_sign_loss)]
-                if px >= 0 && (px as u32) < width && py >= 0 && (py as u32) < height {
-                    let idx = ((py as u32) as usize * width as usize + (px as u32) as usize) * 4;
-                    frame[idx..idx + 4].copy_from_slice(&color);
-                }
+                put_pixel(frame, width, height, cx + dx, cy + dy, color);
             }
         }
     }
@@ -144,12 +151,7 @@ fn draw_line(
     let sy = if y < y_end { 1 } else { -1 };
     let mut err = dx + dy;
     loop {
-        // Bounds check: x/y are valid pixel coordinates after this check
-        #[allow(clippy::cast_sign_loss)]
-        if x >= 0 && (x as u32) < width && y >= 0 && (y as u32) < height {
-            let idx = ((y as u32) as usize * width as usize + (x as u32) as usize) * 4;
-            frame[idx..idx + 4].copy_from_slice(&color);
-        }
+        put_pixel(frame, width, height, x, y, color);
         if x == x_end && y == y_end {
             break;
         }
@@ -202,10 +204,9 @@ const WELL_REPEL_COLOR: [u8; 4] = [255, 140, 80, 255];
 pub fn render_wells(frame: &mut [u8], wells: &[Well], width: u32, height: u32) {
     let r = WELL_MARKER_RADIUS;
     for well in wells {
-        let color = if well.direction >= 0 {
-            WELL_ATTRACT_COLOR
-        } else {
-            WELL_REPEL_COLOR
+        let color = match well.polarity {
+            Polarity::Attract => WELL_ATTRACT_COLOR,
+            Polarity::Repel => WELL_REPEL_COLOR,
         };
         let cx = coord_to_pixel(well.x);
         let cy = coord_to_pixel(well.y);
@@ -681,17 +682,17 @@ mod tests {
             Well {
                 x: 25.0,
                 y: 20.0,
-                direction: 1,
+                polarity: Polarity::Attract,
             },
             Well {
                 x: 0.0,
                 y: 0.0,
-                direction: -1,
+                polarity: Polarity::Repel,
             }, // clipped at the corner
             Well {
                 x: -20.0,
                 y: 100.0,
-                direction: 1,
+                polarity: Polarity::Attract,
             }, // fully off-screen
         ];
         render_wells(&mut frame, &wells, width, height);

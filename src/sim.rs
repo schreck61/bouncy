@@ -98,14 +98,30 @@ pub struct StepEvents {
     pub motion_stopped: bool,
 }
 
+/// Whether a gravity well pulls particles inward or pushes them away.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Polarity {
+    Attract,
+    Repel,
+}
+
+impl Polarity {
+    /// Sign applied to the well strength: attraction is positive.
+    pub fn signum(self) -> f64 {
+        match self {
+            Polarity::Attract => 1.0,
+            Polarity::Repel => -1.0,
+        }
+    }
+}
+
 /// A gravity well: the transient cursor well (held G) passed into each
 /// step, or a persistent pinned well (W key) stored in the simulation.
 #[derive(Copy, Clone)]
 pub struct Well {
     pub x: f64,
     pub y: f64,
-    /// 1 = attract, -1 = repel.
-    pub direction: i8,
+    pub polarity: Polarity,
 }
 
 /// Headless particle simulation.
@@ -220,7 +236,7 @@ impl Simulation {
             self.pinned_wells.push(Well {
                 x: self.center_x,
                 y: self.center_y,
-                direction: 1,
+                polarity: Polarity::Attract,
             });
             return;
         }
@@ -232,7 +248,7 @@ impl Simulation {
             self.pinned_wells.push(Well {
                 x: self.center_x + ring * angle.cos(),
                 y: self.center_y + ring * angle.sin(),
-                direction: 1,
+                polarity: Polarity::Attract,
             });
         }
     }
@@ -391,11 +407,11 @@ impl Simulation {
 
     /// Pin a persistent gravity well at `(x, y)` (W key; Shift+W pins a
     /// repeller). Returns false once the well limit is reached.
-    pub fn pin_well(&mut self, x: f64, y: f64, direction: i8) -> bool {
+    pub fn pin_well(&mut self, x: f64, y: f64, polarity: Polarity) -> bool {
         if self.pinned_wells.len() >= MAX_PINNED_WELLS {
             return false;
         }
-        self.pinned_wells.push(Well { x, y, direction });
+        self.pinned_wells.push(Well { x, y, polarity });
         // The new well is about to move particles.
         self.wake();
         true
@@ -485,7 +501,7 @@ impl Simulation {
                     &mut self.particles,
                     w.x,
                     w.y,
-                    f64::from(w.direction) * WELL_STRENGTH,
+                    w.polarity.signum() * WELL_STRENGTH,
                     sub_dt,
                 );
             }
@@ -494,7 +510,7 @@ impl Simulation {
                     &mut self.particles,
                     w.x,
                     w.y,
-                    f64::from(w.direction) * PINNED_WELL_STRENGTH,
+                    w.polarity.signum() * PINNED_WELL_STRENGTH,
                     sub_dt,
                 );
             }
@@ -1378,7 +1394,7 @@ mod tests {
         let well = Well {
             x: 400.0,
             y: 300.0,
-            direction: 1,
+            polarity: Polarity::Attract,
         };
         let now = Instant::now();
         for _ in 0..=MOTION_STOPPED_FRAMES {
@@ -1403,7 +1419,7 @@ mod tests {
         s.particles[0].y = 300.0;
         s.particles[1].x = 700.0;
         s.particles[1].y = 300.0;
-        assert!(s.pin_well(400.0, 300.0, 1));
+        assert!(s.pin_well(400.0, 300.0, Polarity::Attract));
 
         let now = Instant::now();
         for _ in 0..=MOTION_STOPPED_FRAMES {
@@ -1431,7 +1447,7 @@ mod tests {
         s.particles[0].y = 300.0;
         s.particles[1].x = 500.0;
         s.particles[1].y = 300.0;
-        assert!(s.pin_well(400.0, 300.0, -1));
+        assert!(s.pin_well(400.0, 300.0, Polarity::Repel));
 
         s.step(0.01, Instant::now(), None);
         assert!(s.particles[0].vx < 0.0, "left particle pushed left");
@@ -1442,8 +1458,8 @@ mod tests {
     fn clear_wells_removes_all_and_motion_detection_resumes() {
         let mut s = sim(&["--min-particles", "2"]);
         freeze(&mut s);
-        s.pin_well(100.0, 100.0, 1);
-        s.pin_well(200.0, 200.0, -1);
+        s.pin_well(100.0, 100.0, Polarity::Attract);
+        s.pin_well(200.0, 200.0, Polarity::Repel);
         assert_eq!(s.pinned_wells().len(), 2);
 
         assert_eq!(s.clear_wells(), 2);
@@ -1460,9 +1476,12 @@ mod tests {
     fn pinned_wells_are_capped() {
         let mut s = sim(&["--min-particles", "2"]);
         for _ in 0..MAX_PINNED_WELLS {
-            assert!(s.pin_well(400.0, 300.0, 1));
+            assert!(s.pin_well(400.0, 300.0, Polarity::Attract));
         }
-        assert!(!s.pin_well(400.0, 300.0, 1), "cap must refuse the next pin");
+        assert!(
+            !s.pin_well(400.0, 300.0, Polarity::Attract),
+            "cap must refuse the next pin"
+        );
         assert_eq!(s.pinned_wells().len(), MAX_PINNED_WELLS);
     }
 
@@ -1471,15 +1490,18 @@ mod tests {
         let mut s = sim(&["--wells", "3", "--min-particles", "2"]);
         assert_eq!(s.pinned_wells().len(), 3);
         for w in s.pinned_wells() {
-            assert_eq!(w.direction, 1, "startup wells attract");
+            assert_eq!(w.polarity, Polarity::Attract, "startup wells attract");
             assert!(w.x > 0.0 && w.x < 800.0 && w.y > 0.0 && w.y < 600.0);
         }
 
-        s.pin_well(50.0, 50.0, -1);
+        s.pin_well(50.0, 50.0, Polarity::Repel);
         assert_eq!(s.pinned_wells().len(), 4);
         s.reset();
         assert_eq!(s.pinned_wells().len(), 3, "reset restores startup wells");
-        assert!(s.pinned_wells().iter().all(|w| w.direction == 1));
+        assert!(s
+            .pinned_wells()
+            .iter()
+            .all(|w| w.polarity == Polarity::Attract));
     }
 
     #[test]
@@ -1592,7 +1614,7 @@ mod tests {
         let well = Well {
             x: 400.0,
             y: 300.0,
-            direction: 1,
+            polarity: Polarity::Attract,
         };
         s.step(0.001, now, Some(well));
         assert!(!s.stopped(), "a held well self-wakes a stopped simulation");
@@ -1746,7 +1768,7 @@ mod tests {
         let mut s = sim(&["--min-particles", "10"]);
         s.spawn_burst(400.0, 300.0);
         s.trigger_manual_explosion(400.0, 300.0);
-        s.pin_well(100.0, 100.0, 1);
+        s.pin_well(100.0, 100.0, Polarity::Attract);
         s.add_wall_segment(50.0, 50.0, 150.0, 50.0);
         s.stopped = true;
         s.spawn_times.push_back(Instant::now());

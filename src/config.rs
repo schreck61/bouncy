@@ -197,7 +197,7 @@ impl Preset {
 /// GPU-accelerated particle simulation with elastic collisions, gravity,
 /// and explosive chain reactions.
 #[derive(Parser, Clone, Debug)]
-#[command(name = "bouncy", version, about, after_help = CONTROLS_HELP,
+#[command(name = "bouncy", version, about, after_help = controls_help(),
           args_override_self = true)]
 pub struct Config {
     /// Apply a settings bundle: a built-in preset (fireworks, blob,
@@ -457,36 +457,55 @@ impl Config {
     }
 }
 
-const CONTROLS_HELP: &str = "Controls:
-  Space, Escape, Q   Exit
-  P                  Pause / resume
-  N                  Advance one frame (while paused)
-  R                  Reset the simulation
-  M                  Mute / unmute audio
-  H                  Cycle the HUD (off / stats / stats+keys)
-  Up / Down          Adjust gravity by 10%
-  Left / Right       Adjust particle elasticity by 0.05
-  [ / ]              Adjust wall elasticity by 0.05
-  , / .              Slow down / speed up time by 0.05 (0.1x-4x)
-  - / =              Adjust explosion threshold by 5 (0 = off)
-  T                  Toggle motion trails
-  C                  Cycle color mode
-  B                  Cycle spawn mode (center / collision / off)
-  X                  Toggle matter mechanics (fusion/fission)
-  F                  Toggle the flow field
-  S                  Toggle musical pings (pentatonic scale)
-  K                  Toggle kaleidoscope rendering
-  G (hold)           Gravity well at the cursor; Shift+G repels
-  W                  Pin a persistent well at the cursor; Shift+W repels
-  Shift+R            Clear all pinned wells
-  V (hold+drag)      Draw wall segments that particles bounce off
-  Shift+V            Clear all drawn walls
-  Left click         Spawn a burst of particles at the cursor
-  Right click        Trigger an explosion at the cursor
+/// Keyboard and mouse controls as (input, action) pairs: the single
+/// source for the --help footer. The HUD key reference (app.rs) uses
+/// curated compressed lines for screen space, and the README repeats the
+/// table for browsers — a test checks each input here appears in the
+/// README so the copies cannot drift silently.
+pub const CONTROLS: &[(&str, &str)] = &[
+    ("Space, Escape, Q", "Exit"),
+    ("P", "Pause / resume"),
+    ("N", "Advance one frame (while paused)"),
+    ("R", "Reset the simulation"),
+    ("M", "Mute / unmute audio"),
+    ("H", "Cycle the HUD (off / stats / stats+keys)"),
+    ("Up / Down", "Adjust gravity by 10%"),
+    ("Left / Right", "Adjust particle elasticity by 0.05"),
+    ("[ / ]", "Adjust wall elasticity by 0.05"),
+    (", / .", "Slow down / speed up time by 0.05 (0.1x-4x)"),
+    ("- / =", "Adjust explosion threshold by 5 (0 = off)"),
+    ("T", "Toggle motion trails"),
+    ("C", "Cycle color mode"),
+    ("B", "Cycle spawn mode (center / collision / off)"),
+    ("X", "Toggle matter mechanics (fusion/fission)"),
+    ("F", "Toggle the flow field"),
+    ("S", "Toggle musical pings (pentatonic scale)"),
+    ("K", "Toggle kaleidoscope rendering"),
+    ("G (hold)", "Gravity well at the cursor; Shift+G repels"),
+    ("W", "Pin a persistent well at the cursor; Shift+W repels"),
+    ("Shift+R", "Clear all pinned wells"),
+    (
+        "V (hold + drag)",
+        "Draw wall segments that particles bounce off",
+    ),
+    ("Shift+V", "Clear all drawn walls"),
+    ("Left click", "Spawn a burst of particles at the cursor"),
+    ("Right click", "Trigger an explosion at the cursor"),
+];
 
-Rendering:
-  Uses GPU rendering (wgpu) by default. Falls back to CPU rendering
-  (softbuffer) if GPU is unavailable. Use --cpu to force CPU rendering.";
+/// Render the --help footer from the controls table.
+fn controls_help() -> String {
+    let lines: Vec<String> = CONTROLS
+        .iter()
+        .map(|(input, action)| format!("  {input:<18} {action}"))
+        .collect();
+    format!(
+        "Controls:\n{}\n\nRendering:\n  Uses GPU rendering (wgpu) by default. \
+         Falls back to CPU rendering\n  (softbuffer) if GPU is unavailable. \
+         Use --cpu to force CPU rendering.",
+        lines.join("\n")
+    )
+}
 
 fn parse_range_f64(s: &str, name: &str, min: f64, max: f64) -> Result<f64, String> {
     let value: f64 = s.parse().map_err(|_| format!("{name} must be a number"))?;
@@ -665,6 +684,20 @@ mod tests {
         );
         // But it conflicts with the new flag.
         assert!(parse(&["--spawn-at-collision", "--spawn-mode", "off"]).is_err());
+    }
+
+    #[test]
+    fn every_control_is_documented_in_the_readme() {
+        // Drift insurance for the three hand-maintained control listings:
+        // the README table must mention every input from the CONTROLS
+        // source of truth (backticks stripped to match its formatting).
+        let readme = include_str!("../README.md").replace('`', "");
+        for (input, _) in CONTROLS {
+            assert!(
+                readme.contains(input),
+                "control '{input}' is missing from the README controls table"
+            );
+        }
     }
 
     #[test]
