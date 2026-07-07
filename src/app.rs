@@ -119,9 +119,118 @@ fn physical_to_logical(physical: u32, scale_factor: f64) -> u32 {
     (f64::from(physical) / scale_factor) as u32
 }
 
+/// Frame-rate accounting for the HUD and the verbose per-second print.
+struct FpsCounter {
+    frame_count: u64,
+    timer: Instant,
+    current: f64,
+}
+
+impl FpsCounter {
+    fn new() -> Self {
+        FpsCounter {
+            frame_count: 0,
+            timer: Instant::now(),
+            current: 0.0,
+        }
+    }
+
+    /// Reset the measurement window (warmup frames must not count).
+    fn restart(&mut self, now: Instant) {
+        self.frame_count = 0;
+        self.timer = now;
+    }
+
+    /// Count one frame; returns the refreshed rate once per second.
+    fn tick(&mut self) -> Option<f64> {
+        self.frame_count += 1;
+        let elapsed = self.timer.elapsed().as_secs_f64();
+        if elapsed < 1.0 {
+            return None;
+        }
+        // Precision loss acceptable: frame_count is small relative to f64 mantissa
+        #[allow(clippy::cast_precision_loss)]
+        let fps = self.frame_count as f64 / elapsed;
+        self.current = fps;
+        self.frame_count = 0;
+        self.timer = Instant::now();
+        Some(fps)
+    }
+}
+
+/// Cursor state: position in simulation coordinates plus the inputs to
+/// the auto-hide policy.
+struct CursorState {
+    x: f64,
+    y: f64,
+    /// What visibility we last set on the window.
+    visible: bool,
+    last_move: Instant,
+    inside: bool,
+    window_focused: bool,
+}
+
+impl CursorState {
+    fn new() -> Self {
+        CursorState {
+            x: 0.0,
+            y: 0.0,
+            visible: true,
+            last_move: Instant::now(),
+            inside: true,
+            window_focused: true,
+        }
+    }
+
+    fn moved(&mut self) {
+        self.inside = true;
+        self.last_move = Instant::now();
+    }
+}
+
+/// Bullet-time choreography: purely presentational — the simulation only
+/// ever sees a smaller dt.
+struct BulletTime {
+    /// Enabled via --bullet-time (and the fireworks/mandala presets).
+    enabled: bool,
+    /// When the current slowdown started, if one is active.
+    start: Option<Instant>,
+}
+
+impl BulletTime {
+    /// Enter bullet time when an explosion ring starts, if enabled. A
+    /// ring starting during another ring's ramp restarts the dip.
+    fn trigger(&mut self, now: Instant) {
+        if self.enabled {
+            self.start = Some(now);
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.start.is_some()
+    }
+
+    /// This frame's multiplier on the time scale, expiring the effect
+    /// once the ramp back to full speed completes.
+    fn multiplier(&mut self, now: Instant) -> f64 {
+        let Some(start) = self.start else {
+            return 1.0;
+        };
+        let elapsed = now.duration_since(start).as_secs_f64();
+        if elapsed >= BULLET_TIME_HOLD_SECS + BULLET_TIME_RAMP_SECS {
+            self.start = None;
+            return 1.0;
+        }
+        bullet_time_factor(elapsed)
+    }
+}
+
 /// Main application state: I/O around the simulation core.
 pub struct App {
-    // Configuration (kept to construct the simulation once dimensions are known)
+    // Configuration. `config` is retained only to construct the simulation
+    // once window dimensions are known; the fields below are the
+    // runtime-mutable copies of its presentation options and are the sole
+    // source of truth after startup (reset never re-reads `config`).
     config: Config,
     trails: bool,
     color_mode: ColorMode,
@@ -139,34 +248,21 @@ pub struct App {
 
     // Timing
     last_time: Instant,
-    frame_count: u64,
-    fps_timer: Instant,
     warmup_frames: u32,
-    current_fps: f64,
+    fps: FpsCounter,
 
     // Interaction state
     paused: bool,
     step_once: bool,
     hud_mode: HudMode,
-    cursor_x: f64,
-    cursor_y: f64,
     /// Cursor gravity well while G is held (Shift+G repels).
     held_well: Option<Polarity>,
     /// Wall drawing (V held): where the next segment starts, if active.
     wall_anchor: Option<(f64, f64)>,
     shift_down: bool,
     time_scale: f64,
-    /// Bullet-time choreography: when the current slowdown started, if one
-    /// is active. Purely presentational — the simulation only sees a
-    /// smaller dt.
-    bullet_time_start: Option<Instant>,
-    /// Bullet time on explosions enabled (--bullet-time opts in).
-    bullet_time_enabled: bool,
-    /// Cursor auto-hide state: what visibility we last set on the window.
-    cursor_visible: bool,
-    last_cursor_move: Instant,
-    window_focused: bool,
-    cursor_inside: bool,
+    bullet_time: BulletTime,
+    cursor: CursorState,
 
     // Render failure tracking (transient surface loss should not crash)
     consecutive_render_failures: u32,
@@ -180,31 +276,26 @@ impl App {
             color_mode: config.color_mode,
             kaleidoscope: config.kaleidoscope,
             verbose: config.verbose,
-            bullet_time_enabled: config.bullet_time,
+            bullet_time: BulletTime {
+                enabled: config.bullet_time,
+                start: None,
+            },
             audio: Audio::new(config.mute, config.music),
             sim: None,
             config,
             render: None,
             scale_factor: 1.0,
             last_time: Instant::now(),
-            frame_count: 0,
-            fps_timer: Instant::now(),
             warmup_frames: WARMUP_FRAMES,
-            current_fps: 0.0,
+            fps: FpsCounter::new(),
             paused: false,
             step_once: false,
             hud_mode: HudMode::Hidden,
-            cursor_x: 0.0,
-            cursor_y: 0.0,
             held_well: None,
             wall_anchor: None,
             shift_down: false,
             time_scale: 1.0,
-            bullet_time_start: None,
-            cursor_visible: true,
-            last_cursor_move: Instant::now(),
-            window_focused: true,
-            cursor_inside: false,
+            cursor: CursorState::new(),
             consecutive_render_failures: 0,
         }
     }
@@ -216,27 +307,19 @@ impl App {
     /// The gravity well input for this frame, if held.
     fn well(&self) -> Option<Well> {
         self.held_well.map(|polarity| Well {
-            x: self.cursor_x,
-            y: self.cursor_y,
+            x: self.cursor.x,
+            y: self.cursor.y,
             polarity,
         })
     }
 
     /// Update FPS counter and (in verbose mode) print statistics.
     fn update_fps_counter(&mut self) {
-        self.frame_count += 1;
-        let elapsed = self.fps_timer.elapsed().as_secs_f64();
-        if elapsed >= 1.0 {
-            // Precision loss acceptable: frame_count is small relative to f64 mantissa
-            #[allow(clippy::cast_precision_loss)]
-            let fps = self.frame_count as f64 / elapsed;
-            self.current_fps = fps;
+        if let Some(fps) = self.fps.tick() {
             if self.verbose {
                 let count = self.sim.as_ref().map_or(0, Simulation::particle_count);
                 println!("FPS: {fps:.1}, Particles: {count}");
             }
-            self.frame_count = 0;
-            self.fps_timer = Instant::now();
         }
     }
 
@@ -275,30 +358,8 @@ impl App {
         }
         if events.explosion_started {
             self.audio.play_explosion();
-            self.start_bullet_time(now);
+            self.bullet_time.trigger(now);
         }
-    }
-
-    /// Enter bullet time (an explosion ring just started), if enabled. A
-    /// ring starting during another ring's ramp restarts the dip.
-    fn start_bullet_time(&mut self, now: Instant) {
-        if self.bullet_time_enabled {
-            self.bullet_time_start = Some(now);
-        }
-    }
-
-    /// This frame's bullet-time multiplier on the time scale, expiring the
-    /// effect once the ramp back to full speed completes.
-    fn bullet_time_multiplier(&mut self, now: Instant) -> f64 {
-        let Some(start) = self.bullet_time_start else {
-            return 1.0;
-        };
-        let elapsed = now.duration_since(start).as_secs_f64();
-        if elapsed >= BULLET_TIME_HOLD_SECS + BULLET_TIME_RAMP_SECS {
-            self.bullet_time_start = None;
-            return 1.0;
-        }
-        bullet_time_factor(elapsed)
     }
 
     /// Build the HUD overlay text for the current mode.
@@ -308,7 +369,7 @@ impl App {
             lines.push(format!("Preset: {preset}"));
         }
         lines.extend([
-            format!("FPS: {:.1}", self.current_fps),
+            format!("FPS: {:.1}", self.fps.current),
             format!("Particles: {}", sim.particle_count()),
             format!("Gravity: {}%  (Up/Down)", sim.gravity_percent),
             format!(
@@ -360,7 +421,7 @@ impl App {
             Some(Polarity::Repel) => flags.push("WELL: REPEL"),
             None => {}
         }
-        if self.bullet_time_start.is_some() {
+        if self.bullet_time.active() {
             flags.push("BULLET TIME");
         }
         if !flags.is_empty() {
@@ -450,18 +511,18 @@ impl App {
     /// Apply the cursor auto-hide policy, changing OS cursor state only on
     /// transitions.
     fn update_cursor_visibility(&mut self) {
-        let idle = self.last_cursor_move.elapsed().as_secs_f64();
+        let idle = self.cursor.last_move.elapsed().as_secs_f64();
         let desired = cursor_should_be_visible(
-            self.window_focused,
-            self.cursor_inside,
+            self.cursor.window_focused,
+            self.cursor.inside,
             self.held_well.is_some() || self.wall_anchor.is_some(),
             idle,
         );
-        if desired != self.cursor_visible {
+        if desired != self.cursor.visible {
             if let Some(ref render) = self.render {
                 render.window().set_cursor_visible(desired);
             }
-            self.cursor_visible = desired;
+            self.cursor.visible = desired;
         }
     }
 
@@ -476,8 +537,7 @@ impl App {
         if self.warmup_frames > 0 {
             self.warmup_frames -= 1;
             self.last_time = now;
-            self.fps_timer = now;
-            self.frame_count = 0;
+            self.fps.restart(now);
             self.render_frame(width, height);
             return;
         }
@@ -485,7 +545,7 @@ impl App {
         let dt = now.duration_since(self.last_time).as_secs_f64().min(0.05);
         self.last_time = now;
 
-        let time_scale = self.time_scale * self.bullet_time_multiplier(now);
+        let time_scale = self.time_scale * self.bullet_time.multiplier(now);
         if !self.paused {
             self.simulate(dt * time_scale, now);
         } else if self.step_once {
@@ -536,7 +596,7 @@ impl App {
                     self.apply(Command::ClearWalls);
                 } else {
                     // Start drawing: segments are added as the cursor moves.
-                    self.wall_anchor = Some((self.cursor_x, self.cursor_y));
+                    self.wall_anchor = Some((self.cursor.x, self.cursor.y));
                 }
             }
             KeyCode::KeyP if !repeat => self.apply(Command::TogglePause),
@@ -681,7 +741,7 @@ impl App {
                 }
             }),
             Command::PinWell(polarity) => {
-                let (x, y) = (self.cursor_x, self.cursor_y);
+                let (x, y) = (self.cursor.x, self.cursor.y);
                 self.with_sim(|sim| {
                     if sim.pin_well(x, y, polarity) {
                         println!(
@@ -717,15 +777,15 @@ impl App {
         let Some((ax, ay)) = self.wall_anchor else {
             return;
         };
-        let (dx, dy) = (self.cursor_x - ax, self.cursor_y - ay);
+        let (dx, dy) = (self.cursor.x - ax, self.cursor.y - ay);
         if dx * dx + dy * dy < WALL_SEGMENT_MIN_LENGTH * WALL_SEGMENT_MIN_LENGTH {
             return;
         }
         let Some(ref mut sim) = self.sim else {
             return;
         };
-        if sim.add_wall_segment(ax, ay, self.cursor_x, self.cursor_y) {
-            self.wall_anchor = Some((self.cursor_x, self.cursor_y));
+        if sim.add_wall_segment(ax, ay, self.cursor.x, self.cursor.y) {
+            self.wall_anchor = Some((self.cursor.x, self.cursor.y));
         } else {
             // Stop the stroke at the cap instead of retrying every motion.
             println!("Wall segment limit reached ({MAX_WALL_SEGMENTS})");
@@ -735,7 +795,7 @@ impl App {
 
     /// Handle a mouse button press at the current cursor position.
     fn handle_mouse(&mut self, button: MouseButton) {
-        let (x, y) = (self.cursor_x, self.cursor_y);
+        let (x, y) = (self.cursor.x, self.cursor.y);
         let Some(ref mut sim) = self.sim else {
             return;
         };
@@ -748,7 +808,7 @@ impl App {
                 sim.particle_count()
             );
             self.audio.play_explosion();
-            self.start_bullet_time(Instant::now());
+            self.bullet_time.trigger(Instant::now());
         }
     }
 }
@@ -878,8 +938,7 @@ impl ApplicationHandler for App {
         );
         self.sim = Some(sim);
         self.last_time = Instant::now();
-        self.fps_timer = Instant::now();
-        self.frame_count = 0;
+        self.fps.restart(Instant::now());
 
         let window = Rc::new(window);
         self.render = Some(create_render_context(
@@ -918,25 +977,23 @@ impl ApplicationHandler for App {
                 // (fractional scale factors present the frame smaller than
                 // the window, centered).
                 if let Some(ref render) = self.render {
-                    (self.cursor_x, self.cursor_y) =
+                    (self.cursor.x, self.cursor.y) =
                         render.window_pos_to_sim(position.x, position.y);
                 }
-                self.cursor_inside = true;
-                self.last_cursor_move = Instant::now();
+                self.cursor.moved();
                 self.extend_wall();
             }
             WindowEvent::CursorEntered { .. } => {
-                self.cursor_inside = true;
-                self.last_cursor_move = Instant::now();
+                self.cursor.moved();
             }
             WindowEvent::CursorLeft { .. } => {
-                self.cursor_inside = false;
+                self.cursor.inside = false;
             }
             WindowEvent::Focused(focused) => {
-                self.window_focused = focused;
+                self.cursor.window_focused = focused;
                 if focused {
                     // Fresh focus should not instantly hide the cursor.
-                    self.last_cursor_move = Instant::now();
+                    self.cursor.last_move = Instant::now();
                 }
             }
             WindowEvent::MouseInput {
