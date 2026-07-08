@@ -251,19 +251,42 @@ pub fn try_elastic_collision(
     })
 }
 
-/// Uniform spatial grid for broad-phase collision detection.
+/// Uniform spatial grid for broad-phase collision detection, with an
+/// overflow tier for rare oversized particles.
 ///
-/// Particles are binned into cells at least one particle diameter wide, so
-/// any colliding pair is either in the same cell or in directly adjacent
-/// cells. Storage uses an intrusive linked list (`heads` per cell, `next` per
-/// particle) so rebuilding each frame allocates nothing in the steady state.
+/// Cells are sized from the *median* radius, so the grid stays fine-grained
+/// when matter fusion produces huge merged particles among thousands of
+/// small ones — sizing from the maximum radius would inflate every cell
+/// and collapse the clump into a handful of quadratic-cost cells. Particles
+/// small enough that any touching pair fits the cell-adjacency invariant
+/// (radius ≤ half a cell) are binned normally; the rest go on the
+/// `oversized` list and are paired against every particle directly. That
+/// sweep is only cheap while the list is short, so when the population
+/// holds more than `MAX_OVERSIZED` large particles the cells grow to the
+/// smallest size that brings the list back under the cap — never all the
+/// way to max-radius sizing, which is exactly the degradation this tier
+/// exists to avoid. Storage uses an intrusive linked list (`heads` per
+/// cell, `next` per particle) so rebuilding each frame allocates nothing
+/// in the steady state.
 pub struct SpatialGrid {
     cell_size: f64,
     cols: usize,
     rows: usize,
     heads: Vec<i32>,
     next: Vec<i32>,
+    /// Particles too large for the cell-adjacency invariant, paired against
+    /// everything directly.
+    oversized: Vec<u32>,
+    /// Per-particle flag mirroring membership in `oversized`.
+    is_oversized: Vec<bool>,
+    /// Scratch buffer for the median-radius selection.
+    radii: Vec<f64>,
 }
+
+/// Cap on the direct-pairing tier: beyond this many oversized particles the
+/// O(oversized × n) sweep stops being cheap, so cell sizing grows cells
+/// until at most this many particles exceed the binning threshold.
+const MAX_OVERSIZED: usize = 64;
 
 /// Forward half of the 3x3 neighborhood (plus the cell itself handled
 /// separately). Visiting only these from each cell yields every adjacent
@@ -278,6 +301,9 @@ impl SpatialGrid {
             rows: 0,
             heads: Vec::new(),
             next: Vec::new(),
+            oversized: Vec::new(),
+            is_oversized: Vec::new(),
+            radii: Vec::new(),
         }
     }
 
@@ -289,21 +315,41 @@ impl SpatialGrid {
         (cx, cy)
     }
 
-    /// Rebuild the grid from the current particle positions. `max_radius`
-    /// is the largest particle radius present; the cell size must cover the
-    /// largest possible contact distance so that colliding pairs are always
-    /// in the same or adjacent cells.
+    /// Size cells from the median radius: at least one typical diameter
+    /// wide (larger cells trade a few extra narrow-phase tests for fewer
+    /// cells to clear per frame). Particles with radius at most half a
+    /// cell keep the adjacency invariant (any touching pair spans at most
+    /// one cell); larger ones become oversized. The direct tier only stays
+    /// cheap while short, so the floor of twice the (`MAX_OVERSIZED`+1)-th
+    /// largest radius guarantees at most `MAX_OVERSIZED` particles exceed
+    /// the binning threshold — cells grow just enough to absorb a glut of
+    /// mid-size merged particles instead of ballooning to the maximum
+    /// radius and collapsing a dense clump into a few quadratic cells.
+    fn choose_cell_size(particles: &[Particle], radii: &mut Vec<f64>) -> f64 {
+        radii.clear();
+        radii.extend(particles.iter().map(|p| p.radius));
+        if radii.is_empty() {
+            return 12.0;
+        }
+        let mid = radii.len() / 2;
+        let median = *radii.select_nth_unstable_by(mid, f64::total_cmp).1;
+        let mut cell_size = (median * 4.0).max(12.0);
+        if radii.len() > MAX_OVERSIZED {
+            let k = radii.len() - 1 - MAX_OVERSIZED;
+            let r_k = *radii.select_nth_unstable_by(k, f64::total_cmp).1;
+            cell_size = cell_size.max(2.0 * r_k);
+        }
+        cell_size
+    }
+
+    /// Rebuild the grid from the current particle positions. Cell size
+    /// must cover the largest possible contact distance among *binned*
+    /// particles so that any colliding binned pair is in the same or
+    /// adjacent cells; oversized particles satisfy no such invariant and
+    /// are swept directly instead.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    pub(crate) fn build(
-        &mut self,
-        particles: &[Particle],
-        width: u32,
-        height: u32,
-        max_radius: f64,
-    ) {
-        // Cells must be at least one max-diameter wide; larger cells trade a
-        // few extra narrow-phase tests for fewer cells to clear per frame.
-        let cell_size = (max_radius * 4.0).max(12.0);
+    pub(crate) fn build(&mut self, particles: &[Particle], width: u32, height: u32) {
+        let cell_size = Self::choose_cell_size(particles, &mut self.radii);
         let cols = ((f64::from(width) / cell_size).ceil() as usize).max(1);
         let rows = ((f64::from(height) / cell_size).ceil() as usize).max(1);
 
@@ -314,8 +360,16 @@ impl SpatialGrid {
         self.heads.resize(cols * rows, -1);
         self.next.clear();
         self.next.resize(particles.len(), -1);
+        self.oversized.clear();
+        self.is_oversized.clear();
+        self.is_oversized.resize(particles.len(), false);
 
         for (i, p) in particles.iter().enumerate() {
+            if p.radius > cell_size / 2.0 {
+                self.oversized.push(i as u32);
+                self.is_oversized[i] = true;
+                continue;
+            }
             let (cx, cy) = self.cell_of(p.x, p.y);
             let cell = cy * cols + cx;
             self.next[i] = self.heads[cell];
@@ -329,18 +383,19 @@ impl SpatialGrid {
 
     /// Check whether any particle center lies within `dist` of `(x, y)`.
     /// Uses the cell lists from the most recent `build`; `particles` must be
-    /// the slice the grid was built from. `dist` must not exceed the cell
-    /// size (spawn-clearance queries use one particle diameter, which is
-    /// always at most half a cell).
+    /// the slice the grid was built from. `dist` may exceed the cell size
+    /// (spawn-clearance queries are conservative against the largest radius
+    /// in play, which can dwarf the median-sized cells): the scan covers
+    /// exactly the cells the query circle touches, plus the oversized list.
     pub fn any_within(&self, particles: &[Particle], x: f64, y: f64, dist: f64) -> bool {
         if self.heads.is_empty() {
             return false;
         }
-        debug_assert!(dist <= self.cell_size);
         let dist_sq = dist * dist;
-        let (cx, cy) = self.cell_of(x, y);
-        for ny in cy.saturating_sub(1)..=(cy + 1).min(self.rows - 1) {
-            for nx in cx.saturating_sub(1)..=(cx + 1).min(self.cols - 1) {
+        let (cx0, cy0) = self.cell_of(x - dist, y - dist);
+        let (cx1, cy1) = self.cell_of(x + dist, y + dist);
+        for ny in cy0..=cy1 {
+            for nx in cx0..=cx1 {
                 let mut i = self.heads[ny * self.cols + nx];
                 while i >= 0 {
                     #[allow(clippy::cast_sign_loss)]
@@ -354,10 +409,15 @@ impl SpatialGrid {
                 }
             }
         }
-        false
+        self.oversized.iter().any(|&i| {
+            (i as usize) < particles.len()
+                && particles[i as usize].distance_squared_from(x, y) <= dist_sq
+        })
     }
 
-    /// Visit every pair of particle indices that could be colliding.
+    /// Visit every pair of particle indices that could be colliding:
+    /// binned pairs via cell adjacency, then each oversized particle
+    /// against every binned particle and every later oversized one.
     /// Grid dimensions are far below any integer limit, so the index casts
     /// in the neighbor arithmetic are lossless.
     #[allow(
@@ -400,6 +460,20 @@ impl SpatialGrid {
                         a = self.next[a as usize];
                     }
                 }
+            }
+        }
+
+        // Oversized tier: no adjacency invariant, so sweep directly. Binned
+        // partners come from the flag scan; oversized-oversized pairs from
+        // the forward half of the list, each pair visited exactly once.
+        for (k, &a) in self.oversized.iter().enumerate() {
+            for (b, &over) in self.is_oversized.iter().enumerate() {
+                if !over {
+                    visit(a as usize, b);
+                }
+            }
+            for &b in &self.oversized[k + 1..] {
+                visit(a as usize, b as usize);
             }
         }
     }
@@ -500,7 +574,7 @@ pub fn handle_collisions(
         return max_energy;
     }
 
-    grid.build(particles, width, height, max_radius(particles));
+    grid.build(particles, width, height);
     grid.for_each_candidate_pair(|i, j| {
         let (p1, p2) = pair_mut(particles, i, j);
         if let Some(result) = try_elastic_collision(p1, p2, particle_elasticity) {
@@ -1198,6 +1272,247 @@ mod tests {
         println!("  barnes-hut: {bh_time:?}");
     }
 
+    /// Run one collision pass over `particles` and return the recorded
+    /// spawn-site count (i.e. how many distinct pairs actually collided).
+    fn collide_all(particles: &mut [Particle]) -> usize {
+        let mut grid = SpatialGrid::new();
+        let mut recorder = CollisionRecorder::new();
+        handle_collisions(particles, &mut grid, &mut recorder, 800, 600, 1.0);
+        recorder.sites().len()
+    }
+
+    #[test]
+    fn oversized_particles_still_collide_with_small_ones() {
+        // A merged blob (r=50) among small particles is too big for the
+        // median-sized cells; the oversized tier must still find its
+        // contacts. Blob at center, one small particle overlapping its rim
+        // and approaching, plus spectators keeping the median radius small.
+        let mut particles = vec![particle_r(400.0, 300.0, 0.0, 0.0, 50.0)];
+        particles.push(particle(451.0, 300.0, -50.0, 0.0)); // touching, approaching
+        for i in 0..20 {
+            #[allow(clippy::cast_precision_loss)]
+            particles.push(particle(20.0 + 10.0 * f64::from(i), 30.0, 0.0, 0.0));
+        }
+        assert_eq!(collide_all(&mut particles), 1, "blob-small contact found");
+        assert!(
+            particles[1].vx > 0.0,
+            "small particle bounced off the blob: vx = {}",
+            particles[1].vx
+        );
+    }
+
+    #[test]
+    fn two_oversized_particles_collide_with_each_other() {
+        let mut particles = vec![
+            particle_r(300.0, 300.0, 50.0, 0.0, 40.0),
+            particle_r(379.0, 300.0, -50.0, 0.0, 40.0), // touching, approaching
+        ];
+        for i in 0..20 {
+            #[allow(clippy::cast_precision_loss)]
+            particles.push(particle(20.0 + 10.0 * f64::from(i), 30.0, 0.0, 0.0));
+        }
+        assert_eq!(collide_all(&mut particles), 1, "blob-blob contact found");
+        assert!(particles[0].vx < 0.0 && particles[1].vx > 0.0);
+    }
+
+    #[test]
+    fn any_within_sees_beyond_one_cell_and_finds_oversized_particles() {
+        // Median radius 1.5 → 12px cells. A clearance query conservative
+        // against a 50px blob (dist ≈ 53) spans several cells and must find
+        // both a small particle ~40px away and the blob itself, which lives
+        // on the oversized list rather than in any cell.
+        let mut particles = vec![particle(440.0, 300.0, 0.0, 0.0)];
+        for i in 0..20 {
+            #[allow(clippy::cast_precision_loss)]
+            particles.push(particle(20.0 + 10.0 * f64::from(i), 500.0, 0.0, 0.0));
+        }
+        let mut grid = SpatialGrid::new();
+        grid.build(&particles, 800, 600);
+        assert!(
+            grid.any_within(&particles, 400.0, 300.0, 53.0),
+            "small, 3+ cells away"
+        );
+        assert!(
+            !grid.any_within(&particles, 400.0, 300.0, 30.0),
+            "nothing within 30px"
+        );
+
+        particles.push(particle_r(400.0, 250.0, 0.0, 0.0, 50.0));
+        grid.build(&particles, 800, 600);
+        assert!(
+            grid.any_within(&particles, 400.0, 300.0, 53.0),
+            "oversized blob found via the overflow list"
+        );
+    }
+
+    #[test]
+    fn oversized_flood_grows_cells_just_enough_to_absorb_it() {
+        // More than MAX_OVERSIZED mid-size giants above a small-particle
+        // median — the "matter off after a long merge run" population. The
+        // direct tier would go quadratic, so cells must grow to twice the
+        // (MAX_OVERSIZED+1)-th largest radius: 2×20 = 40px here, absorbing
+        // every giant into the grid. Crucially the sizing must ignore the
+        // single much larger blob — one r=100 outlier stays on the direct
+        // tier instead of quadrupling every cell. Two giants overlap on a
+        // collision course and must still collide.
+        let mut particles: Vec<Particle> = (0..200)
+            .map(|i| {
+                #[allow(clippy::cast_precision_loss)]
+                let x = 4.0 + 3.9 * f64::from(i);
+                particle(x, 580.0, 0.0, 0.0)
+            })
+            .collect();
+        for i in 0..70 {
+            #[allow(clippy::cast_precision_loss)]
+            let (col, row) = (f64::from(i % 14), f64::from(i / 14));
+            particles.push(particle_r(
+                50.0 + col * 50.0,
+                50.0 + row * 50.0,
+                0.0,
+                0.0,
+                20.0,
+            ));
+        }
+        particles.push(particle_r(300.0, 400.0, 50.0, 0.0, 20.0));
+        particles.push(particle_r(339.0, 400.0, -50.0, 0.0, 20.0));
+        particles.push(particle_r(700.0, 400.0, 0.0, 0.0, 100.0));
+        let mut grid = SpatialGrid::new();
+        grid.build(&particles, 800, 600);
+        assert!(
+            (grid.cell_size - 40.0).abs() < 1e-9,
+            "cells sized to the giants, not the outlier: {}",
+            grid.cell_size
+        );
+        assert_eq!(
+            grid.oversized.len(),
+            1,
+            "only the r=100 outlier stays on the direct tier"
+        );
+        assert_eq!(collide_all(&mut particles), 1, "approaching giants collide");
+    }
+
+    /// Isolate the cost of each physics term in the "matter off after a big
+    /// merge" regime: ~13k particles clumped, with and without a large
+    /// merged blob among them. Diagnoses whether the slowdown is gravity or
+    /// the collision grid degrading when `max_radius` inflates cell size.
+    /// Run manually:
+    /// `cargo test --release bench_clump_cost_breakdown -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark"]
+    fn bench_clump_cost_breakdown() {
+        const N: usize = 13000;
+        let mut rng = StdRng::seed_from_u64(5);
+        let make = |rng: &mut StdRng| -> Vec<Particle> {
+            (0..N)
+                .map(|_| {
+                    let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+                    let r: f64 = 200.0 * rng.random_range(0.0f64..1.0).sqrt();
+                    let mut p =
+                        particle(400.0 + r * angle.cos(), 300.0 + r * angle.sin(), 0.0, 0.0);
+                    p.vx = rng.random_range(-100.0..100.0);
+                    p.vy = rng.random_range(-100.0..100.0);
+                    p
+                })
+                .collect()
+        };
+        let base = make(&mut rng);
+        let clone = |ps: &[Particle]| -> Vec<Particle> {
+            ps.iter()
+                .map(|p| {
+                    let mut c = particle_r(p.x, p.y, p.vx, p.vy, p.radius);
+                    c.color = p.color;
+                    c
+                })
+                .collect()
+        };
+
+        // Gravity term: Barnes-Hut over one frame's 8 substeps.
+        let mut gravity = clone(&base);
+        let t = std::time::Instant::now();
+        for _ in 0..8 {
+            apply_self_gravity_barnes_hut(&mut gravity, 0.001);
+        }
+        let gravity_time = t.elapsed();
+
+        // Steady-state collision cost: the first calls resolve the random
+        // clump's initial overlaps (a one-off transient) and run before the
+        // CPU has migrated the load to a boosted core, so warm up well past
+        // both effects before timing. Timing whole frames (8 substeps) at
+        // sustained clock is what the FPS question actually depends on.
+        let time_collisions = |particles: &mut Vec<Particle>| {
+            let mut grid = SpatialGrid::new();
+            let mut recorder = CollisionRecorder::new();
+            for _ in 0..200 {
+                handle_collisions(particles, &mut grid, &mut recorder, 800, 600, 1.0);
+            }
+            let t = std::time::Instant::now();
+            for _ in 0..8 {
+                handle_collisions(particles, &mut grid, &mut recorder, 800, 600, 1.0);
+            }
+            t.elapsed()
+        };
+
+        // Uniform small particles: median-sized cells, no oversized tier.
+        let mut small = clone(&base);
+        let collisions_small = time_collisions(&mut small);
+
+        // One merged blob (r=50) among them: with max-radius cell sizing
+        // this inflated every cell to 200px and went quadratic; the
+        // oversized tier must keep it near the uniform cost.
+        let mut with_blob = clone(&base);
+        with_blob[0].radius = 50.0;
+        let collisions_blob = time_collisions(&mut with_blob);
+
+        println!("8 substeps at n={N}, clump radius 200px:");
+        println!("  barnes-hut gravity:          {gravity_time:?}");
+        println!("  collisions (all r=1.5):      {collisions_small:?}");
+        println!("  collisions (one r=50 blob):  {collisions_blob:?}");
+
+        // The "matter off after a long merge run" population, as seen in
+        // the field (1920x1080): ~120 merged blobs r=20..40 in a packed
+        // core with ~3700 small spawns swarming them. Far more than
+        // MAX_OVERSIZED mid-size particles, so cell sizing must adapt
+        // rather than degrade.
+        let mut rng = StdRng::seed_from_u64(17);
+        let mut mixed: Vec<Particle> = (0..120)
+            .map(|_| {
+                let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+                let r: f64 = 220.0 * rng.random_range(0.0f64..1.0).sqrt();
+                particle_r(
+                    960.0 + r * angle.cos(),
+                    540.0 + r * angle.sin(),
+                    rng.random_range(-50.0..50.0),
+                    rng.random_range(-50.0..50.0),
+                    rng.random_range(20.0..40.0),
+                )
+            })
+            .collect();
+        for _ in 0..3700 {
+            let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+            let r: f64 = 350.0 * rng.random_range(0.0f64..1.0).sqrt();
+            let mut p = particle(960.0 + r * angle.cos(), 540.0 + r * angle.sin(), 0.0, 0.0);
+            p.vx = rng.random_range(-100.0..100.0);
+            p.vy = rng.random_range(-100.0..100.0);
+            mixed.push(p);
+        }
+        let time_mixed = {
+            let mut grid = SpatialGrid::new();
+            let mut recorder = CollisionRecorder::new();
+            for _ in 0..200 {
+                handle_collisions(&mut mixed, &mut grid, &mut recorder, 1920, 1080, 0.7);
+            }
+            let t = std::time::Instant::now();
+            for _ in 0..8 {
+                handle_collisions(&mut mixed, &mut grid, &mut recorder, 1920, 1080, 0.7);
+            }
+            (t.elapsed(), grid.cell_size, grid.oversized.len())
+        };
+        println!(
+            "  collisions (120 blobs r20-40 + 3700 small, 1080p): {:?} (cell={}, oversized={})",
+            time_mixed.0, time_mixed.1, time_mixed.2
+        );
+    }
+
     #[test]
     fn particle_bounces_off_a_wall_segment() {
         // Horizontal wall at y=100; particle overlaps it from above while
@@ -1595,7 +1910,7 @@ mod tests {
         // Unbuilt grid: nothing is nearby.
         assert!(!grid.any_within(&particles, 100.0, 100.0, 10.0));
 
-        grid.build(&particles, width, height, RADIUS);
+        grid.build(&particles, width, height);
         assert!(grid.any_within(&particles, 100.0, 100.0, 10.0), "same spot");
         assert!(
             grid.any_within(&particles, 105.0, 100.0, 10.0),

@@ -648,12 +648,7 @@ impl Simulation {
         if self.matter && self.explosion.is_none() && self.process_matter(now) {
             // Matter ops reorder the particle list; rebuild the grid so the
             // spawn clearance checks below consult correct positions.
-            self.grid.build(
-                &self.particles,
-                self.width,
-                self.height,
-                max_radius(&self.particles),
-            );
+            self.grid.build(&self.particles, self.width, self.height);
         }
 
         events.explosion_started = self.handle_spawning(now);
