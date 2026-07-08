@@ -289,6 +289,11 @@ pub struct SpatialGrid {
 /// until at most this many particles exceed the binning threshold.
 const MAX_OVERSIZED: usize = 64;
 
+/// Population size at which contact detection fans out across threads.
+/// Below this the whole sweep runs in microseconds and rayon's fork-join
+/// overhead would eat the gain.
+const COLLISION_PARALLEL_THRESHOLD: usize = 1024;
+
 /// Forward half of the 3x3 neighborhood (plus the cell itself handled
 /// separately). Visiting only these from each cell yields every adjacent
 /// cell pair exactly once.
@@ -417,8 +422,9 @@ impl SpatialGrid {
     }
 
     /// Visit every pair of particle indices that could be colliding:
-    /// binned pairs via cell adjacency, then each oversized particle
-    /// against every binned particle and every later oversized one.
+    /// Collect the contacts of one cell row — every touching-and-approaching
+    /// pair whose first particle is binned in row `cy`, via cell adjacency —
+    /// in a fixed order (cells left to right, intrusive lists as linked).
     /// Grid dimensions are far below any integer limit, so the index casts
     /// in the neighbor arithmetic are lossless.
     #[allow(
@@ -426,58 +432,113 @@ impl SpatialGrid {
         clippy::cast_possible_wrap,
         clippy::cast_possible_truncation
     )]
-    fn for_each_candidate_pair(&self, mut visit: impl FnMut(usize, usize)) {
-        for cy in 0..self.rows {
-            for cx in 0..self.cols {
-                let cell = cy * self.cols + cx;
+    fn collect_row_contacts(&self, cy: usize, particles: &[Particle], out: &mut Vec<(u32, u32)>) {
+        let mut push_if_contact = |a: i32, b: i32| {
+            let (i, j) = (a as usize, b as usize);
+            if in_contact_and_approaching(&particles[i], &particles[j]) {
+                out.push((a as u32, b as u32));
+            }
+        };
+        for cx in 0..self.cols {
+            let cell = cy * self.cols + cx;
 
-                // Pairs within this cell.
+            // Pairs within this cell.
+            let mut a = self.heads[cell];
+            while a >= 0 {
+                let mut b = self.next[a as usize];
+                while b >= 0 {
+                    push_if_contact(a, b);
+                    b = self.next[b as usize];
+                }
+                a = self.next[a as usize];
+            }
+
+            // Pairs with forward neighbor cells.
+            for (dx, dy) in FORWARD_NEIGHBORS {
+                let nx = cx as i64 + dx;
+                let ny = cy as i64 + dy;
+                if nx < 0 || ny < 0 || nx >= self.cols as i64 || ny >= self.rows as i64 {
+                    continue;
+                }
+                let neighbor = (ny as usize) * self.cols + (nx as usize);
+
                 let mut a = self.heads[cell];
                 while a >= 0 {
-                    let mut b = self.next[a as usize];
+                    let mut b = self.heads[neighbor];
                     while b >= 0 {
-                        visit(a as usize, b as usize);
+                        push_if_contact(a, b);
                         b = self.next[b as usize];
                     }
                     a = self.next[a as usize];
                 }
-
-                // Pairs with forward neighbor cells.
-                for (dx, dy) in FORWARD_NEIGHBORS {
-                    let nx = cx as i64 + dx;
-                    let ny = cy as i64 + dy;
-                    if nx < 0 || ny < 0 || nx >= self.cols as i64 || ny >= self.rows as i64 {
-                        continue;
-                    }
-                    let neighbor = (ny as usize) * self.cols + (nx as usize);
-
-                    let mut a = self.heads[cell];
-                    while a >= 0 {
-                        let mut b = self.heads[neighbor];
-                        while b >= 0 {
-                            visit(a as usize, b as usize);
-                            b = self.next[b as usize];
-                        }
-                        a = self.next[a as usize];
-                    }
-                }
-            }
-        }
-
-        // Oversized tier: no adjacency invariant, so sweep directly. Binned
-        // partners come from the flag scan; oversized-oversized pairs from
-        // the forward half of the list, each pair visited exactly once.
-        for (k, &a) in self.oversized.iter().enumerate() {
-            for (b, &over) in self.is_oversized.iter().enumerate() {
-                if !over {
-                    visit(a as usize, b);
-                }
-            }
-            for &b in &self.oversized[k + 1..] {
-                visit(a as usize, b as usize);
             }
         }
     }
+
+    /// Find every touching-and-approaching pair against the current
+    /// positions: binned pairs via cell adjacency, then each oversized
+    /// particle against every binned particle and every later oversized
+    /// one. Detection is read-only, so large populations fan the row sweep
+    /// out across threads; rows are reassembled in row order, making the
+    /// contact list identical for any thread count. The narrow-phase
+    /// distance tests dominate the collision pass, so this is the part
+    /// worth parallelizing — resolution mutates shared particles and stays
+    /// serial.
+    fn detect_contacts(&self, particles: &[Particle]) -> Vec<(u32, u32)> {
+        let mut contacts: Vec<(u32, u32)> = if particles.len() >= COLLISION_PARALLEL_THRESHOLD {
+            (0..self.rows)
+                .into_par_iter()
+                .map(|cy| {
+                    let mut row = Vec::new();
+                    self.collect_row_contacts(cy, particles, &mut row);
+                    row
+                })
+                .collect::<Vec<_>>()
+                .concat()
+        } else {
+            let mut all = Vec::new();
+            for cy in 0..self.rows {
+                self.collect_row_contacts(cy, particles, &mut all);
+            }
+            all
+        };
+
+        // Oversized tier: no adjacency invariant, so sweep directly. Binned
+        // partners come from the flag scan; oversized-oversized pairs from
+        // the forward half of the list, each pair visited exactly once. At
+        // most MAX_OVERSIZED entries by construction — not worth threads.
+        #[allow(clippy::cast_possible_truncation)]
+        for (k, &a) in self.oversized.iter().enumerate() {
+            for (b, &over) in self.is_oversized.iter().enumerate() {
+                if !over && in_contact_and_approaching(&particles[a as usize], &particles[b]) {
+                    contacts.push((a, b as u32));
+                }
+            }
+            for &b in &self.oversized[k + 1..] {
+                if in_contact_and_approaching(&particles[a as usize], &particles[b as usize]) {
+                    contacts.push((a, b));
+                }
+            }
+        }
+        contacts
+    }
+}
+
+/// Whether two particles are in collision range (center distance within
+/// the sum of radii, beyond the degenerate epsilon) and approaching each
+/// other — the same acceptance conditions as `try_elastic_collision`,
+/// evaluated without mutation so detection can run concurrently. The sign
+/// test uses the unnormalized center offset: `dv·d > 0` exactly when the
+/// normal velocity `dvn > 0`.
+fn in_contact_and_approaching(p1: &Particle, p2: &Particle) -> bool {
+    let contact = p1.radius + p2.radius;
+    let dx = p2.x - p1.x;
+    let dy = p2.y - p1.y;
+    let dist_sq = dx * dx + dy * dy;
+    if !(DISTANCE_SQ_EPSILON..=contact * contact).contains(&dist_sq) {
+        return false;
+    }
+    (p1.vx - p2.vx) * dx + (p1.vy - p2.vy) * dy > 0.0
 }
 
 impl Default for SpatialGrid {
@@ -562,6 +623,16 @@ pub fn max_radius(particles: &[Particle]) -> f64 {
 
 /// Process all particle-particle collisions using the spatial grid.
 /// Returns the maximum collision energy and records spawn positions.
+///
+/// Runs in two phases: detect every touching-and-approaching pair against
+/// a snapshot of the current positions (read-only, parallel for large
+/// populations), then resolve the short contact list serially — impulses
+/// mutate both partners, so pairs sharing a particle must not resolve
+/// concurrently. `try_elastic_collision` re-validates each contact at
+/// resolve time, so a pair separated by an earlier resolution in the same
+/// pass is skipped, exactly as the old fused sweep skipped it; the one
+/// semantic difference is that a pair pushed *into* contact mid-pass
+/// resolves on the next substep instead of this one.
 pub fn handle_collisions(
     particles: &mut [Particle],
     grid: &mut SpatialGrid,
@@ -576,7 +647,8 @@ pub fn handle_collisions(
     }
 
     grid.build(particles, width, height);
-    grid.for_each_candidate_pair(|i, j| {
+    for (i, j) in grid.detect_contacts(particles) {
+        let (i, j) = (i as usize, j as usize);
         let (p1, p2) = pair_mut(particles, i, j);
         if let Some(result) = try_elastic_collision(p1, p2, particle_elasticity) {
             max_energy = max_energy.max(result.energy);
@@ -594,7 +666,7 @@ pub fn handle_collisions(
                 },
             );
         }
-    });
+    }
 
     max_energy
 }
@@ -1342,6 +1414,54 @@ mod tests {
         println!("8 substeps at n=5245 (dense clump):");
         println!("  exact:      {exact_time:?}");
         println!("  barnes-hut: {bh_time:?}");
+    }
+
+    #[test]
+    fn parallel_contact_detection_is_deterministic() {
+        // Seeded simulations must replay identically, so the parallel
+        // detection sweep may not depend on thread scheduling: rows are
+        // reassembled in row order, making the contact list — and thus
+        // every impulse and separation the serial resolve phase applies —
+        // identical for any thread count. Verify positions and velocities
+        // to the bit on a dense population above the parallel threshold.
+        let mut rng = StdRng::seed_from_u64(29);
+        let particles: Vec<Particle> = (0..(COLLISION_PARALLEL_THRESHOLD + 500))
+            .map(|_| {
+                let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+                let r: f64 = 60.0 * rng.random_range(0.0f64..1.0).sqrt();
+                let mut p = particle(400.0 + r * angle.cos(), 300.0 + r * angle.sin(), 0.0, 0.0);
+                p.vx = rng.random_range(-100.0..100.0);
+                p.vy = rng.random_range(-100.0..100.0);
+                p
+            })
+            .collect();
+        let clone = |ps: &[Particle]| -> Vec<Particle> {
+            ps.iter()
+                .map(|p| particle_r(p.x, p.y, p.vx, p.vy, p.radius))
+                .collect()
+        };
+        let mut single = clone(&particles);
+        let mut multi = clone(&particles);
+
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("single-thread pool")
+            .install(|| {
+                let mut grid = SpatialGrid::new();
+                let mut recorder = CollisionRecorder::new();
+                handle_collisions(&mut single, &mut grid, &mut recorder, 800, 600, 0.7);
+            });
+        let mut grid = SpatialGrid::new();
+        let mut recorder = CollisionRecorder::new();
+        handle_collisions(&mut multi, &mut grid, &mut recorder, 800, 600, 0.7);
+
+        for (s, m) in single.iter().zip(&multi) {
+            assert_eq!(s.x.to_bits(), m.x.to_bits(), "x must match exactly");
+            assert_eq!(s.y.to_bits(), m.y.to_bits(), "y must match exactly");
+            assert_eq!(s.vx.to_bits(), m.vx.to_bits(), "vx must match exactly");
+            assert_eq!(s.vy.to_bits(), m.vy.to_bits(), "vy must match exactly");
+        }
     }
 
     /// Run one collision pass over `particles` and return the recorded
