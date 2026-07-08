@@ -113,6 +113,7 @@ cargo run --release -- --spawn-at-collision
 | `Shift+R` | Clear all pinned wells |
 | `V` (hold + drag) | Draw wall segments that particles bounce off |
 | `Shift+V` | Clear all drawn walls |
+| `O` | Save a screenshot (PNG in the working directory) |
 | Left click | Spawn a burst of particles at the cursor |
 | Right click | Trigger an explosion centered at the cursor (kills every particle the ring reaches, down to a minimum of 2 survivors) |
 
@@ -300,6 +301,7 @@ source-only constants — use `--particle-size`, `--initial-speed`, and
 - [`clap`](https://crates.io/crates/clap) - Command line argument parsing
 - [`toml`](https://crates.io/crates/toml) - User presets file parsing
 - [`dirs`](https://crates.io/crates/dirs) - Platform config directory discovery
+- [`png`](https://crates.io/crates/png) - Screenshot encoding
 - [`ouroboros`](https://crates.io/crates/ouroboros) - Safe self-referential struct support
 - [`ab_glyph`](https://crates.io/crates/ab_glyph) - Font rendering
 

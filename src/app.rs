@@ -8,7 +8,7 @@ use crate::audio::Audio;
 use crate::config::{ColorMode, Config, ELASTICITY_MAX, EXPLOSION_THRESHOLD_MAX, GRAVITY_LIMIT};
 use crate::render::{
     RenderContext, create_render_context, dim_rect, fade_frame, kaleidoscope_frame,
-    render_explosion, render_particles, render_segments, render_wells,
+    render_explosion, render_particles, render_segments, render_wells, write_png,
 };
 use crate::sim::{MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, Simulation, Well};
 use crate::text::{draw_text, draw_text_centered, measure_text};
@@ -111,6 +111,8 @@ pub enum Command {
     AdjustExplosionThreshold(i32),
     /// Pin a persistent gravity well at the cursor.
     PinWell(Polarity),
+    /// Save the next presented frame as a PNG in the working directory.
+    Screenshot,
 }
 
 /// Convert physical pixels to logical pixels given a scale factor.
@@ -281,6 +283,9 @@ pub struct App {
     bullet_time: BulletTime,
     cursor: CursorState,
 
+    /// A screenshot was requested; the next rendered frame is saved.
+    screenshot_requested: bool,
+
     // Render failure tracking (transient surface loss should not crash)
     consecutive_render_failures: u32,
 }
@@ -313,6 +318,7 @@ impl App {
             shift_down: false,
             time_scale: 1.0,
             cursor: CursorState::new(),
+            screenshot_requested: false,
             consecutive_render_failures: 0,
         }
     }
@@ -459,6 +465,7 @@ impl App {
                 "G hold: gravity well (Shift+G repels)",
                 "W pin well (Shift+W repel, Shift+R clear)",
                 "V hold+drag: draw walls (Shift+V clears)",
+                "O screenshot",
                 "Click: burst   Right-click: explosion",
                 "H cycle HUD   Space/Esc/Q quit",
             ] {
@@ -489,7 +496,10 @@ impl App {
         let kaleidoscope = self.kaleidoscope;
         let stopped = sim.stopped();
         let paused = self.paused;
+        let capture = self.screenshot_requested;
+        self.screenshot_requested = false;
 
+        let mut shot: Option<Vec<u8>> = None;
         render.with_frame(|frame| {
             if trails {
                 fade_frame(frame);
@@ -520,7 +530,16 @@ impl App {
             if let Some(ref lines) = hud_lines {
                 draw_hud(frame, width, height, lines);
             }
+            if capture {
+                shot = Some(frame.to_vec());
+            }
         });
+        if let Some(frame) = shot {
+            match save_screenshot(&frame, width, height) {
+                Ok(path) => println!("Screenshot saved to '{}'", path.display()),
+                Err(e) => eprintln!("Screenshot failed: {e}"),
+            }
+        }
 
         match render.present() {
             Ok(()) => self.consecutive_render_failures = 0,
@@ -639,6 +658,7 @@ impl App {
             KeyCode::KeyX if !repeat => self.apply(Command::ToggleMatter),
             KeyCode::KeyF if !repeat => self.apply(Command::ToggleFlow),
             KeyCode::KeyA if !repeat => self.apply(Command::ToggleSelfGravity),
+            KeyCode::KeyO if !repeat => self.apply(Command::Screenshot),
             KeyCode::KeyS if !repeat => self.apply(Command::ToggleMusic),
             KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
             KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
@@ -774,6 +794,7 @@ impl App {
                     println!("Explosion threshold: {}/s", sim.explosion_threshold);
                 }
             }),
+            Command::Screenshot => self.screenshot_requested = true,
             Command::PinWell(polarity) => {
                 let (x, y) = (self.cursor.x, self.cursor.y);
                 self.with_sim(|sim| {
@@ -845,6 +866,30 @@ impl App {
             self.bullet_time.trigger(Instant::now());
         }
     }
+}
+
+/// Write `frame` to a uniquely named PNG in the working directory,
+/// returning the path. Named by Unix timestamp, with a numeric suffix if
+/// several screenshots land in the same second.
+fn save_screenshot(frame: &[u8], width: u32, height: u32) -> Result<std::path::PathBuf, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    for n in 0..100 {
+        let name = if n == 0 {
+            format!("bouncy-{secs}.png")
+        } else {
+            format!("bouncy-{secs}-{n}.png")
+        };
+        let path = std::path::PathBuf::from(name);
+        if path.exists() {
+            continue;
+        }
+        write_png(&path, frame, width, height)?;
+        return Ok(path);
+    }
+    Err("too many screenshots this second".to_string())
 }
 
 /// Bullet-time multiplier at `elapsed` wall-clock seconds since the

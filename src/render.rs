@@ -267,6 +267,33 @@ pub fn render_explosion(frame: &mut [u8], exp: &Explosion, width: u32, height: u
     }
 }
 
+/// Write an RGBA frame to `path` as an 8-bit RGB PNG. The alpha channel
+/// is dropped: trails fade it below 255, which viewers would render as
+/// transparency instead of the black the simulation shows.
+pub fn write_png(
+    path: &std::path::Path,
+    frame: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let file = std::fs::File::create(path)
+        .map_err(|e| format!("cannot create '{}': {e}", path.display()))?;
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|e| format!("PNG header: {e}"))?;
+    let rgb: Vec<u8> = frame
+        .chunks_exact(4)
+        .flat_map(|px| [px[0], px[1], px[2]])
+        .collect();
+    writer
+        .write_image_data(&rgb)
+        .map_err(|e| format!("PNG data: {e}"))?;
+    Ok(())
+}
+
 /// GPU render context using ouroboros for safe self-referential struct.
 /// Pixels borrows from Window, so they must be in the same struct.
 /// Uses Rc<Window> to allow sharing the window with fallback logic.
@@ -691,6 +718,35 @@ mod tests {
             assert_eq!(frame[idx(4, 2)], 70, "center row mirrors horizontally");
             assert_eq!(frame[idx(0, 2)], 70, "left edge untouched");
         }
+    }
+
+    #[test]
+    fn write_png_roundtrips_the_frame() {
+        let (width, height) = (3u32, 2u32);
+        // Distinct per-pixel colors; alpha varies to prove it is dropped.
+        // Wrapping is the point: distinct byte values per position.
+        #[allow(clippy::cast_possible_truncation)]
+        let frame: Vec<u8> = (0..width * height * 4).map(|i| (i * 7) as u8).collect();
+        let path = std::env::temp_dir().join(format!(
+            "bouncy-test-{}-{:?}.png",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        write_png(&path, &frame, width, height).unwrap();
+
+        let decoder = png::Decoder::new(std::fs::File::open(&path).unwrap());
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!((info.width, info.height), (width, height));
+        assert_eq!(info.color_type, png::ColorType::Rgb);
+        let expected: Vec<u8> = frame
+            .chunks_exact(4)
+            .flat_map(|px| [px[0], px[1], px[2]])
+            .collect();
+        assert_eq!(&buf[..expected.len()], &expected[..]);
     }
 
     #[test]

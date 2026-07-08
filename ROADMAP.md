@@ -10,9 +10,6 @@ All numbered items have shipped; what remains is the opportunistic pile.
 
 ## Smaller / opportunistic
 
-- Screenshot key: dump the RGBA frame as PNG (needs a `png` dependency, or
-  write a PPM with zero deps). Musical mode took `S`, so pick another key
-  (e.g. `O`).
 - Comets: occasional fast heavy particle streaking through (matter mode makes
   it shatter things) - could be a timed ambient event or a middle-click.
 - Particle springs/links: click two particles to bind with a spring; molecule

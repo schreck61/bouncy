@@ -394,6 +394,7 @@ pub const CONTROLS: &[(&str, &str)] = &[
         "Draw wall segments that particles bounce off",
     ),
     ("Shift+V", "Clear all drawn walls"),
+    ("O", "Save a screenshot (PNG in the working directory)"),
     ("Left click", "Spawn a burst of particles at the cursor"),
     ("Right click", "Trigger an explosion at the cursor"),
 ];

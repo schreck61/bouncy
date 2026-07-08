@@ -21,6 +21,7 @@ clap = { version = "4.6", features = ["derive"] }
 ab_glyph = "0.2"
 toml = "0.8"
 dirs = "6"
+png = "0.17"
 
 [lints.clippy]
 # Pedantic is enforced (CI runs clippy with -D warnings), with deliberate
