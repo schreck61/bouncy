@@ -406,6 +406,10 @@ pub const CONTROLS: &[(&str, &str)] = &[
         "Export settings and scene (wells/walls) as a preset file",
     ),
     ("Left click", "Spawn a burst of particles at the cursor"),
+    (
+        "Middle click",
+        "Launch a comet from the far edge toward the cursor",
+    ),
     ("Right click", "Trigger an explosion at the cursor"),
 ];
 

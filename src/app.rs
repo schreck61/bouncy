@@ -469,7 +469,7 @@ impl App {
                 "W pin well (Shift+W repel, Shift+R clear)",
                 "V hold+drag: draw walls (Shift+V clears)",
                 "O screenshot   E export scene",
-                "Click: burst   Right-click: explosion",
+                "Click: burst   Middle: comet   Right-click: explosion",
                 "H cycle HUD   Space/Esc/Q quit",
             ] {
                 lines.push(key_line.to_string());
@@ -945,6 +945,9 @@ impl App {
         };
         if button == MouseButton::Left {
             sim.spawn_burst(x, y);
+        } else if button == MouseButton::Middle {
+            sim.launch_comet(x, y);
+            println!("Comet inbound");
         } else if button == MouseButton::Right && sim.trigger_manual_explosion(x, y) {
             println!(
                 "Explosion at cursor; will kill {} of {} particles",

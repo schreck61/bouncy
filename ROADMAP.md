@@ -10,8 +10,6 @@ All numbered items have shipped; what remains is the opportunistic pile.
 
 ## Smaller / opportunistic
 
-- Comets: occasional fast heavy particle streaking through (matter mode makes
-  it shatter things) - could be a timed ambient event or a middle-click.
 - Particle springs/links: click two particles to bind with a spring; molecule
   building. Medium effort, niche payoff. (Stable particle ids landed in the
   2026-07 review work, so the identity problem is already solved.)

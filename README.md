@@ -116,6 +116,7 @@ cargo run --release -- --spawn-at-collision
 | `O` | Save a screenshot (PNG in the working directory) |
 | `E` | Export settings and scene (wells/walls) as a preset file |
 | Left click | Spawn a burst of particles at the cursor |
+| Middle click | Launch a comet from the far edge toward the cursor (heavy and fast — under matter mode it shatters what it hits) |
 | Right click | Trigger an explosion centered at the cursor (kills every particle the ring reaches, down to a minimum of 2 survivors) |
 
 Wall elasticity is the simulation's temperature dial: below 1.0 the walls drain energy on every bounce and the system gradually cools; above 1.0 they pump energy in.

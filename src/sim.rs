@@ -69,6 +69,12 @@ pub const MAX_PINNED_WELLS: usize = 16;
 /// Maximum number of drawn wall segments (held V). Enough for elaborate
 /// marble runs while keeping the per-substep segment sweep cheap.
 pub const MAX_WALL_SEGMENTS: usize = 200;
+/// Comet size as a multiple of the base particle radius; mass scales with
+/// the square, so a comet outweighs a default particle 9:1.
+const COMET_RADIUS_FACTOR: f64 = 3.0;
+/// Comet speed as a multiple of the configured initial speed.
+const COMET_SPEED_FACTOR: f64 = 2.0;
+
 /// Peak acceleration of each pinned well: half the held well's strength, so
 /// a constellation of pinned wells shapes orbits without overpowering the
 /// cursor well or flinging everything into the walls.
@@ -457,6 +463,43 @@ impl Simulation {
             }
         }
         // Fresh particles are moving; leave the stopped state if we were in it.
+        self.wake();
+    }
+
+    /// Launch a comet (middle click): a fast, heavy particle streaking in
+    /// from the farthest arena edge toward `(x, y)` — the long flight
+    /// maximizes the streak. Under matter mode its impacts exceed the
+    /// fission threshold and shatter what they hit; otherwise its 9x mass
+    /// simply plows through the population.
+    pub fn launch_comet(&mut self, x: f64, y: f64) {
+        if self.particles.len() >= self.max_particles {
+            return;
+        }
+        let radius = self.base_radius * COMET_RADIUS_FACTOR;
+        let (w, h) = (f64::from(self.width), f64::from(self.height));
+        let (left, right, top, bottom) = (x, w - x, y, h - y);
+        let farthest = left.max(right).max(top).max(bottom);
+        let (ex, ey) = if farthest == left {
+            (radius, y)
+        } else if farthest == right {
+            (w - radius, y)
+        } else if farthest == top {
+            (x, radius)
+        } else {
+            (x, h - radius)
+        };
+        let (dx, dy) = (x - ex, y - ey);
+        let dist = (dx * dx + dy * dy).sqrt();
+        let (ux, uy) = if dist > 1e-9 {
+            (dx / dist, dy / dist)
+        } else {
+            (1.0, 0.0)
+        };
+        let speed = self.initial_speed * COMET_SPEED_FACTOR;
+        let comet = Particle::new_moving(&mut self.rng, ex, ey, ux * speed, uy * speed, radius);
+        let comet = self.stamp(comet);
+        self.particles.push(comet);
+        // The comet is moving; leave the stopped state if we were in it.
         self.wake();
     }
 
@@ -1624,6 +1667,33 @@ mod tests {
             s.step(0.001, now, None);
         }
         assert!(s.stopped(), "without ambient forces the sim can stop again");
+    }
+
+    #[test]
+    fn comet_launches_from_the_far_edge_toward_the_cursor() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        let before = s.particle_count();
+
+        // Cursor right of center: the farthest edge is the left one.
+        s.launch_comet(600.0, 300.0);
+        assert_eq!(s.particle_count(), before + 1);
+        let comet = s.particles().last().unwrap();
+        assert!(
+            (comet.radius - s.base_radius * COMET_RADIUS_FACTOR).abs() < 1e-9,
+            "comets are heavy: radius {}",
+            comet.radius
+        );
+        assert!(comet.x < 10.0, "entered from the left edge: x={}", comet.x);
+        assert!(
+            comet.vx > 0.0 && comet.vy.abs() < 1e-9,
+            "streaks horizontally toward the cursor"
+        );
+        assert!(
+            (comet.speed() - s.initial_speed() * COMET_SPEED_FACTOR).abs() < 1e-9,
+            "flies at the comet speed multiple"
+        );
+        assert!(!s.stopped(), "a comet wakes a stopped simulation");
     }
 
     #[test]
