@@ -120,6 +120,22 @@ fn physical_to_logical(physical: u32, scale_factor: f64) -> u32 {
     (f64::from(physical) / scale_factor) as u32
 }
 
+/// Simulation size for a physical window size: the physical size divided
+/// by the display scale factor *rounded to an integer*. The GPU renderer
+/// (pixels) presents the frame at the largest integer scale that fits, so
+/// sizing the buffer this way makes that scale fill the window exactly —
+/// at fractional scale factors (Windows 125%/150%) the old
+/// physical/scale sizing left the frame letterboxed inside invisible
+/// margins. The trade: at 150% the simulation's pixels are 2x instead of
+/// 1.5x, slightly chunkier than the OS intends; owning the whole screen
+/// wins for a fullscreen toy.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn simulation_size(physical: u32, scale_factor: f64) -> u32 {
+    let k = (scale_factor.round() as u32).max(1);
+    (physical / k).max(1)
+}
+
 /// Frame-rate accounting for the HUD and the verbose per-second print.
 struct FpsCounter {
     frame_count: u64,
@@ -935,8 +951,8 @@ impl ApplicationHandler for App {
 
         let physical_size = window.inner_size();
         let scale_factor = window.scale_factor();
-        let width = physical_to_logical(physical_size.width, scale_factor);
-        let height = physical_to_logical(physical_size.height, scale_factor);
+        let width = simulation_size(physical_size.width, scale_factor);
+        let height = simulation_size(physical_size.height, scale_factor);
         self.scale_factor = scale_factor;
 
         println!(
@@ -1073,6 +1089,40 @@ mod tests {
     fn physical_to_logical_conversion() {
         assert_eq!(physical_to_logical(3024, 2.0), 1512);
         assert_eq!(physical_to_logical(1920, 1.0), 1920);
+    }
+
+    #[test]
+    fn simulation_size_fills_the_window_at_any_scale_factor() {
+        // Integer scales are unchanged from the old physical/scale sizing.
+        assert_eq!(simulation_size(3024, 2.0), 1512);
+        assert_eq!(simulation_size(1920, 1.0), 1920);
+        // Fractional scales round the render scale so integer scaling
+        // fills: Joe's 4K at 150% gets a 1920-wide buffer shown at 2x
+        // (previously 2560 wide shown at 1x, letterboxed).
+        assert_eq!(simulation_size(3840, 1.5), 1920);
+        assert_eq!(simulation_size(3840, 1.25), 3840);
+        assert_eq!(simulation_size(2560, 1.75), 1280);
+
+        // The fill invariant: the renderer's integer scale (floor of
+        // physical/buffer) times the buffer covers the window to within
+        // one render pixel — no visible letterbox bars.
+        for &(physical, scale) in &[
+            (3840u32, 1.5f64),
+            (3840, 1.25),
+            (2560, 1.5),
+            (1920, 1.0),
+            (3024, 2.0),
+            (1001, 2.0),
+            (2879, 1.5),
+        ] {
+            let buffer = simulation_size(physical, scale);
+            let render_scale = physical / buffer; // pixels' floor scaling
+            let covered = buffer * render_scale;
+            assert!(
+                physical - covered < render_scale,
+                "{physical}@{scale}: buffer {buffer} x{render_scale} covers {covered}"
+            );
+        }
     }
 
     #[test]

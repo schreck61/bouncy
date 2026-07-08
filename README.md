@@ -250,7 +250,7 @@ With `PIXELS_PER_PARTICLE = 375,000`:
 | 1440p (scale 1.0) | 2560×1440 | 3,686,400 | 10 |
 | 4K (scale 1.0) | 3840×2160 | 8,294,400 | 22 |
 
-This ensures the simulation feels consistent across different display sizes. Retina/HiDPI displays use their logical resolution, not the physical pixel count.
+This ensures the simulation feels consistent across different display sizes. Retina/HiDPI displays use their logical resolution, not the physical pixel count. At fractional display scales (Windows 125%/150%) the simulation size is the physical size divided by the *rounded* scale, so the frame always fills the window exactly instead of letterboxing.
 
 Use `--min-particles <N>` to override this with a fixed count between 2 and 100.
 
