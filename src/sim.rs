@@ -337,6 +337,12 @@ impl Simulation {
         self.base_particle_count
     }
 
+    /// Top speed newly created particles are given (they start at 50-100%
+    /// of it); also normalizes the velocity color mode.
+    pub fn initial_speed(&self) -> f64 {
+        self.initial_speed
+    }
+
     pub fn stopped(&self) -> bool {
         self.stopped
     }

@@ -485,7 +485,14 @@ impl App {
             }
             render_wells(frame, sim.pinned_wells(), width, height);
             render_segments(frame, sim.wall_segments(), width, height);
-            render_particles(frame, sim.particles(), width, height, color_mode);
+            render_particles(
+                frame,
+                sim.particles(),
+                width,
+                height,
+                color_mode,
+                sim.initial_speed(),
+            );
             if kaleidoscope {
                 kaleidoscope_frame(frame, width, height);
             }

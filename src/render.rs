@@ -7,7 +7,7 @@
 use crate::color::{color_component, hsv_to_rgba};
 use crate::config::ColorMode;
 use crate::explosion::{EXPLOSION_RING_WIDTH, Explosion};
-use crate::physics::{INITIAL_VELOCITY, Particle, Segment};
+use crate::physics::{Particle, Segment};
 use crate::sim::{Polarity, Well};
 use ouroboros::self_referencing;
 use pixels::{Pixels, SurfaceTexture};
@@ -75,16 +75,16 @@ pub fn dim_rect(frame: &mut [u8], width: u32, height: u32, rect: (u32, u32, u32,
     }
 }
 
-/// Color of a particle under the given color mode.
-fn particle_color(particle: &Particle, color_mode: ColorMode) -> [u8; 4] {
+/// Color of a particle under the given color mode. `top_speed` is the
+/// simulation's configured initial speed: the hue scale spans rest (blue)
+/// to 1.5x that speed (red), so slow, gentle presets get the full palette
+/// instead of rendering uniformly blue.
+fn particle_color(particle: &Particle, color_mode: ColorMode, top_speed: f64) -> [u8; 4] {
     match color_mode {
         ColorMode::Solid => particle.color,
         ColorMode::Velocity => {
             // Map speed to hue: 240 (blue, slow) down to 0 (red, fast).
-            // Normalized against the INITIAL_VELOCITY constant, not the
-            // --initial-speed setting, so slow presets render mostly blue
-            // (a known cosmetic debt: see the ROADMAP watch items).
-            let t = (particle.speed() / (INITIAL_VELOCITY * 1.5)).clamp(0.0, 1.0);
+            let t = (particle.speed() / (top_speed * 1.5)).clamp(0.0, 1.0);
             hsv_to_rgba(240.0 * (1.0 - t), 0.8, 1.0)
         }
     }
@@ -97,6 +97,7 @@ pub fn render_particles(
     width: u32,
     height: u32,
     color_mode: ColorMode,
+    top_speed: f64,
 ) {
     for particle in particles {
         // The radius rounds to the nearest integer: radius 1 draws a 3x3
@@ -107,7 +108,7 @@ pub fn render_particles(
         let r_sq = r * r;
         let cx = coord_to_pixel(particle.x);
         let cy = coord_to_pixel(particle.y);
-        let color = particle_color(particle, color_mode);
+        let color = particle_color(particle, color_mode, top_speed);
 
         for dy in -r..=r {
             for dx in -r..=r {
@@ -605,8 +606,22 @@ mod tests {
             for p in &mut particles {
                 p.radius = radius;
             }
-            render_particles(&mut frame, &particles, width, height, ColorMode::Solid);
-            render_particles(&mut frame, &particles, width, height, ColorMode::Velocity);
+            render_particles(
+                &mut frame,
+                &particles,
+                width,
+                height,
+                ColorMode::Solid,
+                600.0,
+            );
+            render_particles(
+                &mut frame,
+                &particles,
+                width,
+                height,
+                ColorMode::Velocity,
+                600.0,
+            );
         }
         assert!(frame.iter().any(|&b| b > 0));
     }
@@ -676,6 +691,50 @@ mod tests {
             assert_eq!(frame[idx(4, 2)], 70, "center row mirrors horizontally");
             assert_eq!(frame[idx(0, 2)], 70, "left edge untouched");
         }
+    }
+
+    #[test]
+    fn velocity_colors_span_the_configured_speed_range() {
+        // Regression: hue used to normalize against the INITIAL_VELOCITY
+        // constant (600), so slow presets rendered uniformly blue. A
+        // particle at 1.5x the *configured* top speed must render red no
+        // matter how slow that configuration is.
+        let (width, height) = (20u32, 20u32);
+        let mut rng = StdRng::seed_from_u64(2);
+        let center = |frame: &[u8]| {
+            let idx = ((10 * width + 10) * 4) as usize;
+            [frame[idx], frame[idx + 1], frame[idx + 2]]
+        };
+
+        let mut fast = Particle::new_at_position(&mut rng, 10.0, 10.0, 2.0, 600.0);
+        fast.vx = 90.0; // 1.5x of a gentle 60 px/s setting
+        fast.vy = 0.0;
+        let mut frame = vec![0u8; (width * height * 4) as usize];
+        render_particles(
+            &mut frame,
+            &[fast],
+            width,
+            height,
+            ColorMode::Velocity,
+            60.0,
+        );
+        let [r, _, b] = center(&frame);
+        assert!(r > 200 && b < 100, "top of the range is red: r={r} b={b}");
+
+        let mut slow = Particle::new_at_position(&mut rng, 10.0, 10.0, 2.0, 600.0);
+        slow.vx = 0.0;
+        slow.vy = 0.0;
+        let mut frame = vec![0u8; (width * height * 4) as usize];
+        render_particles(
+            &mut frame,
+            &[slow],
+            width,
+            height,
+            ColorMode::Velocity,
+            60.0,
+        );
+        let [r, _, b] = center(&frame);
+        assert!(b > 200 && r < 100, "rest is blue: r={r} b={b}");
     }
 
     #[test]

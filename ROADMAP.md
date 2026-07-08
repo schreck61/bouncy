@@ -36,7 +36,5 @@ All numbered items have shipped; what remains is the opportunistic pile.
 - Explosion threshold semantics under `--matter` (fusion/fission don't count
   toward the spawn window; only mid-band spawns do). Fine so far; revisit if
   matter+spawning feels off.
-- Velocity color mode normalizes hue against the INITIAL_VELOCITY constant
-  (600), not `--initial-speed`; slow presets render mostly blue. Cosmetic.
 - The `blob` preset can still cool to a stop over very long runs (elastic
   losses via fusion); if it bothers, add a tiny ambient stir or accept STOPPED.
