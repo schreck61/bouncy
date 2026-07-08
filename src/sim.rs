@@ -38,10 +38,6 @@ const MAX_SPAWNS_PER_FRAME: usize = 200;
 /// stack at an identical position (identical positions defeat both collision
 /// separation and the spatial grid).
 const SPAWN_JITTER: f64 = 4.0;
-/// Minimum survivors of a cursor-triggered explosion. Unlike automatic
-/// explosions (which keep the screen-based base count alive), a manual blast
-/// wipes everything it touches down to the simulation's hard minimum.
-const MANUAL_EXPLOSION_SURVIVORS: usize = 2;
 /// Half-angle of the ejection cone around the outward spawn direction.
 const SPAWN_CONE_HALF_ANGLE: f64 = std::f64::consts::FRAC_PI_4;
 /// Ejection speed at zero collision energy, as a fraction of
@@ -540,13 +536,14 @@ impl Simulation {
     }
 
     /// Trigger a cursor explosion at `(x, y)`: kills everything the ring
-    /// reaches, down to the simulation's hard minimum. Returns false if an
+    /// reaches, down to the base particle count — the configured minimum
+    /// is an invariant no explosion violates. Returns false if an
     /// explosion is already active or there is nothing to explode.
     pub fn trigger_manual_explosion(&mut self, x: f64, y: f64) -> bool {
         if self.explosion.is_some() || self.particles.is_empty() {
             return false;
         }
-        self.trigger_explosion(x, y, 1.0, MANUAL_EXPLOSION_SURVIVORS);
+        self.trigger_explosion(x, y, 1.0, self.base_particle_count);
         true
     }
 
@@ -1546,8 +1543,17 @@ mod tests {
     }
 
     #[test]
-    fn manual_explosion_wipes_to_the_floor_and_completes() {
+    fn manual_explosion_respects_the_base_count_and_completes() {
+        // The configured minimum is an invariant: even a full manual wipe
+        // must leave the base population alive. The population is grown
+        // above the base count first so the blast has something to kill.
         let mut s = sim(&["--min-particles", "50"]);
+        let mut rng = StdRng::seed_from_u64(31);
+        while s.particle_count() < 80 {
+            let p = Particle::new_random(&mut rng, 800, 600, 1.5, 600.0);
+            let p = s.stamp(p);
+            s.particles.push(p);
+        }
         assert!(s.trigger_manual_explosion(400.0, 300.0));
         assert!(
             !s.trigger_manual_explosion(400.0, 300.0),
@@ -1565,8 +1571,13 @@ mod tests {
             steps += 1;
             assert!(steps < 100, "explosion must complete");
         }
-        assert_eq!(s.particle_count(), 2, "manual blast leaves 2 survivors");
-        assert_eq!(completed, Some(48), "completion event reports the kills");
+        assert!(
+            s.particle_count() >= s.base_particle_count(),
+            "manual blast keeps the configured minimum alive: {} of {}",
+            s.particle_count(),
+            s.base_particle_count()
+        );
+        assert_eq!(completed, Some(30), "completion event reports the kills");
     }
 
     #[test]
