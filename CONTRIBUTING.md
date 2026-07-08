@@ -79,7 +79,7 @@ git commit -s -m "Your commit message"
 
 ### Prerequisites
 
-- Rust 1.85 or later (matches `rust-version` in Cargo.toml)
+- Rust 1.85 or later
 - A GPU with Vulkan, Metal, or DX12 support (optional — CPU rendering is a fallback)
 - Git
 

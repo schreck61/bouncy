@@ -8,7 +8,7 @@ every bug fix ships with a regression test.
 
 ## 1.0 — shipped
 
-The 1.0 cut, chosen in 2026-07: fill the window at fractional display
+The 1.0 release completed the plan: fill the window at fractional display
 scales; velocity colors that respect `--initial-speed`; a screenshot key
 (`O`); **scenes** — presets that carry wells/walls geometry in
 window-fraction coordinates, with the `E` key exporting the current
@@ -25,15 +25,15 @@ groundwork is already laid — every runtime mutation goes through the
 `Command` dispatch in app.rs, so widgets issue the same commands as
 hotkeys; `pixels` exposes `render_with()` for egui's render pass. The
 CPU/softbuffer backend stays hotkeys-only (documented limitation).
-Design notes live in the session history: collapsible side panel,
-egui-wgpu + egui-winit, staged-restart section for creation-time
-parameters as a later phase.
+Intended shape: a collapsible side panel via egui-wgpu + egui-winit,
+with a staged-restart section for creation-time parameters as a later
+phase.
 
 ## Smaller / opportunistic
 
 - Particle springs/links: click two particles to bind with a spring; molecule
-  building. Medium effort, niche payoff. (Stable particle ids landed in the
-  2026-07 review work, so the identity problem is already solved.)
+  building. Medium effort, niche payoff. (Particles carry stable ids, so
+  the cross-frame identity problem is already solved.)
 - Self-gravity far-field tier: the pairwise force pass is O(n²), intended
   for preset-scale populations. For thousands of self-gravitating
   particles, accumulate per-cell mass and center of mass over the existing

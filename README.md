@@ -305,9 +305,9 @@ const PING_MIN_FREQ: f32 = 300.0;
 const PING_MAX_FREQ: f32 = 1500.0;
 ```
 
-(Particle size, initial speed, and the explosion threshold are no longer
-source-only constants — use `--particle-size`, `--initial-speed`, and
-`--explosion-threshold`.)
+Particle size, initial speed, and the explosion threshold are ordinary
+command-line options (`--particle-size`, `--initial-speed`,
+`--explosion-threshold`) rather than source constants.
 
 ## Dependencies
 
