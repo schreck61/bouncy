@@ -680,15 +680,35 @@ pub const SELF_GRAVITY_G: f64 = 2500.0;
 /// infinity. Pairs this close are in collision range anyway.
 const SELF_GRAVITY_SOFTENING: f64 = 10.0;
 
-/// Apply mutual Newtonian gravity between every particle pair, softened
-/// like the cursor well and applied symmetrically (Newton's third law),
-/// so momentum is conserved exactly and heavier particles both pull
-/// harder and yield less. O(n²) per substep by design: correct and fast
-/// for the preset-scale populations self-gravity runs with (~5k pair
-/// evaluations at 100 particles); the documented next tier for thousands
-/// of particles is a far-field approximation over the spatial grid
-/// (per-cell mass and center of mass).
+/// Population size at which self-gravity switches from the exact pairwise
+/// pass to the Barnes-Hut tree. Below this the O(n²) pass is both faster
+/// (no tree build) and exactly momentum-conserving; above it the tree's
+/// O(n log n) wins and the approximation error is invisible at screen
+/// scale.
+const BARNES_HUT_THRESHOLD: usize = 256;
+
+/// Apply mutual Newtonian gravity between all particles, softened like the
+/// cursor well. Small populations use the exact pairwise pass (symmetric,
+/// so momentum is conserved to floating-point exactness); populations of
+/// `BARNES_HUT_THRESHOLD` or more use an adaptive Barnes-Hut quadtree,
+/// which approximates far-away groups by their center of mass and keeps
+/// the cost near O(n log n) even when the population collapses into one
+/// dense clump.
 pub fn apply_self_gravity(particles: &mut [Particle], dt: f64) {
+    if particles.len() < BARNES_HUT_THRESHOLD {
+        apply_self_gravity_exact(particles, dt);
+    } else {
+        apply_self_gravity_barnes_hut(particles, dt);
+    }
+}
+
+/// Exact pairwise self-gravity, applied symmetrically (Newton's third
+/// law), so momentum is conserved exactly and heavier particles both pull
+/// harder and yield less. O(n²) per substep: correct and fast for
+/// preset-scale populations (~5k pair evaluations at 100 particles), ruinous
+/// for the thousands-of-particles populations matter mode can grow — those
+/// route to the Barnes-Hut pass instead.
+fn apply_self_gravity_exact(particles: &mut [Particle], dt: f64) {
     let s2 = SELF_GRAVITY_SOFTENING * SELF_GRAVITY_SOFTENING;
     for i in 0..particles.len() {
         let (left, right) = particles.split_at_mut(i + 1);
@@ -706,6 +726,241 @@ pub fn apply_self_gravity(particles: &mut [Particle], dt: f64) {
             pj.vy -= fy * pi.mass();
         }
     }
+}
+
+/// Barnes-Hut opening angle θ: a node is treated as a single point mass
+/// when its width divided by the distance to its center of mass is below
+/// θ. 0.6 is the conventional accuracy/speed middle ground; force errors
+/// stay well under 1% of the exact pass.
+const BARNES_HUT_THETA: f64 = 0.6;
+/// Leaves hold up to this many particles and interact exactly. Larger
+/// leaves mean a shallower tree (cheaper build) at the cost of more exact
+/// pair work; 16 balances the two for the populations matter mode reaches.
+const BARNES_HUT_LEAF_CAP: usize = 16;
+/// Hard depth cap. Each level halves the node width, so 32 levels shrink a
+/// screen-sized root below any physical separation; a leaf that still
+/// exceeds the cap here holds effectively coincident particles, which the
+/// softening handles.
+const BARNES_HUT_MAX_DEPTH: u32 = 32;
+
+/// One quadtree node: a square region with the total mass and center of
+/// mass of the particles inside it. Internal nodes store the index of
+/// their first child (all four children are contiguous); leaves store a
+/// range into the build's permuted particle-index buffer.
+struct BhNode {
+    center_x: f64,
+    center_y: f64,
+    half: f64,
+    mass: f64,
+    com_x: f64,
+    com_y: f64,
+    /// Index of the first of four contiguous children, or -1 for a leaf.
+    first_child: i32,
+    /// Leaf particle range in `order` (unused for internal nodes).
+    start: usize,
+    len: usize,
+}
+
+/// Adaptive Barnes-Hut self-gravity: build a quadtree over the current
+/// positions, then accumulate each particle's acceleration by walking the
+/// tree — exact softened pairs inside leaves and near nodes, center-of-mass
+/// approximations for nodes that pass the opening test. The tree adapts to
+/// the distribution, so a population collapsed into one dense clump (the
+/// regime uniform-grid far-field schemes degrade in) still resolves into
+/// small leaves. Near-field pair forces cancel exactly; far-field
+/// approximation breaks momentum conservation only at the force-error
+/// level (<1%), invisible at screen scale.
+fn apply_self_gravity_barnes_hut(particles: &mut [Particle], dt: f64) {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for p in particles.iter() {
+        min_x = min_x.min(p.x);
+        min_y = min_y.min(p.y);
+        max_x = max_x.max(p.x);
+        max_y = max_y.max(p.y);
+    }
+    let half = ((max_x - min_x).max(max_y - min_y) / 2.0).max(1e-6);
+    let root = BhNode {
+        center_x: f64::midpoint(min_x, max_x),
+        center_y: f64::midpoint(min_y, max_y),
+        half,
+        mass: 0.0,
+        com_x: 0.0,
+        com_y: 0.0,
+        first_child: -1,
+        start: 0,
+        len: particles.len(),
+    };
+
+    let mut nodes = vec![root];
+    #[allow(clippy::cast_possible_truncation)]
+    let mut order: Vec<u32> = (0..particles.len() as u32).collect();
+
+    // Iterative build: split each pending node's index range into four
+    // quadrant sub-ranges in place, then aggregate mass and center of mass
+    // bottom-up (children are always created after their parent, so a
+    // reverse sweep sees every child before its parent).
+    let mut pending = vec![(0usize, 0u32)]; // (node index, depth)
+    while let Some((ni, depth)) = pending.pop() {
+        let (start, len, cx, cy, half) = {
+            let n = &nodes[ni];
+            (n.start, n.len, n.center_x, n.center_y, n.half)
+        };
+        if len <= BARNES_HUT_LEAF_CAP || depth >= BARNES_HUT_MAX_DEPTH {
+            let (mut m, mut mx, mut my) = (0.0, 0.0, 0.0);
+            for &i in &order[start..start + len] {
+                let p = &particles[i as usize];
+                let pm = p.mass();
+                m += pm;
+                mx += pm * p.x;
+                my += pm * p.y;
+            }
+            let n = &mut nodes[ni];
+            n.mass = m;
+            n.com_x = mx / m.max(f64::MIN_POSITIVE);
+            n.com_y = my / m.max(f64::MIN_POSITIVE);
+            continue;
+        }
+
+        // Partition the range into quadrants: top/bottom by y, then each
+        // half left/right by x. `partition_range` is stable-order-free but
+        // in-place and O(len).
+        let range = &mut order[start..start + len];
+        let split_y = partition_range(range, |i| particles[i as usize].y < cy);
+        let (top, bottom) = range.split_at_mut(split_y);
+        let split_x_top = partition_range(top, |i| particles[i as usize].x < cx);
+        let split_x_bottom = partition_range(bottom, |i| particles[i as usize].x < cx);
+
+        let quarter = half / 2.0;
+        let child_ranges = [
+            (start, split_x_top),                         // top-left
+            (start + split_x_top, split_y - split_x_top), // top-right
+            (start + split_y, split_x_bottom),            // bottom-left
+            (
+                start + split_y + split_x_bottom,
+                len - split_y - split_x_bottom,
+            ), // bottom-right
+        ];
+        let child_centers = [
+            (cx - quarter, cy - quarter),
+            (cx + quarter, cy - quarter),
+            (cx - quarter, cy + quarter),
+            (cx + quarter, cy + quarter),
+        ];
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let first_child = nodes.len() as i32;
+        nodes[ni].first_child = first_child;
+        for k in 0..4 {
+            nodes.push(BhNode {
+                center_x: child_centers[k].0,
+                center_y: child_centers[k].1,
+                half: quarter,
+                mass: 0.0,
+                com_x: 0.0,
+                com_y: 0.0,
+                first_child: -1,
+                start: child_ranges[k].0,
+                len: child_ranges[k].1,
+            });
+            if child_ranges[k].1 > 0 {
+                pending.push((nodes.len() - 1, depth + 1));
+            }
+        }
+    }
+
+    // Bottom-up aggregation: children live at higher indices than their
+    // parent, so one reverse pass folds each populated child into its
+    // parent's mass and center of mass.
+    for ni in (0..nodes.len()).rev() {
+        let fc = nodes[ni].first_child;
+        if fc < 0 {
+            continue;
+        }
+        let (mut m, mut mx, mut my) = (0.0, 0.0, 0.0);
+        #[allow(clippy::cast_sign_loss)]
+        for k in 0..4 {
+            let c = &nodes[fc as usize + k];
+            m += c.mass;
+            mx += c.mass * c.com_x;
+            my += c.mass * c.com_y;
+        }
+        let n = &mut nodes[ni];
+        n.mass = m;
+        n.com_x = mx / m.max(f64::MIN_POSITIVE);
+        n.com_y = my / m.max(f64::MIN_POSITIVE);
+    }
+
+    // Force pass: walk the tree once per particle. Velocities update in
+    // place — forces depend only on positions, which this pass never
+    // touches, so in-place application matches a two-phase gather exactly.
+    let s2 = SELF_GRAVITY_SOFTENING * SELF_GRAVITY_SOFTENING;
+    let theta_sq = BARNES_HUT_THETA * BARNES_HUT_THETA;
+    let mut stack: Vec<u32> = Vec::with_capacity(64);
+    for i in 0..particles.len() {
+        let (px, py) = (particles[i].x, particles[i].y);
+        let (mut ax, mut ay) = (0.0, 0.0);
+        stack.push(0);
+        while let Some(ni) = stack.pop() {
+            let n = &nodes[ni as usize];
+            if n.mass <= 0.0 {
+                continue;
+            }
+            let dx = n.com_x - px;
+            let dy = n.com_y - py;
+            let d2 = dx * dx + dy * dy;
+            let width = n.half * 2.0;
+            if width * width < theta_sq * d2 {
+                // Far field: the whole node as one softened point mass.
+                // Leaves qualify too — passing the opening test puts the
+                // particle at distance > width/θ, beyond the node's √2·width
+                // interior diagonal, so it cannot be among the node's own
+                // particles and no self-force is possible.
+                let softened = d2 + s2;
+                let scale = n.mass / (softened * softened.sqrt());
+                ax += dx * scale;
+                ay += dy * scale;
+                continue;
+            }
+            if n.first_child >= 0 {
+                #[allow(clippy::cast_sign_loss)]
+                let fc = n.first_child as u32;
+                stack.extend_from_slice(&[fc, fc + 1, fc + 2, fc + 3]);
+                continue;
+            }
+            for &j in &order[n.start..n.start + n.len] {
+                if j as usize == i {
+                    continue;
+                }
+                let pj = &particles[j as usize];
+                let dx = pj.x - px;
+                let dy = pj.y - py;
+                let softened = dx * dx + dy * dy + s2;
+                let scale = pj.mass() / (softened * softened.sqrt());
+                ax += dx * scale;
+                ay += dy * scale;
+            }
+        }
+        let p = &mut particles[i];
+        p.vx += SELF_GRAVITY_G * dt * ax;
+        p.vy += SELF_GRAVITY_G * dt * ay;
+    }
+}
+
+/// Move every index satisfying `pred` to the front of `range`, returning
+/// the count moved. Order within the two groups is not preserved; the
+/// quadtree build only needs the split point.
+fn partition_range(range: &mut [u32], pred: impl Fn(u32) -> bool) -> usize {
+    let mut split = 0;
+    for j in 0..range.len() {
+        if pred(range[j]) {
+            range.swap(split, j);
+            split += 1;
+        }
+    }
+    split
 }
 
 /// Speed of the ambient flow field's currents (pixels/s). Gentle by design:
@@ -837,6 +1092,110 @@ mod tests {
             "softening keeps the kick modest: {}",
             close[0].vx
         );
+    }
+
+    /// Clone a population, run the exact and Barnes-Hut passes on the two
+    /// copies, and return the worst per-particle relative error of the
+    /// Barnes-Hut velocity kick against the exact one.
+    fn barnes_hut_worst_relative_error(particles: &[Particle], dt: f64) -> f64 {
+        let clone = |ps: &[Particle]| -> Vec<Particle> {
+            ps.iter()
+                .map(|p| particle_r(p.x, p.y, p.vx, p.vy, p.radius))
+                .collect()
+        };
+        let mut exact = clone(particles);
+        let mut approx = clone(particles);
+        apply_self_gravity_exact(&mut exact, dt);
+        apply_self_gravity_barnes_hut(&mut approx, dt);
+
+        let scale = exact
+            .iter()
+            .map(|p| (p.vx * p.vx + p.vy * p.vy).sqrt())
+            .fold(0.0f64, f64::max)
+            .max(1e-12);
+        exact
+            .iter()
+            .zip(&approx)
+            .map(|(e, a)| {
+                let (dx, dy) = (e.vx - a.vx, e.vy - a.vy);
+                (dx * dx + dy * dy).sqrt() / scale
+            })
+            .fold(0.0f64, f64::max)
+    }
+
+    #[test]
+    fn barnes_hut_matches_exact_forces_when_spread_out() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let particles: Vec<Particle> = (0..600)
+            .map(|_| Particle::new_random(&mut rng, 800, 600, RADIUS, 0.0))
+            .collect();
+        let err = barnes_hut_worst_relative_error(&particles, 0.01);
+        assert!(err < 0.02, "worst relative force error {err} exceeds 2%");
+    }
+
+    #[test]
+    fn barnes_hut_matches_exact_forces_in_a_dense_clump() {
+        // The regime that motivated the tree: thousands of particles
+        // collapsed by stacked wells into a blob a few dozen pixels wide.
+        let mut rng = StdRng::seed_from_u64(11);
+        let particles: Vec<Particle> = (0..2000)
+            .map(|_| {
+                let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+                let r: f64 = rng.random_range(0.0..30.0);
+                particle(400.0 + r * angle.cos(), 300.0 + r * angle.sin(), 0.0, 0.0)
+            })
+            .collect();
+        let err = barnes_hut_worst_relative_error(&particles, 0.01);
+        assert!(err < 0.02, "worst relative force error {err} exceeds 2%");
+    }
+
+    #[test]
+    fn barnes_hut_survives_coincident_particles() {
+        // All particles at one point: the build cannot partition them, so
+        // the depth cap must terminate it and softening must keep forces
+        // finite (and zero, by symmetry of the softened kernel).
+        let mut particles: Vec<Particle> =
+            (0..300).map(|_| particle(400.0, 300.0, 0.0, 0.0)).collect();
+        apply_self_gravity_barnes_hut(&mut particles, 0.01);
+        for p in &particles {
+            assert!(p.vx.is_finite() && p.vy.is_finite());
+        }
+    }
+
+    /// Timing comparison at the scale of the pathological exported scene
+    /// (5,245 particles in a dense clump). Not a correctness test — run
+    /// manually: `cargo test --release bench_self_gravity -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark"]
+    fn bench_self_gravity_exact_vs_barnes_hut() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let make = |rng: &mut StdRng| -> Vec<Particle> {
+            (0..5245)
+                .map(|_| {
+                    let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+                    let r: f64 = rng.random_range(0.0..60.0);
+                    particle(400.0 + r * angle.cos(), 300.0 + r * angle.sin(), 0.0, 0.0)
+                })
+                .collect()
+        };
+        let mut exact = make(&mut rng);
+        let mut approx = make(&mut rng);
+
+        let t = std::time::Instant::now();
+        for _ in 0..8 {
+            apply_self_gravity_exact(&mut exact, 0.001);
+        }
+        let exact_time = t.elapsed();
+
+        let t = std::time::Instant::now();
+        for _ in 0..8 {
+            apply_self_gravity_barnes_hut(&mut approx, 0.001);
+        }
+        let bh_time = t.elapsed();
+
+        println!("8 substeps at n=5245 (dense clump):");
+        println!("  exact:      {exact_time:?}");
+        println!("  barnes-hut: {bh_time:?}");
     }
 
     #[test]
