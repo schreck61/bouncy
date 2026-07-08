@@ -645,7 +645,7 @@ impl Simulation {
             .collision_centroid()
             .map_or(0.5, |(x, _)| x / f64::from(self.width));
 
-        if self.matter && self.explosion.is_none() && self.process_matter() {
+        if self.matter && self.explosion.is_none() && self.process_matter(now) {
             // Matter ops reorder the particle list; rebuild the grid so the
             // spawn clearance checks below consult correct positions.
             self.grid.build(
@@ -689,7 +689,12 @@ impl Simulation {
     /// impacts shatter both participants into half-area fragments that fly
     /// apart perpendicular to the impact. Each particle takes part in at
     /// most one matter event per step. Returns true if anything changed.
-    fn process_matter(&mut self) -> bool {
+    ///
+    /// Fission fragments are recorded in the birth window (`spawn_times`),
+    /// so runaway fission chains trip the explosion threshold just like
+    /// runaway collision spawning — the threshold measures births per
+    /// second, whatever their mechanism.
+    fn process_matter(&mut self, now: Instant) -> bool {
         let min_r = self.base_radius * MIN_RADIUS_FACTOR;
         let max_r = self.base_radius * MAX_RADIUS_FACTOR;
         let mut touched: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -766,6 +771,7 @@ impl Simulation {
                     };
                     let twin = self.stamp(twin);
                     self.particles.push(twin);
+                    self.spawn_times.push_back(now);
                     touched.insert(idx);
                     changed = true;
                 }
@@ -801,7 +807,8 @@ impl Simulation {
     /// Handle particle spawning from collisions, potentially triggering an
     /// automatic explosion. Returns true if one was triggered.
     fn handle_spawning(&mut self, now: Instant) -> bool {
-        // Track spawn rate over sliding window
+        // Track the birth rate (collision spawns and fission
+        // fragments) over a sliding window
         let spawn_window = std::time::Duration::from_secs_f64(SPAWN_RATE_WINDOW);
         if let Some(cutoff) = now.checked_sub(spawn_window) {
             while self.spawn_times.front().is_some_and(|&t| t < cutoff) {
@@ -1963,6 +1970,42 @@ mod tests {
             small >= min_r - 1e-9,
             "the donor never shrinks below the fragment minimum: {small}"
         );
+    }
+
+    #[test]
+    fn fission_births_count_toward_the_explosion_threshold() {
+        // Regression: a matter run grew past 18,000 particles without ever
+        // exploding, because fission fragments multiplied the population
+        // while the explosion threshold only counted collision *spawns* —
+        // and fission-band collisions never spawn. Births now share one
+        // window regardless of mechanism.
+        let mut s = sim(&[
+            "--min-particles",
+            "30",
+            "--matter",
+            "--explosion-threshold",
+            "5",
+        ]);
+        arm_collision(&mut s, 400.0, 300.0);
+        // Violent approach: closing speed 800 is in the fission band, so
+        // the old accounting recorded nothing for this collision.
+        s.particles[0].vx = 400.0;
+        s.particles[1].vx = -400.0;
+        // Preload the window to just below the threshold; the two fission
+        // fragments must push it over.
+        let now = Instant::now();
+        for _ in 0..4 {
+            s.spawn_times.push_back(now);
+        }
+
+        let mut exploded = false;
+        for _ in 0..50 {
+            if s.step(0.01, now, None).explosion_started {
+                exploded = true;
+                break;
+            }
+        }
+        assert!(exploded, "fission births must fill the explosion window");
     }
 
     #[test]

@@ -43,9 +43,6 @@ phase.
 
 ## Tuning debts / watch items
 
-- Explosion threshold semantics under `--matter` (fusion/fission don't count
-  toward the spawn window; only mid-band spawns do). Fine so far; revisit if
-  matter+spawning feels off.
 - The `blob` preset can still cool to a stop over very long runs (elastic
   losses via fusion). Mitigations now exist in-app (`F` flow stir or `A`
   self-gravity); accept STOPPED otherwise.
