@@ -34,6 +34,12 @@ const MIN_PARTICLE_CAP: usize = 1000;
 /// quadratic in cluster size, so unthrottled spawning can multiply the
 /// population by orders of magnitude in a single frame.
 const MAX_SPAWNS_PER_FRAME: usize = 200;
+/// Ceiling on the spawn-pressure window deque. Pressure counts every
+/// spawn-eligible collision — a dense clump can produce thousands per
+/// frame — but the explosion threshold tops out at 1,000, so entries past
+/// this cap could never change a decision; they would only grow the deque
+/// without bound. The HUD rate display saturates here.
+const SPAWN_WINDOW_CAP: usize = 1200;
 /// Random offset applied to collision-point spawns so new particles never
 /// stack at an identical position (identical positions defeat both collision
 /// separation and the spatial grid).
@@ -340,6 +346,14 @@ impl Simulation {
 
     pub fn particle_count(&self) -> usize {
         self.particles.len()
+    }
+
+    /// Spawn-pressure events in the sliding window: spawn-eligible
+    /// collisions plus fission demand over the last second, counted
+    /// whether or not the births fit (saturates at `SPAWN_WINDOW_CAP`).
+    /// This is the rate the explosion threshold is compared against.
+    pub fn spawn_pressure(&self) -> usize {
+        self.spawn_times.len()
     }
 
     pub fn explosion(&self) -> Option<&Explosion> {
@@ -690,10 +704,10 @@ impl Simulation {
     /// apart perpendicular to the impact. Each particle takes part in at
     /// most one matter event per step. Returns true if anything changed.
     ///
-    /// Fission fragments are recorded in the birth window (`spawn_times`),
+    /// Fission demand is recorded in the pressure window (`spawn_times`),
     /// so runaway fission chains trip the explosion threshold just like
-    /// runaway collision spawning — the threshold measures births per
-    /// second, whatever their mechanism.
+    /// runaway collision spawning — the threshold measures spawn pressure
+    /// per second, whatever its mechanism.
     fn process_matter(&mut self, now: Instant) -> bool {
         let min_r = self.base_radius * MIN_RADIUS_FACTOR;
         let max_r = self.base_radius * MAX_RADIUS_FACTOR;
@@ -749,7 +763,16 @@ impl Simulation {
                 let kick = FISSION_KICK_FRACTION * site.energy;
                 for idx in [i, j] {
                     let frag_r = self.particles[idx].radius / std::f64::consts::SQRT_2;
-                    if frag_r < min_r || self.particles.len() >= self.max_particles {
+                    if frag_r < min_r {
+                        continue;
+                    }
+                    // Fission demand feeds the explosion window even when
+                    // the population cap blocks the fragment itself — see
+                    // the spawn-pressure counting in `handle_spawning`.
+                    if self.spawn_times.len() < SPAWN_WINDOW_CAP {
+                        self.spawn_times.push_back(now);
+                    }
+                    if self.particles.len() >= self.max_particles {
                         continue;
                     }
                     let offset = frag_r + 0.5;
@@ -771,7 +794,6 @@ impl Simulation {
                     };
                     let twin = self.stamp(twin);
                     self.particles.push(twin);
-                    self.spawn_times.push_back(now);
                     touched.insert(idx);
                     changed = true;
                 }
@@ -821,6 +843,26 @@ impl Simulation {
             || self.spawn_mode == SpawnMode::Off
         {
             return false;
+        }
+
+        // Count spawn pressure: every collision that WOULD produce a birth
+        // feeds the window, whether or not the birth fits. Clearance
+        // failures and the population cap must not silence the signal — a
+        // well parked on the spawn point (permanently occupying the
+        // clearance area) or a population pegged at the density cap would
+        // otherwise suppress the explosion exactly when pressure peaks.
+        // Fusion consumes instead of creating and fission counts its
+        // fragments in `process_matter`, so with matter on only the
+        // spawn band counts here.
+        for i in 0..self.collisions.sites().len() {
+            if self.spawn_times.len() >= SPAWN_WINDOW_CAP {
+                break;
+            }
+            let energy = self.collisions.sites()[i].energy;
+            if self.matter && (energy <= FUSION_MAX_ENERGY || energy >= FISSION_MIN_ENERGY) {
+                continue;
+            }
+            self.spawn_times.push_back(now);
         }
 
         // Explode instead of spawning once the window fills up.
@@ -878,7 +920,6 @@ impl Simulation {
                 let p = Particle::new_moving(&mut self.rng, x, y, vx, vy, self.base_radius);
                 let p = self.stamp(p);
                 self.particles.push(p);
-                self.spawn_times.push_back(now);
                 spawned += 1;
             }
         }
@@ -1335,8 +1376,11 @@ mod tests {
         let mut s = sim(&["--min-particles", "30", "--explosion-threshold", "5"]);
         arm_collision(&mut s, 200.0, 300.0);
         let now = Instant::now();
-        // 4 of 5 window slots used: the next spawn must not explode.
-        for _ in 0..4 {
+        // 3 of 5 window slots used: this frame's one collision brings the
+        // pressure to 4, still below the threshold — spawn, don't explode.
+        // (Pressure is counted before the threshold check, so the event
+        // that fills the window triggers in the same frame it happens.)
+        for _ in 0..3 {
             s.spawn_times.push_back(now);
         }
 
@@ -1344,7 +1388,7 @@ mod tests {
         assert!(!events.explosion_started);
         assert!(s.explosion().is_none());
         assert_eq!(s.particle_count(), 31);
-        assert_eq!(s.spawn_times.len(), 5);
+        assert_eq!(s.spawn_times.len(), 4);
     }
 
     #[test]
@@ -1414,11 +1458,65 @@ mod tests {
         let events = s.step(0.005, Instant::now(), None);
         assert!(events.max_collision_energy > 0.0, "collisions still happen");
         assert_eq!(
-            s.spawn_times.len(),
-            0,
-            "no spawn may be recorded when every position is occupied"
+            s.particle_count(),
+            before,
+            "no particle may materialize when every position is occupied"
         );
-        assert_eq!(s.particle_count(), before);
+        assert!(
+            !s.spawn_times.is_empty(),
+            "blocked births still count as spawn pressure"
+        );
+    }
+
+    #[test]
+    fn spawn_pressure_fills_and_explodes_at_the_population_cap() {
+        // Regression for the cap catch-22: a population pegged at
+        // max_particles produces no births, but the pressure of
+        // spawn-eligible collisions must still fill the explosion window —
+        // otherwise the density cap permanently disables the very valve
+        // that would relieve it.
+        let mut s = sim(&["--min-particles", "10", "--explosion-threshold", "5"]);
+        s.max_particles = s.particle_count(); // no birth can ever fit
+        let before = s.particle_count();
+        let mut now = Instant::now();
+        let mut exploded = false;
+        for _ in 0..10 {
+            arm_collision(&mut s, 400.0, 300.0);
+            now += Duration::from_millis(10);
+            if s.step(0.01, now, None).explosion_started {
+                exploded = true;
+                break;
+            }
+        }
+        assert!(
+            exploded,
+            "pressure must trip the threshold with zero births"
+        );
+        assert_eq!(s.particle_count(), before, "no births at the cap");
+    }
+
+    #[test]
+    fn fission_demand_counts_toward_pressure_at_the_population_cap() {
+        // Matter-mode counterpart: fragments blocked by the cap still
+        // register their demand in the pressure window.
+        let mut s = sim(&["--min-particles", "2", "--matter", "--particle-size", "4"]);
+        s.max_particles = s.particle_count();
+        freeze(&mut s);
+        // Head-on at fission energy: relative normal speed 800 > 700.
+        s.particles[0].x = 396.0;
+        s.particles[0].y = 300.0;
+        s.particles[0].vx = 400.0;
+        s.particles[1].x = 404.0;
+        s.particles[1].y = 300.0;
+        s.particles[1].vx = -400.0;
+
+        let before = s.particle_count();
+        s.step(0.005, Instant::now(), None);
+        assert_eq!(s.particle_count(), before, "cap blocks the fragments");
+        assert!(
+            !s.spawn_times.is_empty(),
+            "blocked fission fragments still count as spawn pressure"
+        );
     }
 
     #[test]
@@ -1926,7 +2024,10 @@ mod tests {
         let events = s.step(0.01, Instant::now(), None);
         assert!(events.max_collision_energy > 0.0, "collision still happens");
         assert_eq!(s.particle_count(), 2, "no spawn inside the wall fence");
-        assert!(s.spawn_times.is_empty());
+        assert!(
+            !s.spawn_times.is_empty(),
+            "the blocked birth still counts as spawn pressure"
+        );
     }
 
     #[test]

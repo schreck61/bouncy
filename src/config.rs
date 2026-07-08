@@ -164,9 +164,10 @@ pub struct Config {
     #[arg(long, value_enum, default_value_t = ColorMode::Solid)]
     pub color_mode: ColorMode,
 
-    /// Particle births per second (collision spawns plus fission
-    /// fragments) that trigger an automatic explosion; 0 disables
-    /// automatic explosions entirely (right-click still works)
+    /// Spawn pressure per second (spawn-eligible collisions plus fission
+    /// demand, counted even when blocked space or the population cap
+    /// prevents the birth) that triggers an automatic explosion; 0
+    /// disables automatic explosions entirely (right-click still works)
     #[arg(long, default_value_t = crate::explosion::SPAWN_RATE_THRESHOLD,
           value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(0..=EXPLOSION_THRESHOLD_MAX as u64))]
     pub explosion_threshold: usize,

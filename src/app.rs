@@ -364,7 +364,7 @@ impl App {
         // audio, choreography) is this layer's job.
         if events.explosion_started {
             println!(
-                "EXPLOSION! Birth rate exceeded {}/s; will kill {} of {} particles",
+                "EXPLOSION! Spawn pressure exceeded {}/s; will kill {} of {} particles",
                 sim.explosion_threshold,
                 sim.explosion().map_or(0, |e| e.doomed_count),
                 sim.particle_count()
@@ -410,8 +410,9 @@ impl App {
                 "Explosions: off  (-/=)".to_string()
             } else {
                 format!(
-                    "Explosions: at {}/s birth rate  (-/=)",
-                    sim.explosion_threshold
+                    "Explosions: at {}/s spawn pressure (now {}/s)  (-/=)",
+                    sim.explosion_threshold,
+                    sim.spawn_pressure()
                 )
             },
             format!("Spawn: {}  (B)", sim.spawn_mode.label()),
