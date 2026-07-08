@@ -27,11 +27,12 @@ const CLICK_BURST_SIZE: usize = 10;
 /// coverage-based limit is the binding constraint for large particles
 /// (geometry — a jammed, solid-packed window is neither interesting nor
 /// fast), but for small ones it allows populations that are pure noise to
-/// look at and heavy to simulate long before coverage binds. 16k keeps
-/// the benchmarked worst case (a fully packed self-gravitating clump with
-/// every mechanic on) interactive. On a fullscreen window the crossover
-/// between the two regimes lands near particle size 3.
-const MAX_PARTICLES: usize = 16_000;
+/// look at and heavy to simulate long before coverage binds. 12k keeps
+/// the benchmarked worst case — a fully packed self-gravitating clump
+/// with matter off, where nothing consumes sustained contacts — above
+/// 20 FPS (16k measured ~14 FPS there). On a fullscreen window the
+/// crossover between the two regimes lands near particle size 3.
+const MAX_PARTICLES: usize = 12_000;
 /// Floor for the density-based cap so small windows still allow bursts.
 const MIN_PARTICLE_CAP: usize = 1000;
 /// Spawn throttle per frame. In a dense cluster the collision count is
@@ -1330,15 +1331,17 @@ mod tests {
     fn new_populates_base_count_and_density_cap() {
         let s = sim(&[]);
         assert_eq!(s.particle_count(), calculate_particle_count(800, 600));
-        // 800*600 / (4 * 3^2) = 13333 for the default radius 1.5.
-        assert_eq!(s.max_particles, 13333);
-
         // Small particles hit the flat ceiling of the non-linear cap, not
-        // the coverage bound (which would allow 120,000 at radius 0.5).
+        // the coverage bound: at the default radius 1.5 the coverage bound
+        // would be 800*600/(4*3^2) = 13333, and 120,000 at radius 0.5.
+        assert_eq!(s.max_particles, MAX_PARTICLES);
         let s = sim(&["--particle-size", "0.5"]);
         assert_eq!(s.max_particles, MAX_PARTICLES);
 
-        // Large particles keep the pure coverage bound: 800*600/(4*10^2).
+        // Large particles keep the pure coverage bound: 800*600/(4*4^2)
+        // and 800*600/(4*10^2).
+        let s = sim(&["--particle-size", "2"]);
+        assert_eq!(s.max_particles, 7500);
         let s = sim(&["--particle-size", "5"]);
         assert_eq!(s.max_particles, 1200);
 
