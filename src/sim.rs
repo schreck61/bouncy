@@ -1127,6 +1127,56 @@ mod tests {
     }
 
     #[test]
+    fn super_elastic_energy_pump_saturates_at_terminal_velocity() {
+        // Elasticity above 1.0 multiplies speed on every wall bounce and
+        // amplifies every collision, and the bounce rate grows with speed
+        // — without the terminal-velocity clamp this overflows f64 to
+        // infinity within a few thousand bounces, after which ∞−∞ in a
+        // collision mints NaN: invisible, frozen particles that no force
+        // or setting change can ever recover. Run the pump long enough to
+        // overflow many times over and verify every particle stays finite,
+        // saturated near the cap rather than runaway.
+        let mut s = sim(&[
+            "--min-particles",
+            "40",
+            "--particle-elasticity",
+            "1.5",
+            "--wall-elasticity",
+            "1.5",
+            "--gravity",
+            "0",
+        ]);
+        let mut now = Instant::now();
+        for _ in 0..1200 {
+            now += Duration::from_millis(50);
+            s.step(0.05, now, None);
+        }
+        let mut top_speed = 0.0f64;
+        for p in s.particles() {
+            assert!(
+                p.x.is_finite() && p.y.is_finite() && p.vx.is_finite() && p.vy.is_finite(),
+                "no particle may go non-finite: pos=({}, {}) vel=({}, {})",
+                p.x,
+                p.y,
+                p.vx,
+                p.vy
+            );
+            top_speed = top_speed.max(p.speed());
+        }
+        // The pump must actually have run: something should be saturated
+        // near the cap (a collision right after the clamp can push a bit
+        // past it; the next substep re-clamps).
+        assert!(
+            top_speed > crate::physics::MAX_SPEED * 0.5,
+            "energy pump should reach saturation, top speed {top_speed}"
+        );
+        assert!(
+            top_speed < crate::physics::MAX_SPEED * 10.0,
+            "speeds must stay bounded near the cap, top speed {top_speed}"
+        );
+    }
+
+    #[test]
     fn new_populates_base_count_and_density_cap() {
         let s = sim(&[]);
         assert_eq!(s.particle_count(), calculate_particle_count(800, 600));

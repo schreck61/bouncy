@@ -12,6 +12,12 @@ pub const GRAVITY: f64 = 100.0;
 pub const DEFAULT_PARTICLE_RADIUS: f64 = 1.5;
 pub const INITIAL_VELOCITY: f64 = 600.0;
 pub const PARTICLE_MARGIN: f64 = 10.0;
+/// Terminal speed (pixels/s): the ceiling the per-substep clamp in
+/// `Particle::update` enforces. ~10 screen-crossings per second on a large
+/// display — an order of magnitude above what comets, explosions, or wells
+/// produce, low enough that super-elastic energy pumps saturate long
+/// before f64 overflow.
+pub const MAX_SPEED: f64 = 20_000.0;
 
 // Collision constants
 pub const COLLISION_ENERGY_NORMALIZER: f64 = 800.0;
@@ -153,6 +159,23 @@ impl Particle {
         wall_elasticity: f64,
     ) {
         self.vy += GRAVITY * gravity_multiplier * dt;
+
+        // Terminal velocity: elasticity above 1.0 pumps energy into every
+        // bounce and collision, and the bounce rate grows with speed, so
+        // without a ceiling velocities overflow f64 to infinity in finite
+        // time — and one ∞−∞ in a collision then mints NaN, an absorbing
+        // state no force or setting change can ever recover (that is why
+        // this clamp lives here, at the one integration choke point every
+        // substep passes through, rather than at the energy sources). The
+        // cap is far above anything a legitimate mechanic produces, so
+        // saturated particles still read as ludicrously fast.
+        let speed_sq = self.vx * self.vx + self.vy * self.vy;
+        if speed_sq > MAX_SPEED * MAX_SPEED {
+            let scale = MAX_SPEED / speed_sq.sqrt();
+            self.vx *= scale;
+            self.vy *= scale;
+        }
+
         self.x += self.vx * dt;
         self.y += self.vy * dt;
 
@@ -1414,6 +1437,24 @@ mod tests {
         println!("8 substeps at n=5245 (dense clump):");
         println!("  exact:      {exact_time:?}");
         println!("  barnes-hut: {bh_time:?}");
+    }
+
+    #[test]
+    fn terminal_velocity_clamps_runaway_speed_and_keeps_direction() {
+        // A particle at absurd speed (as the super-elastic energy pump
+        // produces) must saturate at MAX_SPEED with its heading intact,
+        // long before f64 overflow can mint infinities.
+        let mut p = particle(400.0, 300.0, 3.0e9, -4.0e9);
+        p.update(0.0001, 800, 600, 0.0, 1.0);
+        assert!(
+            (p.speed() - MAX_SPEED).abs() < 1e-6,
+            "speed saturates at the cap: {}",
+            p.speed()
+        );
+        assert!(
+            (p.vx / p.vy - (3.0 / -4.0)).abs() < 1e-9,
+            "direction preserved through the clamp"
+        );
     }
 
     #[test]
