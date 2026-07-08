@@ -118,9 +118,9 @@ cargo run --release -- --spawn-at-collision
 | `J` | Launch a comet from the far edge toward the cursor (same as middle click) |
 | Left click | Spawn a burst of particles at the cursor |
 | Middle click | Launch a comet from the far edge toward the cursor (heavy and fast — under matter mode it shatters what it hits) |
-| Right click | Trigger an explosion centered at the cursor (kills every particle the ring reaches, down to a minimum of 2 survivors) |
+| Right click | Trigger an explosion centered at the cursor (kills every particle the ring reaches beyond the configured minimum — the base particle count always survives) |
 
-Wall elasticity is the simulation's temperature dial: below 1.0 the walls drain energy on every bounce and the system gradually cools; above 1.0 they pump energy in.
+Wall elasticity is the simulation's temperature dial: below 1.0 the walls drain energy on every bounce and the system gradually cools; above 1.0 they pump energy in — speeds then climb until they saturate at a terminal velocity (20,000 px/s) rather than growing without bound.
 
 The mouse cursor hides after 2 seconds of inactivity so it doesn't distract from the simulation. It reappears when moved, stays visible while the gravity well is held, and is always restored when the window loses focus or the program exits.
 
@@ -155,9 +155,9 @@ Holding `G` creates a temporary gravity well at the cursor (`Shift+G` repels). P
 
 ### Self-Gravity (`--self-gravity` / `A`)
 
-Every particle attracts every other with a force proportional to both masses (mass is area, so fused blobs pull harder), softened at close range like the cursor well so near-misses swing by instead of slingshotting. Forces are applied symmetrically, so momentum is conserved exactly. A single pair barely drifts together; a clustered population collapses in seconds — collective attraction is the point.
+Every particle attracts every other with a force proportional to both masses (mass is area, so fused blobs pull harder), softened at close range like the cursor well so near-misses swing by instead of slingshotting. A single pair barely drifts together; a clustered population collapses in seconds — collective attraction is the point.
 
-The magic ingredient is dissipation: perfectly elastic particles fall in and slingshot out forever, but with sub-elastic collisions (and especially matter mode) the energy bleeds off and dust accretes into planetesimals — the `accretion` preset bundles exactly that. The force pass is O(n²) per substep by design, comfortable at preset-scale populations (a few hundred particles); avoid combining it with unbounded spawning.
+The magic ingredient is dissipation: perfectly elastic particles fall in and slingshot out forever, but with sub-elastic collisions (and especially matter mode) the energy bleeds off and dust accretes into planetesimals — the `accretion` preset bundles exactly that. Small populations use an exact pairwise force pass (symmetric, so momentum is conserved to the bit); larger ones switch to an adaptive Barnes-Hut quadtree whose force pass fans out across CPU cores, keeping thousands of self-gravitating particles — even collapsed into one dense clump — comfortably real-time.
 
 ### The Flow Field (`--flow` / `F`)
 
@@ -235,7 +235,7 @@ Preset values are validated by the same parser as the command line (same ranges,
 
 ### Collision Detection
 
-A uniform spatial grid (rebuilt each substep with zero steady-state allocations) bins particles into cells at least one diameter wide. Only particles in the same or adjacent cells are tested pairwise, making collision detection effectively linear in the particle count.
+A uniform spatial grid (rebuilt each substep with zero steady-state allocations) bins particles into cells sized from the *median* particle radius, so a few huge fusion-made blobs among thousands of small particles can't inflate every cell: particles too large for their cell go on a separate oversized list that is swept directly, and if mid-size particles flood that list the cells grow just enough to absorb them. Only particles in the same or adjacent cells are tested pairwise, making collision detection effectively linear in the particle count; contact detection runs across CPU cores (read-only, deterministic for any thread count) while the short list of actual contacts resolves serially.
 
 ### Particle Spawning
 

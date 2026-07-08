@@ -34,10 +34,6 @@ phase.
 - Particle springs/links: click two particles to bind with a spring; molecule
   building. Medium effort, niche payoff. (Particles carry stable ids, so
   the cross-frame identity problem is already solved.)
-- Self-gravity far-field tier: the pairwise force pass is O(n²), intended
-  for preset-scale populations. For thousands of self-gravitating
-  particles, accumulate per-cell mass and center of mass over the existing
-  spatial grid and treat far cells as point masses (one-level Barnes-Hut).
 - Screensaver/attract mode: cycle through presets on a timer
   (`--cycle <secs>`); the sim is a screensaver at heart.
 
