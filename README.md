@@ -336,6 +336,14 @@ Should work on:
 
 ## Architecture
 
+**API documentation** (rustdoc, including internal items) is published at
+[schreck61.github.io/bouncy](https://schreck61.github.io/bouncy/) and rebuilt
+on every push to `main`. Generate it locally with:
+
+```bash
+cargo doc --no-deps --document-private-items --open
+```
+
 The application uses the modern `winit` 0.30 `ApplicationHandler` pattern, split into focused modules:
 
 - `main.rs` - Entry point and event loop setup

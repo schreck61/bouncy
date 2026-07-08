@@ -1,0 +1,61 @@
+name: Docs
+
+# Build the rustdoc API documentation and publish it to GitHub Pages on
+# every push to main. Bouncy is a binary crate, so private items are
+# documented too — the internal architecture (the headless Simulation
+# core, the render backends, the preset machinery) is the documentation
+# that matters.
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; a newer push supersedes a running one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: Build and deploy rustdoc
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libudev-dev
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --document-private-items
+
+      - name: Add root redirect and fix permissions
+        run: |
+          echo '<meta http-equiv="refresh" content="0; url=bouncy/index.html">' > target/doc/index.html
+          rm -f target/doc/.lock
+          chmod -R +rX target/doc
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/doc
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
