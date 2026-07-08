@@ -5,6 +5,7 @@
 //! collisions accelerated by a uniform spatial grid.
 
 use rand::Rng;
+use rayon::prelude::*;
 
 // Physics constants
 pub const GRAVITY: f64 = 100.0;
@@ -816,6 +817,10 @@ const BARNES_HUT_LEAF_CAP: usize = 16;
 /// exceeds the cap here holds effectively coincident particles, which the
 /// softening handles.
 const BARNES_HUT_MAX_DEPTH: u32 = 32;
+/// Population size at which the force pass fans out across threads. Below
+/// this the whole pass runs in well under a millisecond and rayon's
+/// fork-join overhead would eat the gain.
+const BARNES_HUT_PARALLEL_THRESHOLD: usize = 1024;
 
 /// One quadtree node: a square region with the total mass and center of
 /// mass of the particles inside it. Internal nodes store the index of
@@ -967,60 +972,94 @@ fn apply_self_gravity_barnes_hut(particles: &mut [Particle], dt: f64) {
         n.com_y = my / m.max(f64::MIN_POSITIVE);
     }
 
-    // Force pass: walk the tree once per particle. Velocities update in
-    // place — forces depend only on positions, which this pass never
-    // touches, so in-place application matches a two-phase gather exactly.
+    // Force pass: walk the tree once per particle. Forces depend only on
+    // positions, which the pass never touches, so per-particle results are
+    // independent and the pass parallelizes without synchronization. Large
+    // populations gather accelerations in parallel; small ones stay on one
+    // thread, where the fork-join overhead would exceed the work. Both
+    // paths produce bit-identical results: each particle's accumulation
+    // order is its own fixed tree traversal, regardless of scheduling.
+    if particles.len() >= BARNES_HUT_PARALLEL_THRESHOLD {
+        let accels: Vec<(f64, f64)> = (0..particles.len())
+            .into_par_iter()
+            .map_init(
+                || Vec::with_capacity(64),
+                |stack, i| particle_acceleration(&nodes, &order, particles, i, stack),
+            )
+            .collect();
+        for (p, (ax, ay)) in particles.iter_mut().zip(accels) {
+            p.vx += SELF_GRAVITY_G * dt * ax;
+            p.vy += SELF_GRAVITY_G * dt * ay;
+        }
+    } else {
+        let mut stack: Vec<u32> = Vec::with_capacity(64);
+        for i in 0..particles.len() {
+            let (ax, ay) = particle_acceleration(&nodes, &order, particles, i, &mut stack);
+            let p = &mut particles[i];
+            p.vx += SELF_GRAVITY_G * dt * ax;
+            p.vy += SELF_GRAVITY_G * dt * ay;
+        }
+    }
+}
+
+/// Accumulate the softened gravitational acceleration on particle `i` (in
+/// units of G — the caller applies `SELF_GRAVITY_G * dt`) by walking the
+/// quadtree with an explicit `stack`, reused across calls to avoid
+/// per-particle allocation. Reads only positions, masses, and the tree, so
+/// concurrent calls for different particles are race-free.
+fn particle_acceleration(
+    nodes: &[BhNode],
+    order: &[u32],
+    particles: &[Particle],
+    i: usize,
+    stack: &mut Vec<u32>,
+) -> (f64, f64) {
     let s2 = SELF_GRAVITY_SOFTENING * SELF_GRAVITY_SOFTENING;
     let theta_sq = BARNES_HUT_THETA * BARNES_HUT_THETA;
-    let mut stack: Vec<u32> = Vec::with_capacity(64);
-    for i in 0..particles.len() {
-        let (px, py) = (particles[i].x, particles[i].y);
-        let (mut ax, mut ay) = (0.0, 0.0);
-        stack.push(0);
-        while let Some(ni) = stack.pop() {
-            let n = &nodes[ni as usize];
-            if n.mass <= 0.0 {
-                continue;
-            }
-            let dx = n.com_x - px;
-            let dy = n.com_y - py;
-            let d2 = dx * dx + dy * dy;
-            let width = n.half * 2.0;
-            if width * width < theta_sq * d2 {
-                // Far field: the whole node as one softened point mass.
-                // Leaves qualify too — passing the opening test puts the
-                // particle at distance > width/θ, beyond the node's √2·width
-                // interior diagonal, so it cannot be among the node's own
-                // particles and no self-force is possible.
-                let softened = d2 + s2;
-                let scale = n.mass / (softened * softened.sqrt());
-                ax += dx * scale;
-                ay += dy * scale;
-                continue;
-            }
-            if n.first_child >= 0 {
-                #[allow(clippy::cast_sign_loss)]
-                let fc = n.first_child as u32;
-                stack.extend_from_slice(&[fc, fc + 1, fc + 2, fc + 3]);
-                continue;
-            }
-            for &j in &order[n.start..n.start + n.len] {
-                if j as usize == i {
-                    continue;
-                }
-                let pj = &particles[j as usize];
-                let dx = pj.x - px;
-                let dy = pj.y - py;
-                let softened = dx * dx + dy * dy + s2;
-                let scale = pj.mass() / (softened * softened.sqrt());
-                ax += dx * scale;
-                ay += dy * scale;
-            }
+    let (px, py) = (particles[i].x, particles[i].y);
+    let (mut ax, mut ay) = (0.0, 0.0);
+    stack.push(0);
+    while let Some(ni) = stack.pop() {
+        let n = &nodes[ni as usize];
+        if n.mass <= 0.0 {
+            continue;
         }
-        let p = &mut particles[i];
-        p.vx += SELF_GRAVITY_G * dt * ax;
-        p.vy += SELF_GRAVITY_G * dt * ay;
+        let dx = n.com_x - px;
+        let dy = n.com_y - py;
+        let d2 = dx * dx + dy * dy;
+        let width = n.half * 2.0;
+        if width * width < theta_sq * d2 {
+            // Far field: the whole node as one softened point mass.
+            // Leaves qualify too — passing the opening test puts the
+            // particle at distance > width/θ, beyond the node's √2·width
+            // interior diagonal, so it cannot be among the node's own
+            // particles and no self-force is possible.
+            let softened = d2 + s2;
+            let scale = n.mass / (softened * softened.sqrt());
+            ax += dx * scale;
+            ay += dy * scale;
+            continue;
+        }
+        if n.first_child >= 0 {
+            #[allow(clippy::cast_sign_loss)]
+            let fc = n.first_child as u32;
+            stack.extend_from_slice(&[fc, fc + 1, fc + 2, fc + 3]);
+            continue;
+        }
+        for &j in &order[n.start..n.start + n.len] {
+            if j as usize == i {
+                continue;
+            }
+            let pj = &particles[j as usize];
+            let dx = pj.x - px;
+            let dy = pj.y - py;
+            let softened = dx * dx + dy * dy + s2;
+            let scale = pj.mass() / (softened * softened.sqrt());
+            ax += dx * scale;
+            ay += dy * scale;
+        }
     }
+    (ax, ay)
 }
 
 /// Move every index satisfying `pred` to the front of `range`, returning
@@ -1233,6 +1272,39 @@ mod tests {
         apply_self_gravity_barnes_hut(&mut particles, 0.01);
         for p in &particles {
             assert!(p.vx.is_finite() && p.vy.is_finite());
+        }
+    }
+
+    #[test]
+    fn barnes_hut_parallel_force_pass_is_deterministic() {
+        // Seeded simulations must replay identically, so the parallel
+        // force pass may not depend on thread scheduling. Run a population
+        // above the parallel threshold through a single-threaded pool and
+        // the default multi-threaded pool: every velocity must match to
+        // the bit. This holds because each particle's accumulation order
+        // is its own tree traversal, never a cross-thread reduction.
+        let mut rng = StdRng::seed_from_u64(23);
+        let particles: Vec<Particle> = (0..(BARNES_HUT_PARALLEL_THRESHOLD + 500))
+            .map(|_| Particle::new_random(&mut rng, 800, 600, RADIUS, 200.0))
+            .collect();
+        let clone = |ps: &[Particle]| -> Vec<Particle> {
+            ps.iter()
+                .map(|p| particle_r(p.x, p.y, p.vx, p.vy, p.radius))
+                .collect()
+        };
+        let mut single = clone(&particles);
+        let mut multi = clone(&particles);
+
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("single-thread pool")
+            .install(|| apply_self_gravity_barnes_hut(&mut single, 0.01));
+        apply_self_gravity_barnes_hut(&mut multi, 0.01);
+
+        for (s, m) in single.iter().zip(&multi) {
+            assert_eq!(s.vx.to_bits(), m.vx.to_bits(), "vx must match exactly");
+            assert_eq!(s.vy.to_bits(), m.vy.to_bits(), "vy must match exactly");
         }
     }
 

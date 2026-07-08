@@ -22,6 +22,7 @@ ab_glyph = "0.2"
 toml = "0.8"
 dirs = "6"
 png = "0.17"
+rayon = "1.12.0"
 
 [lints.clippy]
 # Pedantic is enforced (CI runs clippy with -D warnings), with deliberate
