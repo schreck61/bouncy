@@ -78,7 +78,7 @@ cargo run --release -- --spawn-at-collision
 | `--particle-size <R>` | Particle radius in pixels (0.5-10.0) | 1.5 |
 | `--initial-speed <V>` | Top speed of newly created particles in px/sec (10-2000); they start at 50-100% of it | 600 |
 | `--color-mode <MODE>` | `solid` or `velocity` (hue follows speed) | solid |
-| `--explosion-threshold <N>` | Particle births per second — collision spawns plus fission fragments — that trigger an automatic explosion (0-1000); a population pegged at the density cap for a few seconds also explodes; 0 disables automatic explosions (population is then capped at ~20% window coverage, at most 100,000 particles) | 30 |
+| `--explosion-threshold <N>` | Particle births per second — collision spawns plus fission fragments — that trigger an automatic explosion (0-1000); a population pegged at the density cap for a few seconds also explodes; 0 disables automatic explosions (population is then capped at ~20% window coverage or 16,000 particles, whichever is lower) | 30 |
 | `--bullet-time` | Slow time briefly (bullet time) whenever an explosion ring starts | Off |
 | `--seed <N>` | Seed the random number generator (reproducible starting conditions) | Random |
 | `--verbose` | Print per-second FPS statistics to stdout | Off |

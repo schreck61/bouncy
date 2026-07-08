@@ -23,11 +23,15 @@ use std::time::Instant;
 const PIXELS_PER_PARTICLE: u64 = 375_000;
 /// Particles spawned by a left click.
 const CLICK_BURST_SIZE: usize = 10;
-/// Absolute population ceiling. The effective cap is usually lower: spawning
-/// stops when particles would occupy ~20% of the window area (a jammed,
-/// solid-packed window is neither interesting nor fast). Only reachable with
-/// automatic explosions disabled (--explosion-threshold 0).
-const MAX_PARTICLES: usize = 100_000;
+/// Absolute population ceiling, the flat part of the non-linear cap: the
+/// coverage-based limit is the binding constraint for large particles
+/// (geometry — a jammed, solid-packed window is neither interesting nor
+/// fast), but for small ones it allows populations that are pure noise to
+/// look at and heavy to simulate long before coverage binds. 16k keeps
+/// the benchmarked worst case (a fully packed self-gravitating clump with
+/// every mechanic on) interactive. On a fullscreen window the crossover
+/// between the two regimes lands near particle size 3.
+const MAX_PARTICLES: usize = 16_000;
 /// Floor for the density-based cap so small windows still allow bursts.
 const MIN_PARTICLE_CAP: usize = 1000;
 /// Spawn throttle per frame. In a dense cluster the collision count is
@@ -194,8 +198,10 @@ impl Simulation {
             .min_particles
             .map_or_else(|| calculate_particle_count(width, height), |n| n as usize);
 
-        // Cap the population at ~20% area coverage: one particle per four
-        // diameter-squared tiles of window area.
+        // Cap the population at ~20% area coverage (one particle per four
+        // diameter-squared tiles of window area) or MAX_PARTICLES,
+        // whichever is lower: coverage binds for large particles, the
+        // flat ceiling for small ones.
         let diameter = config.particle_size * 2.0;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let density_cap =
@@ -1326,6 +1332,15 @@ mod tests {
         assert_eq!(s.particle_count(), calculate_particle_count(800, 600));
         // 800*600 / (4 * 3^2) = 13333 for the default radius 1.5.
         assert_eq!(s.max_particles, 13333);
+
+        // Small particles hit the flat ceiling of the non-linear cap, not
+        // the coverage bound (which would allow 120,000 at radius 0.5).
+        let s = sim(&["--particle-size", "0.5"]);
+        assert_eq!(s.max_particles, MAX_PARTICLES);
+
+        // Large particles keep the pure coverage bound: 800*600/(4*10^2).
+        let s = sim(&["--particle-size", "5"]);
+        assert_eq!(s.max_particles, 1200);
 
         let s = sim(&["--min-particles", "30"]);
         assert_eq!(s.particle_count(), 30);
