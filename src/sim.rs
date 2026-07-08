@@ -13,6 +13,7 @@ use crate::physics::{
     apply_self_gravity, collide_with_segments, handle_collisions, has_motion, max_radius, pair_mut,
     substep_count, update_physics,
 };
+use crate::presets::Scene;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
@@ -99,22 +100,7 @@ pub struct StepEvents {
     pub motion_stopped: bool,
 }
 
-/// Whether a gravity well pulls particles inward or pushes them away.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Polarity {
-    Attract,
-    Repel,
-}
-
-impl Polarity {
-    /// Sign applied to the well strength: attraction is positive.
-    pub fn signum(self) -> f64 {
-        match self {
-            Polarity::Attract => 1.0,
-            Polarity::Repel => -1.0,
-        }
-    }
-}
+pub use crate::physics::Polarity;
 
 /// A gravity well: the transient cursor well (held G) passed into each
 /// step, or a persistent pinned well (W key) stored in the simulation.
@@ -160,6 +146,9 @@ pub struct Simulation {
     next_particle_id: ParticleId,
     /// Attractors pinned at startup (--wells); reset restores this layout.
     initial_wells: usize,
+    /// Preset scene geometry (window fractions); placed at creation and
+    /// restored on reset.
+    scene: Scene,
     explosion: Option<Explosion>,
     spawn_times: VecDeque<Instant>,
     collisions: CollisionRecorder,
@@ -217,6 +206,7 @@ impl Simulation {
             segments: Vec::new(),
             next_particle_id: 1,
             initial_wells: config.wells as usize,
+            scene: config.scene.clone(),
             explosion: None,
             spawn_times: VecDeque::new(),
             collisions: CollisionRecorder::new(),
@@ -232,6 +222,7 @@ impl Simulation {
         };
         sim.populate();
         sim.place_initial_wells();
+        sim.place_scene();
         sim
     }
 
@@ -256,6 +247,34 @@ impl Simulation {
                 x: self.center_x + ring * angle.cos(),
                 y: self.center_y + ring * angle.sin(),
                 polarity: Polarity::Attract,
+            });
+        }
+    }
+
+    /// Place the preset scene's geometry, scaling window-fraction
+    /// coordinates to this window. Runs at creation and on reset, after
+    /// the --wells ring; both share the same population caps.
+    fn place_scene(&mut self) {
+        let (w, h) = (f64::from(self.width), f64::from(self.height));
+        for well in &self.scene.wells {
+            if self.pinned_wells.len() >= MAX_PINNED_WELLS {
+                break;
+            }
+            self.pinned_wells.push(Well {
+                x: well.x * w,
+                y: well.y * h,
+                polarity: well.polarity,
+            });
+        }
+        for wall in &self.scene.walls {
+            if self.segments.len() >= MAX_WALL_SEGMENTS {
+                break;
+            }
+            self.segments.push(Segment {
+                x1: wall.x1 * w,
+                y1: wall.y1 * h,
+                x2: wall.x2 * w,
+                y2: wall.y2 * h,
             });
         }
     }
@@ -296,12 +315,14 @@ impl Simulation {
     }
 
     /// Reset to the initial population and clear all transient state,
-    /// restoring the startup well layout and erasing drawn walls.
+    /// restoring the startup layout (--wells ring and preset scene
+    /// geometry); runtime-pinned wells and hand-drawn walls are erased.
     pub fn reset(&mut self) {
         self.populate();
         self.pinned_wells.clear();
         self.place_initial_wells();
         self.segments.clear();
+        self.place_scene();
         self.explosion = None;
         self.spawn_times.clear();
         self.collisions.clear();
@@ -341,6 +362,11 @@ impl Simulation {
     /// of it); also normalizes the velocity color mode.
     pub fn initial_speed(&self) -> f64 {
         self.initial_speed
+    }
+
+    /// Arena size in simulation (logical) pixels.
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.width, self.height)
     }
 
     pub fn stopped(&self) -> bool {
@@ -1598,6 +1624,47 @@ mod tests {
             s.step(0.001, now, None);
         }
         assert!(s.stopped(), "without ambient forces the sim can stop again");
+    }
+
+    #[test]
+    fn preset_scene_geometry_is_placed_scaled_and_survives_reset() {
+        let user = crate::presets::parse(
+            "[board]\n\
+             wells = [{ x = 0.5, y = 0.5, polarity = \"repel\" }]\n\
+             walls = [[0.25, 0.5, 0.75, 0.5]]\n",
+            std::path::Path::new("/test/presets.toml"),
+        )
+        .unwrap();
+        let args: Vec<std::ffi::OsString> = [
+            "bouncy",
+            "--seed",
+            "1",
+            "--min-particles",
+            "2",
+            "--preset",
+            "board",
+        ]
+        .iter()
+        .map(Into::into)
+        .collect();
+        let config = Config::try_resolve_with(&args, Some(&user)).unwrap();
+        let mut s = Simulation::new(&config, 800, 600);
+
+        assert_eq!(s.pinned_wells().len(), 1);
+        let well = s.pinned_wells()[0];
+        assert!((well.x - 400.0).abs() < 1e-9 && (well.y - 300.0).abs() < 1e-9);
+        assert_eq!(well.polarity, Polarity::Repel);
+        assert_eq!(s.wall_segments().len(), 1);
+        let wall = s.wall_segments()[0];
+        assert!((wall.x1 - 200.0).abs() < 1e-9 && (wall.x2 - 600.0).abs() < 1e-9);
+
+        // Runtime additions are transient; the scene survives reset.
+        s.pin_well(100.0, 100.0, Polarity::Attract);
+        s.add_wall_segment(10.0, 10.0, 20.0, 20.0);
+        s.reset();
+        assert_eq!(s.pinned_wells().len(), 1, "scene well restored");
+        assert_eq!(s.wall_segments().len(), 1, "scene wall restored");
+        assert_eq!(s.pinned_wells()[0].polarity, Polarity::Repel);
     }
 
     #[test]

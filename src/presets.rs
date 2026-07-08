@@ -26,6 +26,7 @@
 //! one is a loud error — silently ignoring it would cost users an hour of
 //! wondering why their preset didn't load.
 
+use crate::physics::Polarity;
 use clap::ValueEnum;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -208,14 +209,41 @@ impl Preset {
     }
 }
 
+/// Scene geometry a preset can carry: pinned wells and wall segments in
+/// window-fraction coordinates (0.0-1.0 of the window width/height), so a
+/// scene lays out identically on any screen size.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Scene {
+    pub wells: Vec<SceneWell>,
+    pub walls: Vec<SceneWall>,
+}
+
+/// A pinned gravity well in window-fraction coordinates.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SceneWell {
+    pub x: f64,
+    pub y: f64,
+    pub polarity: Polarity,
+}
+
+/// A wall segment in window-fraction coordinates.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SceneWall {
+    pub x1: f64,
+    pub y1: f64,
+    pub x2: f64,
+    pub y2: f64,
+}
+
 /// One user preset: an optional built-in to inherit from, an optional
-/// description for --list-presets, and the remaining options in
-/// command-line form (`["--gravity", "80", ...]`).
+/// description for --list-presets, the remaining options in command-line
+/// form (`["--gravity", "80", ...]`), and any scene geometry.
 #[derive(Debug)]
 pub struct UserPreset {
     pub base: Option<Preset>,
     pub description: Option<String>,
     pub args: Vec<String>,
+    pub scene: Scene,
 }
 
 /// All user presets from one file, keyed by name.
@@ -298,9 +326,16 @@ pub fn parse(text: &str, path: &Path) -> Result<UserPresets, String> {
         let mut base = None;
         let mut description = None;
         let mut args = Vec::new();
+        let mut scene = Scene::default();
         for (key, value) in entries {
             let key = key.replace('_', "-");
             match key.as_str() {
+                "walls" => scene.walls = parse_scene_walls(&name, &value)?,
+                // `wells` is double-duty: an integer is the --wells ring
+                // count (a CLI option), an array is scene geometry.
+                "wells" if value.is_array() => {
+                    scene.wells = parse_scene_wells(&name, &value)?;
+                }
                 "description" => {
                     let toml::Value::String(text) = value else {
                         return Err(format!("preset '{name}': description must be a string"));
@@ -360,6 +395,7 @@ pub fn parse(text: &str, path: &Path) -> Result<UserPresets, String> {
                 base,
                 description,
                 args,
+                scene,
             },
         );
     }
@@ -368,6 +404,179 @@ pub fn parse(text: &str, path: &Path) -> Result<UserPresets, String> {
         path: path.to_path_buf(),
         presets,
     })
+}
+
+/// A window-fraction coordinate: a number in 0.0..=1.0.
+fn parse_fraction(preset: &str, key: &str, value: &toml::Value) -> Result<f64, String> {
+    let f = match value {
+        toml::Value::Integer(i) => {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                *i as f64
+            }
+        }
+        toml::Value::Float(f) => *f,
+        _ => {
+            return Err(format!(
+                "preset '{preset}': '{key}' coordinates must be numbers"
+            ));
+        }
+    };
+    if !(0.0..=1.0).contains(&f) {
+        return Err(format!(
+            "preset '{preset}': '{key}' coordinates are window fractions and \
+             must be between 0.0 and 1.0 (got {f})"
+        ));
+    }
+    Ok(f)
+}
+
+/// Parse `walls = [[x1, y1, x2, y2], ...]` (window fractions).
+fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>, String> {
+    let toml::Value::Array(entries) = value else {
+        return Err(format!(
+            "preset '{preset}': walls must be an array of [x1, y1, x2, y2] arrays"
+        ));
+    };
+    let mut walls = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let toml::Value::Array(coords) = entry else {
+            return Err(format!(
+                "preset '{preset}': each wall must be an [x1, y1, x2, y2] array"
+            ));
+        };
+        if coords.len() != 4 {
+            return Err(format!(
+                "preset '{preset}': each wall needs exactly 4 coordinates, got {}",
+                coords.len()
+            ));
+        }
+        let mut c = [0.0; 4];
+        for (slot, coord) in c.iter_mut().zip(coords) {
+            *slot = parse_fraction(preset, "walls", coord)?;
+        }
+        walls.push(SceneWall {
+            x1: c[0],
+            y1: c[1],
+            x2: c[2],
+            y2: c[3],
+        });
+    }
+    Ok(walls)
+}
+
+/// Parse `wells = [{ x = 0.5, y = 0.25, polarity = "attract" }, ...]`
+/// (window fractions; polarity defaults to attract).
+fn parse_scene_wells(preset: &str, value: &toml::Value) -> Result<Vec<SceneWell>, String> {
+    let toml::Value::Array(entries) = value else {
+        return Err(format!(
+            "preset '{preset}': wells geometry must be an array of tables"
+        ));
+    };
+    let mut wells = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let toml::Value::Table(table) = entry else {
+            return Err(format!(
+                "preset '{preset}': each well must be a table like \
+                 {{ x = 0.5, y = 0.25, polarity = \"attract\" }}"
+            ));
+        };
+        let coord = |key: &str| -> Result<f64, String> {
+            table.get(key).map_or_else(
+                || Err(format!("preset '{preset}': a well is missing '{key}'")),
+                |v| parse_fraction(preset, "wells", v),
+            )
+        };
+        let polarity = match table.get("polarity").and_then(toml::Value::as_str) {
+            None | Some("attract") => Polarity::Attract,
+            Some("repel") => Polarity::Repel,
+            Some(other) => {
+                return Err(format!(
+                    "preset '{preset}': well polarity must be \"attract\" or \
+                     \"repel\" (got '{other}')"
+                ));
+            }
+        };
+        wells.push(SceneWell {
+            x: coord("x")?,
+            y: coord("y")?,
+            polarity,
+        });
+    }
+    Ok(wells)
+}
+
+/// Serialize a captured scene as a complete `[name]` preset table that
+/// [`parse`] round-trips. Pure (no filesystem), so tests can verify the
+/// round trip.
+pub fn scene_to_toml(
+    name: &str,
+    settings: &[(&str, toml::Value)],
+    wells: &[SceneWell],
+    walls: &[SceneWall],
+) -> String {
+    let mut table = toml::Table::new();
+    for (key, value) in settings {
+        table.insert((*key).to_string(), value.clone());
+    }
+    if !wells.is_empty() {
+        let wells = wells
+            .iter()
+            .map(|w| {
+                let mut t = toml::Table::new();
+                t.insert("x".into(), w.x.into());
+                t.insert("y".into(), w.y.into());
+                let polarity = match w.polarity {
+                    Polarity::Attract => "attract",
+                    Polarity::Repel => "repel",
+                };
+                t.insert("polarity".into(), polarity.into());
+                toml::Value::Table(t)
+            })
+            .collect();
+        table.insert("wells".into(), toml::Value::Array(wells));
+    }
+    if !walls.is_empty() {
+        let walls = walls
+            .iter()
+            .map(|w| toml::Value::Array(vec![w.x1.into(), w.y1.into(), w.x2.into(), w.y2.into()]))
+            .collect();
+        table.insert("walls".into(), toml::Value::Array(walls));
+    }
+    let mut document = toml::Table::new();
+    document.insert(name.to_string(), toml::Value::Table(table));
+    document.to_string()
+}
+
+/// Write a captured scene to a uniquely named preset file in the working
+/// directory, returning its path. The user copies the table into their
+/// presets file (or points --presets-file at it) and runs --preset with
+/// the generated name.
+pub fn export_scene(
+    settings: &[(&str, toml::Value)],
+    wells: &[SceneWell],
+    walls: &[SceneWall],
+) -> Result<std::path::PathBuf, String> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_secs();
+    for n in 0..100 {
+        let suffix = if n == 0 {
+            String::new()
+        } else {
+            format!("-{n}")
+        };
+        let path = std::path::PathBuf::from(format!("bouncy-scene-{secs}{suffix}.toml"));
+        if path.exists() {
+            continue;
+        }
+        let text = scene_to_toml(&format!("scene-{secs}{suffix}"), settings, wells, walls);
+        std::fs::write(&path, text)
+            .map_err(|e| format!("cannot write '{}': {e}", path.display()))?;
+        return Ok(path);
+    }
+    Err("too many scene exports this second".to_string())
 }
 
 /// Print built-in and user presets (--list-presets), including where the
@@ -498,6 +707,82 @@ mod tests {
 
         let err = parse_str("[a]\ndescription = 5\n").unwrap_err();
         assert!(err.contains("description must be a string"), "{err}");
+    }
+
+    #[test]
+    fn scene_geometry_parses_and_wells_stays_double_duty() {
+        let user = parse_str(
+            "[board]\n\
+             wells = [{ x = 0.5, y = 0.25 }, { x = 0.5, y = 0.75, polarity = \"repel\" }]\n\
+             walls = [[0.1, 0.5, 0.4, 0.5], [0.6, 0.5, 0.9, 0.5]]\n",
+        )
+        .unwrap();
+        let scene = &user.presets["board"].scene;
+        assert_eq!(scene.wells.len(), 2);
+        assert_eq!(scene.wells[0].polarity, Polarity::Attract, "default");
+        assert_eq!(scene.wells[1].polarity, Polarity::Repel);
+        assert_eq!(
+            scene.walls[1],
+            SceneWall {
+                x1: 0.6,
+                y1: 0.5,
+                x2: 0.9,
+                y2: 0.5
+            }
+        );
+
+        // An integer `wells` is still the --wells ring count, not geometry.
+        let user = parse_str("[ring]\nwells = 3\n").unwrap();
+        let ring = &user.presets["ring"];
+        assert_eq!(ring.args, ["--wells", "3"]);
+        assert!(ring.scene.wells.is_empty());
+    }
+
+    #[test]
+    fn scene_geometry_is_validated_loudly() {
+        let err = parse_str("[a]\nwalls = [[0.1, 0.2, 0.3]]\n").unwrap_err();
+        assert!(err.contains("exactly 4"), "{err}");
+        let err = parse_str("[a]\nwalls = [[0.1, 0.2, 0.3, 1.5]]\n").unwrap_err();
+        assert!(err.contains("between 0.0 and 1.0"), "{err}");
+        let err = parse_str("[a]\nwells = [{ x = 0.5 }]\n").unwrap_err();
+        assert!(err.contains("missing 'y'"), "{err}");
+        let err = parse_str("[a]\nwells = [{ x = 0.5, y = 0.5, polarity = \"sideways\" }]\n")
+            .unwrap_err();
+        assert!(err.contains("attract"), "{err}");
+    }
+
+    #[test]
+    fn exported_scenes_round_trip_through_the_parser() {
+        let wells = [SceneWell {
+            x: 0.5,
+            y: 0.25,
+            polarity: Polarity::Repel,
+        }];
+        let walls = [SceneWall {
+            x1: 0.1,
+            y1: 0.2,
+            x2: 0.3,
+            y2: 0.4,
+        }];
+        let text = scene_to_toml(
+            "saved",
+            &[
+                ("description", "Exported scene".into()),
+                ("gravity", 40i64.into()),
+                ("trails", true.into()),
+                ("spawn-mode", "off".into()),
+            ],
+            &wells,
+            &walls,
+        );
+
+        let user = parse(&text, Path::new("/test/export.toml")).unwrap();
+        let preset = &user.presets["saved"];
+        assert_eq!(preset.description.as_deref(), Some("Exported scene"));
+        assert!(preset.args.contains(&"--gravity".to_string()));
+        assert!(preset.args.contains(&"--trails".to_string()));
+        assert_eq!(preset.scene.wells, wells);
+        assert_eq!(preset.scene.walls, walls);
     }
 
     #[test]

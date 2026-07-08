@@ -114,6 +114,7 @@ cargo run --release -- --spawn-at-collision
 | `V` (hold + drag) | Draw wall segments that particles bounce off |
 | `Shift+V` | Clear all drawn walls |
 | `O` | Save a screenshot (PNG in the working directory) |
+| `E` | Export settings and scene (wells/walls) as a preset file |
 | Left click | Spawn a burst of particles at the cursor |
 | Right click | Trigger an explosion centered at the cursor (kills every particle the ring reaches, down to a minimum of 2 survivors) |
 
@@ -201,6 +202,22 @@ kaleidoscope = true
 ```
 
 The optional `description` is shown by `--list-presets`, just like the built-in preset blurbs.
+
+Presets can also carry **scene geometry** — pinned wells and wall segments — in window-fraction coordinates (0.0-1.0 of the window width/height), so a scene lays out identically on any screen:
+
+```toml
+[plinko]
+description = "Musical peg board"
+music = true
+gravity = 120
+spawn-mode = "off"
+walls = [[0.2, 0.3, 0.3, 0.35], [0.45, 0.3, 0.55, 0.35], [0.7, 0.3, 0.8, 0.35]]
+wells = [{ x = 0.5, y = 0.9, polarity = "attract" }]
+```
+
+(An integer `wells = 3` is still the `--wells` ring count; an array is geometry. Well `polarity` is `"attract"` or `"repel"`, defaulting to attract.)
+
+The easiest way to author a scene is in the app itself: pin wells with `W`, draw walls with `V`, tune everything with the hotkeys, then press `E` to export the whole thing — settings and geometry — as a ready-made preset file. Copy the table into your presets file (rename it to taste) and it becomes a `--preset` you can share.
 
 The file is looked up in these locations (first match wins), or wherever `--presets-file` points. The XDG-style `~/.config` path is checked first on every platform, since that's where command-line users expect it; `$XDG_CONFIG_HOME` overrides `~/.config` when set:
 

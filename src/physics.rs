@@ -524,6 +524,23 @@ pub fn handle_collisions(
     max_energy
 }
 
+/// Whether a gravity well pulls particles inward or pushes them away.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Polarity {
+    Attract,
+    Repel,
+}
+
+impl Polarity {
+    /// Sign applied to the well strength: attraction is positive.
+    pub fn signum(self) -> f64 {
+        match self {
+            Polarity::Attract => 1.0,
+            Polarity::Repel => -1.0,
+        }
+    }
+}
+
 /// Peak acceleration of the cursor gravity well (pixels/s^2), reached at
 /// roughly `WELL_SOFTENING / sqrt(2)` pixels from the cursor.
 pub const WELL_STRENGTH: f64 = 800.0;

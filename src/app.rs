@@ -12,6 +12,7 @@ use crate::render::{
 };
 use crate::sim::{MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, Simulation, Well};
 use crate::text::{draw_text, draw_text_centered, measure_text};
+use clap::ValueEnum;
 use std::rc::Rc;
 use std::time::Instant;
 use winit::{
@@ -113,6 +114,8 @@ pub enum Command {
     PinWell(Polarity),
     /// Save the next presented frame as a PNG in the working directory.
     Screenshot,
+    /// Export current settings plus wells/walls as a preset file.
+    ExportScene,
 }
 
 /// Convert physical pixels to logical pixels given a scale factor.
@@ -465,7 +468,7 @@ impl App {
                 "G hold: gravity well (Shift+G repels)",
                 "W pin well (Shift+W repel, Shift+R clear)",
                 "V hold+drag: draw walls (Shift+V clears)",
-                "O screenshot",
+                "O screenshot   E export scene",
                 "Click: burst   Right-click: explosion",
                 "H cycle HUD   Space/Esc/Q quit",
             ] {
@@ -659,6 +662,7 @@ impl App {
             KeyCode::KeyF if !repeat => self.apply(Command::ToggleFlow),
             KeyCode::KeyA if !repeat => self.apply(Command::ToggleSelfGravity),
             KeyCode::KeyO if !repeat => self.apply(Command::Screenshot),
+            KeyCode::KeyE if !repeat => self.apply(Command::ExportScene),
             KeyCode::KeyS if !repeat => self.apply(Command::ToggleMusic),
             KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
             KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
@@ -795,6 +799,7 @@ impl App {
                 }
             }),
             Command::Screenshot => self.screenshot_requested = true,
+            Command::ExportScene => self.export_scene(),
             Command::PinWell(polarity) => {
                 let (x, y) = (self.cursor.x, self.cursor.y);
                 self.with_sim(|sim| {
@@ -845,6 +850,90 @@ impl App {
             // Stop the stroke at the cap instead of retrying every motion.
             println!("Wall segment limit reached ({MAX_WALL_SEGMENTS})");
             self.wall_anchor = None;
+        }
+    }
+
+    /// Export the current settings and scene geometry (pinned wells and
+    /// drawn walls, normalized to window fractions) as a preset table the
+    /// user can copy into their presets file. Boolean options are emitted
+    /// only when on: like the command line, presets cannot switch one off.
+    fn export_scene(&mut self) {
+        use crate::presets::{SceneWall, SceneWell, export_scene};
+        let Some(ref sim) = self.sim else {
+            return;
+        };
+        let (w, h) = sim.dimensions();
+        let (wf, hf) = (f64::from(w), f64::from(h));
+        // Four decimals keeps files tidy; a fraction of a pixel at 8K.
+        let frac = |v: f64, span: f64| ((v / span) * 10_000.0).round() / 10_000.0;
+        let wells: Vec<SceneWell> = sim
+            .pinned_wells()
+            .iter()
+            .map(|well| SceneWell {
+                x: frac(well.x, wf),
+                y: frac(well.y, hf),
+                polarity: well.polarity,
+            })
+            .collect();
+        let walls: Vec<SceneWall> = sim
+            .wall_segments()
+            .iter()
+            .map(|seg| SceneWall {
+                x1: frac(seg.x1, wf),
+                y1: frac(seg.y1, hf),
+                x2: frac(seg.x2, wf),
+                y2: frac(seg.y2, hf),
+            })
+            .collect();
+
+        let value_name = |pv: Option<clap::builder::PossibleValue>| {
+            pv.expect("no skipped variants").get_name().to_string()
+        };
+        // Counts are far below i64::MAX.
+        #[allow(clippy::cast_possible_wrap)]
+        let mut settings: Vec<(&str, toml::Value)> = vec![
+            ("description", "Exported scene".into()),
+            ("gravity", i64::from(sim.gravity_percent).into()),
+            ("wall-elasticity", sim.wall_elasticity.into()),
+            ("particle-elasticity", sim.particle_elasticity.into()),
+            (
+                "spawn-mode",
+                value_name(sim.spawn_mode.to_possible_value()).into(),
+            ),
+            (
+                "explosion-threshold",
+                (sim.explosion_threshold as i64).into(),
+            ),
+            ("particle-size", self.config.particle_size.into()),
+            ("initial-speed", self.config.initial_speed.into()),
+            ("min-particles", (sim.base_particle_count() as i64).into()),
+            (
+                "color-mode",
+                value_name(self.color_mode.to_possible_value()).into(),
+            ),
+        ];
+        for (flag, on) in [
+            ("matter", sim.matter),
+            ("flow", sim.flow),
+            ("self-gravity", sim.self_gravity),
+            ("trails", self.trails),
+            ("kaleidoscope", self.kaleidoscope),
+            ("music", self.audio.is_music()),
+            ("mute", self.audio.is_muted()),
+            ("bullet-time", self.bullet_time.enabled),
+        ] {
+            if on {
+                settings.push((flag, true.into()));
+            }
+        }
+
+        match export_scene(&settings, &wells, &walls) {
+            Ok(path) => println!(
+                "Scene exported to '{}' — copy the table into your presets \
+                 file (see --list-presets) or run with --presets-file",
+                path.display()
+            ),
+            Err(e) => eprintln!("Scene export failed: {e}"),
         }
     }
 

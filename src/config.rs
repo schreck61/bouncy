@@ -3,7 +3,7 @@
 
 //! Command line configuration.
 
-use crate::presets::Preset;
+use crate::presets::{Preset, Scene};
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 
 /// Limits for runtime-adjustable parameters, shared between the clap
@@ -181,6 +181,11 @@ pub struct Config {
     /// Print per-second FPS statistics to stdout
     #[arg(long)]
     pub verbose: bool,
+
+    /// Scene geometry from a user preset (walls/wells keys); not a CLI
+    /// argument — populated during preset resolution.
+    #[arg(skip)]
+    pub scene: Scene,
 }
 
 impl Config {
@@ -340,6 +345,7 @@ impl Config {
                 user.path.display()
             ))
         })?;
+        config.scene = entry.scene.clone();
         config.preset = Some(name);
         Ok(config)
     }
@@ -395,6 +401,10 @@ pub const CONTROLS: &[(&str, &str)] = &[
     ),
     ("Shift+V", "Clear all drawn walls"),
     ("O", "Save a screenshot (PNG in the working directory)"),
+    (
+        "E",
+        "Export settings and scene (wells/walls) as a preset file",
+    ),
     ("Left click", "Spawn a burst of particles at the cursor"),
     ("Right click", "Trigger an explosion at the cursor"),
 ];
