@@ -589,6 +589,17 @@ impl Simulation {
 
         let gravity_multiplier = f64::from(self.gravity_percent) / 100.0;
         self.collisions.clear();
+
+        // Self-gravity integrates once per frame, not per substep: the
+        // collective field changes on screen-crossing timescales, far
+        // slower than the collision-scale resolution substeps exist for,
+        // and the all-pairs field is by far the costliest force term.
+        // Applied before the substep count so the kick it delivers is
+        // included in the tunneling-prevention speed estimate.
+        if self.self_gravity {
+            apply_self_gravity(&mut self.particles, dt);
+        }
+
         let substeps = substep_count(&self.particles, dt);
         let sub_dt = dt / f64::from(substeps);
 
@@ -611,9 +622,6 @@ impl Simulation {
                     w.polarity.signum() * PINNED_WELL_STRENGTH,
                     sub_dt,
                 );
-            }
-            if self.self_gravity {
-                apply_self_gravity(&mut self.particles, sub_dt);
             }
             if self.flow {
                 apply_flow(&mut self.particles, self.sim_time, sub_dt);
@@ -1016,6 +1024,8 @@ impl Simulation {
 mod tests {
     use super::*;
     use clap::Parser;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
     use std::time::Duration;
 
     /// Build a Config from CLI-style args (always sized 800x600, seeded).
@@ -1057,6 +1067,63 @@ mod tests {
         sim.particles[1].x = x + 2.0;
         sim.particles[1].y = y;
         sim.particles[1].vx = -100.0;
+    }
+
+    /// Full-step timing at the scale of the pathological exported scene:
+    /// 5,245 particles, self-gravity, matter, two stacked center wells.
+    /// Not a correctness test — run manually:
+    /// `cargo test --release bench_pathological_scene -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark"]
+    fn bench_pathological_scene_frame_time() {
+        // Matter itself is cheap; the scene's cost is self-gravity plus
+        // clump collisions at a 5,245-particle population. Matter and
+        // spawning churn the population (fusion deflates it, spawns grow
+        // it), so pin the count: no matter, spawn cap at the target.
+        let mut s = sim(&[
+            "--min-particles",
+            "100",
+            "--self-gravity",
+            "--particle-size",
+            "1.5",
+            "--initial-speed",
+            "600",
+        ]);
+        assert!(s.pin_well(0.4936 * 800.0, 0.5286 * 600.0, Polarity::Attract));
+        assert!(s.pin_well(0.5 * 800.0, 0.5286 * 600.0, Polarity::Attract));
+
+        // The real scene reached 5,245 particles through matter spawning;
+        // the CLI caps --min-particles at 100, so grow the population by
+        // hand the same way handle_spawning does.
+        let mut rng = StdRng::seed_from_u64(99);
+        while s.particle_count() < 5245 {
+            let p = Particle::new_random(&mut rng, 800, 600, 1.5, 600.0);
+            let p = s.stamp(p);
+            s.particles.push(p);
+        }
+        s.max_particles = 5245;
+
+        // Let the wells and self-gravity pull the population into the dense
+        // clump regime before measuring.
+        let mut now = Instant::now();
+        for _ in 0..30 {
+            now += Duration::from_millis(50);
+            s.step(0.05, now, None);
+        }
+
+        let frames: u32 = 30;
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            now += Duration::from_millis(50);
+            s.step(0.05, now, None);
+        }
+        let per_frame = t.elapsed() / frames;
+        let fps = 1.0 / per_frame.as_secs_f64();
+        println!(
+            "scene-1783523659 regime: {per_frame:?}/frame ({fps:.1} FPS ceiling), \
+             {} particles",
+            s.particle_count()
+        );
     }
 
     #[test]
