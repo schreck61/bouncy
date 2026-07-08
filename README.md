@@ -78,7 +78,7 @@ cargo run --release -- --spawn-at-collision
 | `--particle-size <R>` | Particle radius in pixels (0.5-10.0) | 1.5 |
 | `--initial-speed <V>` | Top speed of newly created particles in px/sec (10-2000); they start at 50-100% of it | 600 |
 | `--color-mode <MODE>` | `solid` or `velocity` (hue follows speed) | solid |
-| `--explosion-threshold <N>` | Spawn pressure per second — spawn-eligible collisions plus fission demand — that triggers an automatic explosion (0-1000); 0 disables automatic explosions (population is then capped at ~20% window coverage, at most 100,000 particles) | 30 |
+| `--explosion-threshold <N>` | Particle births per second — collision spawns plus fission fragments — that trigger an automatic explosion (0-1000); a population pegged at the density cap for a few seconds also explodes; 0 disables automatic explosions (population is then capped at ~20% window coverage, at most 100,000 particles) | 30 |
 | `--bullet-time` | Slow time briefly (bullet time) whenever an explosion ring starts | Off |
 | `--seed <N>` | Seed the random number generator (reproducible starting conditions) | Random |
 | `--verbose` | Print per-second FPS statistics to stdout | Off |
@@ -243,7 +243,7 @@ Each collision between particles spawns a new particle. By default, new particle
 
 ### Explosion Trigger
 
-The simulation tracks *spawn pressure* — spawn-eligible collisions plus matter-mode fission demand — over a 1-second sliding window. Pressure counts every collision that *would* produce a birth, whether or not the birth actually fits: blocked clearance (say, a gravity well holding a crowd on the spawn point) or a population pegged at the density cap cannot silence the trigger, so maximum congestion still ends in a bang. When the rate exceeds the threshold (default 30 per second), an explosion is triggered:
+The simulation tracks the particle birth rate — collision spawns plus matter-mode fission fragments — over a 1-second sliding window. When this rate exceeds the threshold (default 30 births per second), an explosion is triggered. A second, independent valve covers the case the birth rate cannot see: a population pegged at the density cap stops producing births entirely (spawning halts at the cap), so once it has sat there continuously for a few seconds, the explosion fires anyway — maximum congestion ends in a bang rather than gridlock. Either way:
 
 1. An expanding ring emanates from the screen center (or from the collision hotspot in `--spawn-at-collision` mode, or from the cursor on right click)
 2. 99% of particles are marked for elimination

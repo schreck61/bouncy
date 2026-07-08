@@ -34,12 +34,17 @@ const MIN_PARTICLE_CAP: usize = 1000;
 /// quadratic in cluster size, so unthrottled spawning can multiply the
 /// population by orders of magnitude in a single frame.
 const MAX_SPAWNS_PER_FRAME: usize = 200;
-/// Ceiling on the spawn-pressure window deque. Pressure counts every
-/// spawn-eligible collision — a dense clump can produce thousands per
-/// frame — but the explosion threshold tops out at 1,000, so entries past
-/// this cap could never change a decision; they would only grow the deque
-/// without bound. The HUD rate display saturates here.
-const SPAWN_WINDOW_CAP: usize = 1200;
+/// Ceiling on spawn *attempts* per frame (clearance probes, successful or
+/// not). A packed clump yields tens of thousands of collision sites whose
+/// clearance all fails; probing each one made grid queries the hottest
+/// path at ~24k particles. Twice the spawn cap leaves generous headroom
+/// for scenes where spawning actually succeeds.
+const MAX_SPAWN_ATTEMPTS_PER_FRAME: usize = 2 * MAX_SPAWNS_PER_FRAME;
+/// Seconds a population must sit pegged at the density cap before the
+/// saturation valve fires an explosion. Long enough that brushing the cap
+/// during normal growth doesn't blast; short enough that a genuinely
+/// gridlocked arena visibly relieves itself.
+const SATURATION_EXPLOSION_SECS: f64 = 3.0;
 /// Random offset applied to collision-point spawns so new particles never
 /// stack at an identical position (identical positions defeat both collision
 /// separation and the spatial grid).
@@ -159,6 +164,9 @@ pub struct Simulation {
     scene: Scene,
     explosion: Option<Explosion>,
     spawn_times: VecDeque<Instant>,
+    /// When the population last became pegged at `max_particles`, for the
+    /// saturation valve; `None` whenever it is below the cap.
+    saturated_since: Option<Instant>,
     collisions: CollisionRecorder,
     grid: SpatialGrid,
     rng: StdRng,
@@ -217,6 +225,7 @@ impl Simulation {
             scene: config.scene.clone(),
             explosion: None,
             spawn_times: VecDeque::new(),
+            saturated_since: None,
             collisions: CollisionRecorder::new(),
             grid: SpatialGrid::new(),
             rng,
@@ -333,6 +342,7 @@ impl Simulation {
         self.place_scene();
         self.explosion = None;
         self.spawn_times.clear();
+        self.saturated_since = None;
         self.collisions.clear();
         self.stopped = false;
         self.frames_without_motion = 0;
@@ -348,11 +358,10 @@ impl Simulation {
         self.particles.len()
     }
 
-    /// Spawn-pressure events in the sliding window: spawn-eligible
-    /// collisions plus fission demand over the last second, counted
-    /// whether or not the births fit (saturates at `SPAWN_WINDOW_CAP`).
-    /// This is the rate the explosion threshold is compared against.
-    pub fn spawn_pressure(&self) -> usize {
+    /// Births in the sliding window — collision spawns plus fission
+    /// fragments over the last second. This is the rate the explosion
+    /// threshold is compared against.
+    pub fn birth_rate(&self) -> usize {
         self.spawn_times.len()
     }
 
@@ -704,10 +713,10 @@ impl Simulation {
     /// apart perpendicular to the impact. Each particle takes part in at
     /// most one matter event per step. Returns true if anything changed.
     ///
-    /// Fission demand is recorded in the pressure window (`spawn_times`),
+    /// Fission fragments are recorded in the birth window (`spawn_times`),
     /// so runaway fission chains trip the explosion threshold just like
-    /// runaway collision spawning — the threshold measures spawn pressure
-    /// per second, whatever its mechanism.
+    /// runaway collision spawning — the threshold measures births per
+    /// second, whatever their mechanism.
     fn process_matter(&mut self, now: Instant) -> bool {
         let min_r = self.base_radius * MIN_RADIUS_FACTOR;
         let max_r = self.base_radius * MAX_RADIUS_FACTOR;
@@ -763,16 +772,7 @@ impl Simulation {
                 let kick = FISSION_KICK_FRACTION * site.energy;
                 for idx in [i, j] {
                     let frag_r = self.particles[idx].radius / std::f64::consts::SQRT_2;
-                    if frag_r < min_r {
-                        continue;
-                    }
-                    // Fission demand feeds the explosion window even when
-                    // the population cap blocks the fragment itself — see
-                    // the spawn-pressure counting in `handle_spawning`.
-                    if self.spawn_times.len() < SPAWN_WINDOW_CAP {
-                        self.spawn_times.push_back(now);
-                    }
-                    if self.particles.len() >= self.max_particles {
+                    if frag_r < min_r || self.particles.len() >= self.max_particles {
                         continue;
                     }
                     let offset = frag_r + 0.5;
@@ -794,6 +794,7 @@ impl Simulation {
                     };
                     let twin = self.stamp(twin);
                     self.particles.push(twin);
+                    self.spawn_times.push_back(now);
                     touched.insert(idx);
                     changed = true;
                 }
@@ -838,31 +839,38 @@ impl Simulation {
             }
         }
 
+        // Saturation valve: a population pegged at the density cap stops
+        // producing births (spawning halts), so the birth-rate trigger is
+        // blind to exactly the congestion it exists to relieve. Sustained
+        // time at the cap is itself the signal: once the population has
+        // been pegged continuously long enough, explode. Gated on the same
+        // conditions as the rate trigger — explosions enabled, spawning on,
+        // none already running.
+        if self.particles.len() < self.max_particles {
+            self.saturated_since = None;
+        } else if self.explosion_threshold > 0
+            && self.spawn_mode != SpawnMode::Off
+            && self.explosion.is_none()
+        {
+            let since = *self.saturated_since.get_or_insert(now);
+            if now.duration_since(since).as_secs_f64() >= SATURATION_EXPLOSION_SECS {
+                self.saturated_since = None;
+                let (ex, ey) = if self.spawn_mode == SpawnMode::Collision {
+                    self.collision_centroid()
+                        .unwrap_or((self.center_x, self.center_y))
+                } else {
+                    (self.center_x, self.center_y)
+                };
+                self.trigger_explosion(ex, ey, EXPLOSION_KILL_RATIO, self.base_particle_count);
+                return true;
+            }
+        }
+
         if self.collisions.is_empty()
             || self.explosion.is_some()
             || self.spawn_mode == SpawnMode::Off
         {
             return false;
-        }
-
-        // Count spawn pressure: every collision that WOULD produce a birth
-        // feeds the window, whether or not the birth fits. Clearance
-        // failures and the population cap must not silence the signal — a
-        // well parked on the spawn point (permanently occupying the
-        // clearance area) or a population pegged at the density cap would
-        // otherwise suppress the explosion exactly when pressure peaks.
-        // Fusion consumes instead of creating and fission counts its
-        // fragments in `process_matter`, so with matter on only the
-        // spawn band counts here.
-        for i in 0..self.collisions.sites().len() {
-            if self.spawn_times.len() >= SPAWN_WINDOW_CAP {
-                break;
-            }
-            let energy = self.collisions.sites()[i].energy;
-            if self.matter && (energy <= FUSION_MAX_ENERGY || energy >= FISSION_MIN_ENERGY) {
-                continue;
-            }
-            self.spawn_times.push_back(now);
         }
 
         // Explode instead of spawning once the window fills up.
@@ -886,8 +894,20 @@ impl Simulation {
         let first_new = self.particles.len();
         let max_r = max_radius(&self.particles);
         let mut spawned = 0;
+        let mut attempts = 0;
         for i in 0..self.collisions.sites().len() {
-            if spawned >= MAX_SPAWNS_PER_FRAME || self.particles.len() >= self.max_particles {
+            // The attempt budget bounds the frame's clearance queries, not
+            // just its successes: a packed clump produces tens of thousands
+            // of collision sites whose clearance checks all fail, and
+            // probing every one of them each frame made the grid queries
+            // the single hottest path at ~24k particles (profiled at ~600ms
+            // per frame). Open scenes hit MAX_SPAWNS_PER_FRAME well within
+            // the budget, so spawn behavior is unchanged where spawning
+            // actually works.
+            if spawned >= MAX_SPAWNS_PER_FRAME
+                || attempts >= MAX_SPAWN_ATTEMPTS_PER_FRAME
+                || self.particles.len() >= self.max_particles
+            {
                 break;
             }
             let site = self.collisions.sites()[i];
@@ -898,6 +918,7 @@ impl Simulation {
             {
                 continue;
             }
+            attempts += 1;
             let spawn = if self.spawn_mode == SpawnMode::Collision {
                 // Eject the newborn outward, away from the collision.
                 self.free_position_beside(site, first_new, max_r)
@@ -920,6 +941,7 @@ impl Simulation {
                 let p = Particle::new_moving(&mut self.rng, x, y, vx, vy, self.base_radius);
                 let p = self.stamp(p);
                 self.particles.push(p);
+                self.spawn_times.push_back(now);
                 spawned += 1;
             }
         }
@@ -1214,6 +1236,90 @@ mod tests {
         );
     }
 
+    /// Frame timing for the field-report regime: matter run merged pieces,
+    /// then matter off and unbounded spawning grew ~24k particles that
+    /// self-gravity collapsed into one packed corner clump (elasticity
+    /// 0.7/0.4, gravity 0, spawn at collisions, explosions off). Run
+    /// manually:
+    /// `cargo test --release bench_corner_clump -- --ignored --nocapture`
+    #[test]
+    #[ignore = "manual benchmark"]
+    fn bench_corner_clump_frame_time() {
+        let mut s = sim(&[
+            "--min-particles",
+            "100",
+            "--self-gravity",
+            "--spawn-mode",
+            "collision",
+            "--explosion-threshold",
+            "0",
+            "--gravity",
+            "0",
+            "--particle-elasticity",
+            "0.7",
+            "--wall-elasticity",
+            "0.4",
+        ]);
+        s.width = 1728;
+        s.height = 1117;
+        s.max_particles = 30000;
+        let mut rng = StdRng::seed_from_u64(3);
+        // Packed corner clump: ~21k small particles at touching distance
+        // around (1500, 900), plus a handful of surviving merged giants
+        // and scattered dust.
+        while s.particle_count() < 21000 {
+            let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+            let r: f64 = 260.0 * rng.random_range(0.0f64..1.0).sqrt();
+            let mut p = Particle::new_moving(
+                &mut s.rng,
+                (1500.0 + r * angle.cos()).clamp(2.0, 1726.0),
+                (900.0 + r * angle.sin()).clamp(2.0, 1115.0),
+                rng.random_range(-100.0..100.0),
+                rng.random_range(-100.0..100.0),
+                1.5,
+            );
+            p.color = [200, 200, 200, 255];
+            let p = s.stamp(p);
+            s.particles.push(p);
+        }
+        for k in 0..30 {
+            let mut p = Particle::new_moving(
+                &mut s.rng,
+                1350.0 + f64::from(k % 6) * 60.0,
+                780.0 + f64::from(k / 6) * 60.0,
+                0.0,
+                0.0,
+                rng.random_range(20.0..40.0),
+            );
+            p.color = [220, 220, 220, 255];
+            let p = s.stamp(p);
+            s.particles.push(p);
+        }
+        while s.particle_count() < 23800 {
+            let p = Particle::new_random(&mut s.rng, 1728, 1117, 1.5, 200.0);
+            let p = s.stamp(p);
+            s.particles.push(p);
+        }
+
+        let mut now = Instant::now();
+        for _ in 0..10 {
+            now += Duration::from_millis(50);
+            s.step(0.05, now, None);
+        }
+        let frames: u32 = 10;
+        let t = std::time::Instant::now();
+        for _ in 0..frames {
+            now += Duration::from_millis(50);
+            s.step(0.05, now, None);
+        }
+        let per_frame = t.elapsed() / frames;
+        let fps = 1.0 / per_frame.as_secs_f64();
+        println!(
+            "corner-clump regime: {per_frame:?}/frame ({fps:.1} FPS ceiling), {} particles",
+            s.particle_count()
+        );
+    }
+
     #[test]
     fn new_populates_base_count_and_density_cap() {
         let s = sim(&[]);
@@ -1376,11 +1482,8 @@ mod tests {
         let mut s = sim(&["--min-particles", "30", "--explosion-threshold", "5"]);
         arm_collision(&mut s, 200.0, 300.0);
         let now = Instant::now();
-        // 3 of 5 window slots used: this frame's one collision brings the
-        // pressure to 4, still below the threshold — spawn, don't explode.
-        // (Pressure is counted before the threshold check, so the event
-        // that fills the window triggers in the same frame it happens.)
-        for _ in 0..3 {
+        // 4 of 5 window slots used: the next spawn must not explode.
+        for _ in 0..4 {
             s.spawn_times.push_back(now);
         }
 
@@ -1388,7 +1491,7 @@ mod tests {
         assert!(!events.explosion_started);
         assert!(s.explosion().is_none());
         assert_eq!(s.particle_count(), 31);
-        assert_eq!(s.spawn_times.len(), 4);
+        assert_eq!(s.spawn_times.len(), 5);
     }
 
     #[test]
@@ -1463,60 +1566,60 @@ mod tests {
             "no particle may materialize when every position is occupied"
         );
         assert!(
-            !s.spawn_times.is_empty(),
-            "blocked births still count as spawn pressure"
+            s.spawn_times.is_empty(),
+            "blocked births are not births: the window counts only real spawns"
         );
     }
 
     #[test]
-    fn spawn_pressure_fills_and_explodes_at_the_population_cap() {
+    fn sustained_saturation_at_the_cap_triggers_an_explosion() {
         // Regression for the cap catch-22: a population pegged at
-        // max_particles produces no births, but the pressure of
-        // spawn-eligible collisions must still fill the explosion window —
-        // otherwise the density cap permanently disables the very valve
-        // that would relieve it.
+        // max_particles produces no births, so the birth-rate trigger is
+        // blind — the saturation valve must fire after the population has
+        // been pegged continuously for SATURATION_EXPLOSION_SECS.
         let mut s = sim(&["--min-particles", "10", "--explosion-threshold", "5"]);
         s.max_particles = s.particle_count(); // no birth can ever fit
         let before = s.particle_count();
         let mut now = Instant::now();
-        let mut exploded = false;
-        for _ in 0..10 {
+        let mut exploded_after = None;
+        for frame in 0..80 {
             arm_collision(&mut s, 400.0, 300.0);
-            now += Duration::from_millis(10);
-            if s.step(0.01, now, None).explosion_started {
-                exploded = true;
+            now += Duration::from_millis(50);
+            if s.step(0.05, now, None).explosion_started {
+                exploded_after = Some(frame);
                 break;
             }
         }
+        let frame = exploded_after.expect("saturation valve must fire");
+        // 3 seconds at 50ms per frame is 60 frames; allow the off-by-one.
         assert!(
-            exploded,
-            "pressure must trip the threshold with zero births"
+            (59..=61).contains(&frame),
+            "valve fires after the saturation delay, not immediately: frame {frame}"
         );
         assert_eq!(s.particle_count(), before, "no births at the cap");
     }
 
     #[test]
-    fn fission_demand_counts_toward_pressure_at_the_population_cap() {
-        // Matter-mode counterpart: fragments blocked by the cap still
-        // register their demand in the pressure window.
-        let mut s = sim(&["--min-particles", "2", "--matter", "--particle-size", "4"]);
+    fn dipping_below_the_cap_resets_the_saturation_clock() {
+        let mut s = sim(&["--min-particles", "10", "--explosion-threshold", "5"]);
         s.max_particles = s.particle_count();
-        freeze(&mut s);
-        // Head-on at fission energy: relative normal speed 800 > 700.
-        s.particles[0].x = 396.0;
-        s.particles[0].y = 300.0;
-        s.particles[0].vx = 400.0;
-        s.particles[1].x = 404.0;
-        s.particles[1].y = 300.0;
-        s.particles[1].vx = -400.0;
-
-        let before = s.particle_count();
-        s.step(0.005, Instant::now(), None);
-        assert_eq!(s.particle_count(), before, "cap blocks the fragments");
-        assert!(
-            !s.spawn_times.is_empty(),
-            "blocked fission fragments still count as spawn pressure"
-        );
+        let mut now = Instant::now();
+        for frame in 0..100 {
+            now += Duration::from_millis(50);
+            if frame % 40 == 20 {
+                // Fall below the cap briefly (no collision armed, so
+                // nothing spawns into the gap): the clock must restart.
+                let p = s.particles.pop().expect("population is non-empty");
+                assert!(!s.step(0.05, now, None).explosion_started);
+                s.particles.push(p);
+            } else {
+                arm_collision(&mut s, 400.0, 300.0);
+                assert!(
+                    !s.step(0.05, now, None).explosion_started,
+                    "interrupted saturation must not fire (frame {frame})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2024,10 +2127,7 @@ mod tests {
         let events = s.step(0.01, Instant::now(), None);
         assert!(events.max_collision_energy > 0.0, "collision still happens");
         assert_eq!(s.particle_count(), 2, "no spawn inside the wall fence");
-        assert!(
-            !s.spawn_times.is_empty(),
-            "the blocked birth still counts as spawn pressure"
-        );
+        assert!(s.spawn_times.is_empty());
     }
 
     #[test]
