@@ -116,6 +116,9 @@ pub enum Command {
     Screenshot,
     /// Export current settings plus wells/walls as a preset file.
     ExportScene,
+    /// Launch a comet from the far edge toward the cursor (J or middle
+    /// click).
+    LaunchComet,
 }
 
 /// Convert physical pixels to logical pixels given a scale factor.
@@ -468,7 +471,7 @@ impl App {
                 "G hold: gravity well (Shift+G repels)",
                 "W pin well (Shift+W repel, Shift+R clear)",
                 "V hold+drag: draw walls (Shift+V clears)",
-                "O screenshot   E export scene",
+                "J comet   O screenshot   E export scene",
                 "Click: burst   Middle: comet   Right-click: explosion",
                 "H cycle HUD   Space/Esc/Q quit",
             ] {
@@ -663,6 +666,7 @@ impl App {
             KeyCode::KeyA if !repeat => self.apply(Command::ToggleSelfGravity),
             KeyCode::KeyO if !repeat => self.apply(Command::Screenshot),
             KeyCode::KeyE if !repeat => self.apply(Command::ExportScene),
+            KeyCode::KeyJ if !repeat => self.apply(Command::LaunchComet),
             KeyCode::KeyS if !repeat => self.apply(Command::ToggleMusic),
             KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
             KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
@@ -800,6 +804,13 @@ impl App {
             }),
             Command::Screenshot => self.screenshot_requested = true,
             Command::ExportScene => self.export_scene(),
+            Command::LaunchComet => {
+                let (x, y) = (self.cursor.x, self.cursor.y);
+                self.with_sim(|sim| {
+                    sim.launch_comet(x, y);
+                    println!("Comet inbound");
+                });
+            }
             Command::PinWell(polarity) => {
                 let (x, y) = (self.cursor.x, self.cursor.y);
                 self.with_sim(|sim| {
@@ -939,15 +950,17 @@ impl App {
 
     /// Handle a mouse button press at the current cursor position.
     fn handle_mouse(&mut self, button: MouseButton) {
+        if button == MouseButton::Middle {
+            // Same command the J key issues: one code path for comets.
+            self.apply(Command::LaunchComet);
+            return;
+        }
         let (x, y) = (self.cursor.x, self.cursor.y);
         let Some(ref mut sim) = self.sim else {
             return;
         };
         if button == MouseButton::Left {
             sim.spawn_burst(x, y);
-        } else if button == MouseButton::Middle {
-            sim.launch_comet(x, y);
-            println!("Comet inbound");
         } else if button == MouseButton::Right && sim.trigger_manual_explosion(x, y) {
             println!(
                 "Explosion at cursor; will kill {} of {} particles",
@@ -1365,6 +1378,14 @@ mod tests {
 
         app.apply(Command::ToggleFlow);
         assert!(app.sim.as_ref().unwrap().flow);
+
+        let before = app.sim.as_ref().unwrap().particle_count();
+        app.apply(Command::LaunchComet);
+        assert_eq!(
+            app.sim.as_ref().unwrap().particle_count(),
+            before + 1,
+            "J launches a comet"
+        );
         app.apply(Command::ToggleSelfGravity);
         assert!(app.sim.as_ref().unwrap().self_gravity);
         app.apply(Command::Reset);
