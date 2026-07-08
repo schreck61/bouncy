@@ -248,7 +248,7 @@ The simulation tracks the particle birth rate — collision spawns plus matter-m
 1. An expanding ring emanates from the screen center (or from the collision hotspot in `--spawn-at-collision` mode, or from the cursor on right click)
 2. 99% of particles are marked for elimination
 3. Particles are killed when the ring reaches them
-4. A minimum number of particles survive based on screen size
+4. A minimum number of particles survive: the base count from screen size, or `--min-particles` if set
 
 With `--bullet-time`, every explosion ring (automatic or right-click) also triggers a moment of bullet time: the simulation runs at 0.1x the current time scale for the first second (wall-clock), then ramps back up over 0.4s. It's pure presentation — physics is unchanged, just stepped with a smaller dt. The `fireworks` and `mandala` presets enable it.
 
@@ -291,6 +291,7 @@ Key constants can be modified in the source:
 ```rust
 // src/physics.rs
 const GRAVITY: f64 = 100.0;
+const MAX_SPEED: f64 = 20_000.0;             // Terminal velocity (px/s)
 const MOTION_VELOCITY_THRESHOLD: f64 = 1.0;  // Minimum velocity to be "moving"
 const MOTION_STOPPED_FRAMES: u32 = 60;       // ~1 second at 60fps
 
@@ -300,6 +301,8 @@ const EXPLOSION_KILL_RATIO: f64 = 0.99;
 // src/sim.rs
 const PIXELS_PER_PARTICLE: u64 = 375_000;
 const CLICK_BURST_SIZE: usize = 10;
+const MAX_PARTICLES: usize = 12_000;         // Population ceiling (small sizes)
+const SATURATION_EXPLOSION_SECS: f64 = 3.0;  // Time at the cap before the valve fires
 
 // src/audio.rs
 const PING_MIN_FREQ: f32 = 300.0;
