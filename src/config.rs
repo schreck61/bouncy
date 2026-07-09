@@ -37,6 +37,7 @@ pub enum SpawnMode {
 
 impl SpawnMode {
     /// Cycle for the B key: center -> collision -> off.
+    #[must_use]
     pub fn next(self) -> Self {
         match self {
             SpawnMode::Center => SpawnMode::Collision,
@@ -241,6 +242,7 @@ impl Config {
 
     /// Parse the process command line, then overlay the chosen preset onto
     /// every option the user did not set explicitly.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn resolve() -> Self {
         match Self::try_resolve_from(std::env::args()) {
             Ok(config) => config,
@@ -250,6 +252,7 @@ impl Config {
 
     /// Testable core of [`Config::resolve`]: parses the arguments and, when
     /// the chosen preset is not a built-in, loads the user presets file.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn try_resolve_from<I, T>(itr: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
@@ -307,10 +310,14 @@ impl Config {
 
         let err = |msg: String| Self::command().error(clap::error::ErrorKind::ValueValidation, msg);
         let Some(user) = user else {
+            #[cfg(not(target_arch = "wasm32"))]
             let looked: Vec<String> = crate::presets::default_paths()
                 .iter()
                 .map(|p| format!("'{}'", p.display()))
                 .collect();
+            // No filesystem on the web: there is nowhere to have looked.
+            #[cfg(target_arch = "wasm32")]
+            let looked: Vec<String> = Vec::new();
             let looked = if looked.is_empty() {
                 String::new()
             } else {
@@ -447,6 +454,67 @@ fn parse_particle_size(s: &str) -> Result<f64, String> {
 
 fn parse_initial_speed(s: &str) -> Result<f64, String> {
     parse_range_f64(s, "initial speed", 10.0, 2000.0)
+}
+
+/// Convert a URL query string into the CLI argument vector, so the web
+/// demo's `?preset=accretion&gravity=50&matter` resolves through the
+/// exact same parser, range checks, and error messages as the command
+/// line. Rules: `key=value` becomes `--key value`; a value-less key,
+/// `=`, `=true`, or `=1` becomes the bare flag `--key`; `=false` or
+/// `=0` drops the key entirely (the CLI cannot switch booleans off
+/// either). Percent-encoding and `+`-for-space are decoded.
+pub fn query_to_args(query: &str) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec!["bouncy".into()];
+    for pair in query
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|s| !s.is_empty())
+    {
+        let (key, value) = pair
+            .split_once('=')
+            .map_or((pair, None), |(k, v)| (k, Some(v)));
+        let key = percent_decode(key);
+        let value = value.map(percent_decode);
+        match value.as_deref() {
+            Some("false" | "0") => {}
+            None | Some("" | "true" | "1") => args.push(format!("--{key}").into()),
+            Some(v) => {
+                args.push(format!("--{key}").into());
+                args.push(v.into());
+            }
+        }
+    }
+    args
+}
+
+/// Minimal percent-decoding for query components: `+` means space and
+/// `%XX` is a hex-encoded byte. Invalid escapes pass through verbatim
+/// (the CLI parser will produce its usual error for garbage values).
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                // Slice bytes, not the str: a multibyte char after '%'
+                // must not panic mid-character.
+                if let Some(byte) = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+            }
+            b => out.push(b),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 #[cfg(test)]

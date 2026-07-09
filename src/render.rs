@@ -9,8 +9,11 @@ use crate::config::ColorMode;
 use crate::explosion::{EXPLOSION_RING_WIDTH, Explosion};
 use crate::physics::{Particle, Segment};
 use crate::sim::{Polarity, Well};
+#[cfg(not(target_arch = "wasm32"))]
 use ouroboros::self_referencing;
+#[cfg(not(target_arch = "wasm32"))]
 use pixels::{Pixels, SurfaceTexture};
+#[cfg(not(target_arch = "wasm32"))]
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use winit::window::Window;
@@ -270,6 +273,7 @@ pub fn render_explosion(frame: &mut [u8], exp: &Explosion, width: u32, height: u
 /// Write an RGBA frame to `path` as an 8-bit RGB PNG. The alpha channel
 /// is dropped: trails fade it below 255, which viewers would render as
 /// transparency instead of the black the simulation shows.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn write_png(
     path: &std::path::Path,
     frame: &[u8],
@@ -294,6 +298,7 @@ pub fn write_png(
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// GPU render context using ouroboros for safe self-referential struct.
 /// Pixels borrows from Window, so they must be in the same struct.
 /// Uses Rc<Window> to allow sharing the window with fallback logic.
@@ -307,6 +312,7 @@ pub struct GpuRenderContext {
     pixels: Pixels<'this>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// CPU render context using softbuffer (no self-reference needed).
 pub struct CpuRenderContext {
     window: Rc<Window>,
@@ -321,12 +327,14 @@ pub struct CpuRenderContext {
     y_map: Vec<usize>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Render context abstraction supporting both GPU and CPU backends.
 pub enum RenderContext {
     Gpu(Box<GpuRenderContext>),
     Cpu(CpuRenderContext),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl RenderContext {
     /// Get the window reference for requesting redraws.
     pub fn window(&self) -> &Window {
@@ -439,6 +447,7 @@ impl RenderContext {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Create a GPU render context using ouroboros for safe self-referential struct.
 fn try_create_gpu_context(
     window: &Rc<Window>,
@@ -459,6 +468,7 @@ fn try_create_gpu_context(
     .try_build()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Create a CPU render context using softbuffer as fallback.
 /// `width` and `height` are logical dimensions for the simulation.
 /// `physical_width` and `physical_height` are the actual surface dimensions.
@@ -497,12 +507,14 @@ fn create_cpu_context(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Map a physical window coordinate onto one axis of a `logical`-sized
 /// frame stretched across `physical` pixels (the CPU renderer's fill).
 fn stretch_axis(pos: f64, logical: u32, physical: u32) -> f64 {
     pos * f64::from(logical) / f64::from(physical)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Precompute the physical->logical nearest-neighbor index map for one axis.
 fn scale_map(physical: u32, logical: u32) -> Vec<usize> {
     (0..physical as usize)
@@ -510,6 +522,133 @@ fn scale_map(physical: u32, logical: u32) -> Vec<usize> {
         .collect()
 }
 
+/// Web render context: the same RGBA buffer the drawing routines already
+/// target, blitted into a 2D canvas with `putImageData`. The canvas
+/// backing store is kept at the simulation's logical size; CSS scales the
+/// element for display (letterboxed via `object-fit: contain`), so
+/// presentation cost is the browser's, not ours.
+#[cfg(target_arch = "wasm32")]
+pub struct RenderContext {
+    window: Rc<Window>,
+    width: u32,
+    height: u32,
+    buffer: Vec<u8>,
+    canvas: web_sys::HtmlCanvasElement,
+    ctx2d: web_sys::CanvasRenderingContext2d,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl RenderContext {
+    pub fn window(&self) -> &Window {
+        &self.window
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn with_frame<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        f(self.buffer.as_mut_slice())
+    }
+
+    pub fn present(&mut self) -> Result<(), String> {
+        let data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
+            wasm_bindgen::Clamped(&self.buffer),
+            self.width,
+            self.height,
+        )
+        .map_err(|_| "ImageData creation failed".to_string())?;
+        self.ctx2d
+            .put_image_data(&data, 0.0, 0.0)
+            .map_err(|_| "putImageData failed".to_string())
+    }
+
+    /// Map a cursor position to simulation coordinates. winit's web
+    /// backend reports positions in physical pixels (CSS pixels times
+    /// devicePixelRatio) relative to the canvas; the canvas is displayed
+    /// at its CSS size while the backing store stays at simulation size,
+    /// so the mapping is CSS position scaled by the display ratio.
+    pub fn window_pos_to_sim(&self, x: f64, y: f64) -> (f64, f64) {
+        let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
+        let rect = self.canvas.get_bounding_client_rect();
+        let (css_w, css_h) = (rect.width().max(1.0), rect.height().max(1.0));
+        // object-fit: contain letterboxes the frame inside the element;
+        // compute the drawn frame's offset and scale within the box.
+        let scale = (css_w / f64::from(self.width)).min(css_h / f64::from(self.height));
+        let off_x = (css_w - f64::from(self.width) * scale) / 2.0;
+        let off_y = (css_h - f64::from(self.height) * scale) / 2.0;
+        let sim_x = (x / dpr - off_x) / scale;
+        let sim_y = (y / dpr - off_y) / scale;
+        (
+            sim_x.clamp(0.0, f64::from(self.width)),
+            sim_y.clamp(0.0, f64::from(self.height)),
+        )
+    }
+
+    /// Window-surface resizes are presentation-only on the web (CSS
+    /// scales the canvas element); the backing store follows the
+    /// simulation size, not the window.
+    pub fn resize_surface(&mut self, _width: u32, _height: u32) {}
+
+    /// Resize the frame to a new simulation size: reallocate the buffer
+    /// and the canvas backing store (live-resize support).
+    pub fn resize_sim(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+        self.canvas.set_width(width);
+        self.canvas.set_height(height);
+    }
+}
+
+/// Create the web render context over the window's canvas. Signature
+/// mirrors the native constructor so the shell code is target-agnostic;
+/// the physical dimensions and CPU flag are meaningless here.
+#[cfg(target_arch = "wasm32")]
+pub fn create_render_context(
+    window: &Rc<Window>,
+    width: u32,
+    height: u32,
+    _physical_width: u32,
+    _physical_height: u32,
+    _force_cpu: bool,
+) -> RenderContext {
+    use winit::platform::web::WindowExtWebSys;
+
+    let canvas = window.canvas().expect("window has no canvas");
+    // Backing store at simulation size; CSS (web/style.css) scales the
+    // element itself.
+    canvas.set_width(width);
+    canvas.set_height(height);
+    let ctx2d = canvas
+        .get_context("2d")
+        .ok()
+        .flatten()
+        .expect("2d context unavailable")
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .expect("2d context has unexpected type");
+    let buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+    RenderContext {
+        window: Rc::clone(window),
+        width,
+        height,
+        buffer,
+        canvas,
+        ctx2d,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
+
+#[cfg(not(target_arch = "wasm32"))]
 /// Create render context, trying GPU first with CPU fallback (unless `force_cpu` is set).
 /// `width` and `height` are logical dimensions.
 /// `physical_width` and `physical_height` are the actual surface dimensions.

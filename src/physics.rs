@@ -7,6 +7,15 @@
 use rand::Rng;
 use rayon::prelude::*;
 
+/// Whether the parallel passes may fan out. On wasm without the
+/// `web-threads` feature there is no thread pool (`std::thread` cannot
+/// spawn), so both fan-out branches are compile-time disabled and every
+/// population takes the serial paths; the dead parallel code is
+/// eliminated. With `web-threads` (wasm threads + wasm-bindgen-rayon)
+/// and on every native target, the fan-out gates on population size as
+/// usual.
+const THREADS_AVAILABLE: bool = cfg!(any(not(target_arch = "wasm32"), feature = "web-threads"));
+
 // Physics constants
 pub const GRAVITY: f64 = 100.0;
 pub const DEFAULT_PARTICLE_RADIUS: f64 = 1.5;
@@ -533,23 +542,24 @@ impl SpatialGrid {
     /// worth parallelizing — resolution mutates shared particles and stays
     /// serial.
     fn detect_contacts(&self, particles: &[Particle]) -> Vec<(u32, u32)> {
-        let mut contacts: Vec<(u32, u32)> = if particles.len() >= COLLISION_PARALLEL_THRESHOLD {
-            (0..self.rows)
-                .into_par_iter()
-                .map(|cy| {
-                    let mut row = Vec::new();
-                    self.collect_row_contacts(cy, particles, &mut row);
-                    row
-                })
-                .collect::<Vec<_>>()
-                .concat()
-        } else {
-            let mut all = Vec::new();
-            for cy in 0..self.rows {
-                self.collect_row_contacts(cy, particles, &mut all);
-            }
-            all
-        };
+        let mut contacts: Vec<(u32, u32)> =
+            if THREADS_AVAILABLE && particles.len() >= COLLISION_PARALLEL_THRESHOLD {
+                (0..self.rows)
+                    .into_par_iter()
+                    .map(|cy| {
+                        let mut row = Vec::new();
+                        self.collect_row_contacts(cy, particles, &mut row);
+                        row
+                    })
+                    .collect::<Vec<_>>()
+                    .concat()
+            } else {
+                let mut all = Vec::new();
+                for cy in 0..self.rows {
+                    self.collect_row_contacts(cy, particles, &mut all);
+                }
+                all
+            };
 
         // Oversized tier: no adjacency invariant, so sweep directly. Binned
         // partners come from the flag scan; oversized-oversized pairs from
@@ -1099,7 +1109,7 @@ fn apply_self_gravity_barnes_hut(particles: &mut [Particle], dt: f64) {
     // thread, where the fork-join overhead would exceed the work. Both
     // paths produce bit-identical results: each particle's accumulation
     // order is its own fixed tree traversal, regardless of scheduling.
-    if particles.len() >= BARNES_HUT_PARALLEL_THRESHOLD {
+    if THREADS_AVAILABLE && particles.len() >= BARNES_HUT_PARALLEL_THRESHOLD {
         let accels: Vec<(f64, f64)> = (0..particles.len())
             .into_par_iter()
             .map_init(

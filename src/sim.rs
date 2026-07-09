@@ -17,7 +17,8 @@ use crate::presets::Scene;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::VecDeque;
-use std::time::Instant;
+// std::time::Instant on native; performance.now() on wasm.
+use web_time::Instant;
 
 /// Screen area (in logical pixels) per initial particle.
 const PIXELS_PER_PARTICLE: u64 = 375_000;
@@ -370,6 +371,11 @@ impl Simulation {
     /// threshold is compared against.
     pub fn birth_rate(&self) -> usize {
         self.spawn_times.len()
+    }
+
+    /// The population cap for this window size and particle radius.
+    pub fn max_particles(&self) -> usize {
+        self.max_particles
     }
 
     pub fn explosion(&self) -> Option<&Explosion> {

@@ -259,6 +259,7 @@ pub struct UserPresets {
 /// platform-blessed config directory (`~/Library/Application Support` on
 /// macOS, `%APPDATA%` on Windows; on Linux the two coincide and collapse
 /// to one entry). `$XDG_CONFIG_HOME` overrides `~/.config` when set.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn default_paths() -> Vec<PathBuf> {
     let file = |dir: PathBuf| dir.join("bouncy").join("presets.toml");
     let mut paths = Vec::new();
@@ -280,6 +281,7 @@ pub fn default_paths() -> Vec<PathBuf> {
 /// Load the user presets file. An explicitly given path must exist; the
 /// default locations are searched in order and are all optional
 /// (`Ok(None)` when none exists).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load(explicit: Option<&Path>) -> Result<Option<UserPresets>, String> {
     if let Some(path) = explicit {
         let text = std::fs::read_to_string(path)
@@ -552,6 +554,7 @@ pub fn scene_to_toml(
 /// directory, returning its path. The user copies the table into their
 /// presets file (or points --presets-file at it) and runs --preset with
 /// the generated name.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn export_scene(
     settings: &[(&str, toml::Value)],
     wells: &[SceneWell],
@@ -581,6 +584,7 @@ pub fn export_scene(
 
 /// Print built-in and user presets (--list-presets), including where the
 /// user presets file was (or would be) loaded from.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn print_list(explicit: Option<&Path>) {
     println!("Built-in presets:");
     for preset in Preset::value_variants() {

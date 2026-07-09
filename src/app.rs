@@ -6,23 +6,27 @@
 
 use crate::audio::Audio;
 use crate::config::{ColorMode, Config, ELASTICITY_MAX, EXPLOSION_THRESHOLD_MAX, GRAVITY_LIMIT};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::render::write_png;
 use crate::render::{
     RenderContext, create_render_context, dim_rect, fade_frame, kaleidoscope_frame,
-    render_explosion, render_particles, render_segments, render_wells, write_png,
+    render_explosion, render_particles, render_segments, render_wells,
 };
 use crate::sim::{MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, Simulation, Well};
 use crate::text::{draw_text, draw_text_centered, measure_text};
 use clap::ValueEnum;
 use std::rc::Rc;
-use std::time::Instant;
+// std::time::Instant on native; performance.now() on wasm.
+use web_time::Instant;
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
     event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::ActiveEventLoop,
     keyboard::{KeyCode, PhysicalKey},
-    window::{Fullscreen, Window, WindowId},
+    window::{Window, WindowId},
 };
+#[cfg(not(target_arch = "wasm32"))]
+use winit::{dpi::LogicalSize, window::Fullscreen};
 
 /// Frames of physics skipped at startup to let the GPU initialize.
 const WARMUP_FRAMES: u32 = 3;
@@ -124,6 +128,7 @@ pub enum Command {
 /// Convert physical pixels to logical pixels given a scale factor.
 #[inline]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[cfg(not(target_arch = "wasm32"))]
 fn physical_to_logical(physical: u32, scale_factor: f64) -> u32 {
     (f64::from(physical) / scale_factor) as u32
 }
@@ -139,6 +144,7 @@ fn physical_to_logical(physical: u32, scale_factor: f64) -> u32 {
 /// wins for a fullscreen toy.
 #[inline]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[cfg(not(target_arch = "wasm32"))]
 fn simulation_size(physical: u32, scale_factor: f64) -> u32 {
     let k = (scale_factor.round() as u32).max(1);
     (physical / k).max(1)
@@ -294,6 +300,11 @@ pub struct App {
 
     // Render failure tracking (transient surface loss should not crash)
     consecutive_render_failures: u32,
+
+    /// Mailbox shared with the JS control panel: commands flow in, a
+    /// state snapshot flows out, once per frame (see `web.rs`).
+    #[cfg(target_arch = "wasm32")]
+    web_shared: Option<std::rc::Rc<std::cell::RefCell<crate::web::Shared>>>,
 }
 
 impl App {
@@ -326,7 +337,20 @@ impl App {
             cursor: CursorState::new(),
             screenshot_requested: false,
             consecutive_render_failures: 0,
+            #[cfg(target_arch = "wasm32")]
+            web_shared: None,
         }
+    }
+
+    /// Create an App wired to the JS control panel's mailbox (web shell).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn new_web(
+        config: Config,
+        shared: std::rc::Rc<std::cell::RefCell<crate::web::Shared>>,
+    ) -> Self {
+        let mut app = Self::new(config);
+        app.web_shared = Some(shared);
+        app
     }
 
     fn dimensions(&self) -> Option<(u32, u32)> {
@@ -540,12 +564,17 @@ impl App {
                 shot = Some(frame.to_vec());
             }
         });
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(frame) = shot {
             match save_screenshot(&frame, width, height) {
                 Ok(path) => println!("Screenshot saved to '{}'", path.display()),
                 Err(e) => eprintln!("Screenshot failed: {e}"),
             }
         }
+        // On the web the panel captures the canvas directly (toBlob);
+        // the O-key capture path has nowhere to write.
+        #[cfg(target_arch = "wasm32")]
+        let _ = shot;
 
         match render.present() {
             Ok(()) => self.consecutive_render_failures = 0,
@@ -577,6 +606,13 @@ impl App {
     }
 
     fn update_and_render(&mut self) {
+        // Drain the control panel's queued commands before stepping, and
+        // publish a fresh state snapshot afterward (via render_frame's
+        // caller returning) — the panel is just another control surface
+        // entering at apply().
+        #[cfg(target_arch = "wasm32")]
+        self.drain_web_commands();
+
         self.update_cursor_visibility();
         let Some((width, height)) = self.dimensions() else {
             return;
@@ -606,6 +642,119 @@ impl App {
 
         self.render_frame(width, height);
         self.update_fps_counter();
+
+        #[cfg(target_arch = "wasm32")]
+        self.publish_web_snapshot();
+    }
+
+    /// Apply every command the JS panel queued since the last frame.
+    #[cfg(target_arch = "wasm32")]
+    fn drain_web_commands(&mut self) {
+        let Some(shared) = self.web_shared.clone() else {
+            return;
+        };
+        // Drain into a local Vec first: apply() must not run while the
+        // RefCell is borrowed (a command could re-enter the mailbox).
+        let commands: Vec<crate::web::WebCommand> =
+            shared.borrow_mut().commands.drain(..).collect();
+        for cmd in commands {
+            self.apply_web_command(cmd);
+        }
+    }
+
+    /// Execute one panel command: plain Commands go through apply();
+    /// pointer-shaped ones (which carry coordinates the cursor state
+    /// would otherwise supply) act directly, mirroring handle_mouse.
+    #[cfg(target_arch = "wasm32")]
+    fn apply_web_command(&mut self, cmd: crate::web::WebCommand) {
+        use crate::web::WebCommand;
+        match cmd {
+            WebCommand::Plain(command) => self.apply(command),
+            WebCommand::SetPaused(paused) => {
+                if self.paused != paused {
+                    self.apply(Command::TogglePause);
+                }
+            }
+            WebCommand::SetGravity(pct) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.gravity_percent = pct.clamp(-GRAVITY_LIMIT, GRAVITY_LIMIT);
+                }
+            }
+            WebCommand::SetParticleElasticity(e) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.particle_elasticity = e.clamp(0.0, ELASTICITY_MAX);
+                }
+            }
+            WebCommand::SetWallElasticity(e) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.wall_elasticity = e.clamp(0.0, ELASTICITY_MAX);
+                }
+            }
+            WebCommand::SetTimeScale(scale) => {
+                self.time_scale = scale.clamp(TIME_SCALE_MIN, TIME_SCALE_MAX);
+            }
+            WebCommand::SetExplosionThreshold(t) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.explosion_threshold =
+                        t.clamp(0, EXPLOSION_THRESHOLD_MAX.try_into().unwrap_or(i32::MAX)) as usize;
+                }
+            }
+            WebCommand::SpawnBurst(x, y) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.spawn_burst(x, y);
+                }
+            }
+            WebCommand::LaunchComet(x, y) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.launch_comet(x, y);
+                }
+            }
+            WebCommand::PinWell(x, y, polarity) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.pin_well(x, y, polarity);
+                }
+            }
+            WebCommand::TriggerExplosion(x, y) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.trigger_manual_explosion(x, y);
+                }
+            }
+        }
+    }
+
+    /// Publish this frame's state for the JS panel to poll.
+    #[cfg(target_arch = "wasm32")]
+    fn publish_web_snapshot(&mut self) {
+        let Some(ref shared) = self.web_shared else {
+            return;
+        };
+        let Some(ref sim) = self.sim else {
+            return;
+        };
+        let scene_toml = self.scene_toml();
+        let mut shared = shared.borrow_mut();
+        shared.snapshot = crate::web::Snapshot {
+            fps: self.fps.current,
+            particles: sim.particle_count(),
+            max_particles: sim.max_particles(),
+            birth_rate: sim.birth_rate(),
+            explosion_threshold: sim.explosion_threshold,
+            gravity: sim.gravity_percent,
+            particle_elasticity: sim.particle_elasticity,
+            wall_elasticity: sim.wall_elasticity,
+            time_scale: self.time_scale,
+            paused: self.paused,
+            matter: sim.matter,
+            flow: sim.flow,
+            self_gravity: sim.self_gravity,
+            trails: self.trails,
+            kaleidoscope: self.kaleidoscope,
+            wells: sim.pinned_wells().len(),
+            walls: sim.wall_segments().len(),
+            width: sim.dimensions().0,
+            height: sim.dimensions().1,
+        };
+        shared.scene_toml = scene_toml;
     }
 
     /// Handle a key press or release: pure input mapping. Everything a
@@ -803,7 +952,12 @@ impl App {
                 }
             }),
             Command::Screenshot => self.screenshot_requested = true,
+            #[cfg(not(target_arch = "wasm32"))]
             Command::ExportScene => self.export_scene(),
+            // On the web the panel pulls scene_toml() and downloads it;
+            // the E key has no file to write.
+            #[cfg(target_arch = "wasm32")]
+            Command::ExportScene => {}
             Command::LaunchComet => {
                 let (x, y) = (self.cursor.x, self.cursor.y);
                 self.with_sim(|sim| {
@@ -868,11 +1022,19 @@ impl App {
     /// drawn walls, normalized to window fractions) as a preset table the
     /// user can copy into their presets file. Boolean options are emitted
     /// only when on: like the command line, presets cannot switch one off.
-    fn export_scene(&mut self) {
-        use crate::presets::{SceneWall, SceneWell, export_scene};
-        let Some(ref sim) = self.sim else {
-            return;
-        };
+    /// Snapshot the current settings and normalized geometry — the pure
+    /// half of scene export, shared by the native file writer and the
+    /// web download path.
+    #[allow(clippy::type_complexity)]
+    fn scene_export_parts(
+        &self,
+    ) -> Option<(
+        Vec<(&'static str, toml::Value)>,
+        Vec<crate::presets::SceneWell>,
+        Vec<crate::presets::SceneWall>,
+    )> {
+        use crate::presets::{SceneWall, SceneWell};
+        let sim = self.sim.as_ref()?;
         let (w, h) = sim.dimensions();
         let (wf, hf) = (f64::from(w), f64::from(h));
         // Four decimals keeps files tidy; a fraction of a pixel at 8K.
@@ -938,7 +1100,16 @@ impl App {
             }
         }
 
-        match export_scene(&settings, &wells, &walls) {
+        Some((settings, wells, walls))
+    }
+
+    /// Export the scene to a uniquely named preset file (native).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn export_scene(&mut self) {
+        let Some((settings, wells, walls)) = self.scene_export_parts() else {
+            return;
+        };
+        match crate::presets::export_scene(&settings, &wells, &walls) {
             Ok(path) => println!(
                 "Scene exported to '{}' — copy the table into your presets \
                  file (see --list-presets) or run with --presets-file",
@@ -946,6 +1117,19 @@ impl App {
             ),
             Err(e) => eprintln!("Scene export failed: {e}"),
         }
+    }
+
+    /// The current scene as preset-file TOML text; the web panel turns
+    /// this into a download.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn scene_toml(&self) -> Option<String> {
+        let (settings, wells, walls) = self.scene_export_parts()?;
+        Some(crate::presets::scene_to_toml(
+            "scene-web",
+            &settings,
+            &wells,
+            &walls,
+        ))
     }
 
     /// Handle a mouse button press at the current cursor position.
@@ -976,6 +1160,7 @@ impl App {
 /// Write `frame` to a uniquely named PNG in the working directory,
 /// returning the path. Named by Unix timestamp, with a numeric suffix if
 /// several screenshots land in the same second.
+#[cfg(not(target_arch = "wasm32"))]
 fn save_screenshot(frame: &[u8], width: u32, height: u32) -> Result<std::path::PathBuf, String> {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1062,6 +1247,59 @@ fn draw_hud(frame: &mut [u8], width: u32, height: u32, lines: &[String]) {
 }
 
 impl ApplicationHandler for App {
+    #[cfg(target_arch = "wasm32")]
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        use winit::platform::web::WindowAttributesExtWebSys;
+
+        if self.render.is_some() {
+            return; // Already initialized
+        }
+
+        // Attach to the page's canvas (the demo page provides #bouncy).
+        // prevent_default keeps right-click on the explosion instead of
+        // the context menu and stops scrolling keys from moving the page.
+        let document = web_sys::window()
+            .and_then(|w| w.document())
+            .expect("no document");
+        let canvas = document
+            .get_element_by_id("bouncy")
+            .and_then(|e| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlCanvasElement>(e).ok())
+            .expect("no #bouncy canvas in the page");
+
+        // Simulation size: explicit --width/--height (from the URL query)
+        // win; otherwise the canvas's CSS size at load, floored to
+        // something playable.
+        #[allow(clippy::cast_sign_loss)]
+        let (width, height) = if let (Some(w), Some(h)) = (self.config.width, self.config.height) {
+            (w, h)
+        } else {
+            (
+                (canvas.client_width().max(320)) as u32,
+                (canvas.client_height().max(240)) as u32,
+            )
+        };
+
+        let window_attrs = Window::default_attributes()
+            .with_canvas(Some(canvas))
+            .with_prevent_default(true)
+            .with_focusable(true);
+        let window = event_loop
+            .create_window(window_attrs)
+            .expect("Failed to create window");
+
+        let sim = Simulation::new(&self.config, width, height);
+        self.sim = Some(sim);
+        self.last_time = Instant::now();
+        self.fps.restart(Instant::now());
+
+        let window = Rc::new(window);
+        self.render = Some(create_render_context(
+            &window, width, height, width, height, false,
+        ));
+        window.request_redraw();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.render.is_some() {
             return; // Already initialized
