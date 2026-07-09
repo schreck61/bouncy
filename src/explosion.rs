@@ -19,7 +19,9 @@ pub struct Explosion {
     pub y: f64,
     pub radius: f64,
     radius_sq: f64,
-    max_radius: f64,
+    /// How far the ring must sweep to cover the arena; a live resize
+    /// recomputes it from the new far corner (`Simulation::resize`).
+    pub max_radius: f64,
     pub active: bool,
     pub doomed_count: usize,
     pub killed_count: usize,

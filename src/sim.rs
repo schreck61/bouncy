@@ -200,17 +200,8 @@ impl Simulation {
             .min_particles
             .map_or_else(|| calculate_particle_count(width, height), |n| n as usize);
 
-        // Cap the population at ~20% area coverage (one particle per four
-        // diameter-squared tiles of window area) or MAX_PARTICLES,
-        // whichever is lower: coverage binds for large particles, the
-        // flat ceiling for small ones.
-        let diameter = config.particle_size * 2.0;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let density_cap =
-            (f64::from(width) * f64::from(height) / (4.0 * diameter * diameter)) as usize;
-        let max_particles = density_cap
-            .clamp(MIN_PARTICLE_CAP, MAX_PARTICLES)
-            .max(base_particle_count);
+        let max_particles =
+            Self::compute_max_particles(width, height, config.particle_size, base_particle_count);
 
         let mut sim = Simulation {
             width,
@@ -354,6 +345,74 @@ impl Simulation {
         self.collisions.clear();
         self.stopped = false;
         self.frames_without_motion = 0;
+    }
+
+    /// The population cap for a window: ~20% area coverage (one particle
+    /// per four diameter-squared tiles) or the flat `MAX_PARTICLES`
+    /// ceiling, whichever is lower — coverage binds for large particles,
+    /// the ceiling for small ones. Shared by construction and `resize`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn compute_max_particles(
+        width: u32,
+        height: u32,
+        particle_size: f64,
+        base_particle_count: usize,
+    ) -> usize {
+        let diameter = particle_size * 2.0;
+        let density_cap =
+            (f64::from(width) * f64::from(height) / (4.0 * diameter * diameter)) as usize;
+        density_cap
+            .clamp(MIN_PARTICLE_CAP, MAX_PARTICLES)
+            .max(base_particle_count)
+    }
+
+    /// Resize the arena. Positions, pinned wells, and drawn walls rescale
+    /// proportionally — for scene geometry (stored in window fractions)
+    /// that is exactly where re-placement would put it, and hand-built
+    /// constructions keep their composition. Velocities are untouched.
+    /// The population cap is recomputed for the new area; a shrink can
+    /// leave the population above the new cap, in which case spawning
+    /// halts and, with explosions enabled, the saturation valve relieves
+    /// the overcrowding. An in-flight explosion keeps its progress with
+    /// its reach recomputed from the new far corner.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        // The CLI's minimum window is 100 px; hold resize to the same
+        // floor so degenerate layouts cannot collapse the arena.
+        let width = width.max(100);
+        let height = height.max(100);
+        if width == self.width && height == self.height {
+            return;
+        }
+        let sx = f64::from(width) / f64::from(self.width);
+        let sy = f64::from(height) / f64::from(self.height);
+        self.width = width;
+        self.height = height;
+        self.center_x = f64::from(width) / 2.0;
+        self.center_y = f64::from(height) / 2.0;
+        for p in &mut self.particles {
+            p.x *= sx;
+            p.y *= sy;
+        }
+        for w in &mut self.pinned_wells {
+            w.x *= sx;
+            w.y *= sy;
+        }
+        for s in &mut self.segments {
+            s.x1 *= sx;
+            s.y1 *= sy;
+            s.x2 *= sx;
+            s.y2 *= sy;
+        }
+        if let Some(ref mut exp) = self.explosion {
+            exp.x *= sx;
+            exp.y *= sy;
+            exp.max_radius = max_radius_from(exp.x, exp.y, width, height);
+        }
+        self.max_particles =
+            Self::compute_max_particles(width, height, self.base_radius, self.base_particle_count);
+        // A resize is motion: rescaled positions must integrate and
+        // re-collide even if the world had declared STOPPED.
+        self.wake();
     }
 
     // --- Accessors -------------------------------------------------------
@@ -1331,6 +1390,88 @@ mod tests {
             "corner-clump regime: {per_frame:?}/frame ({fps:.1} FPS ceiling), {} particles",
             s.particle_count()
         );
+    }
+
+    #[test]
+    fn resize_rescales_geometry_and_recomputes_the_cap() {
+        let mut s = sim(&["--min-particles", "10", "--particle-size", "5"]);
+        assert!(s.pin_well(400.0, 300.0, Polarity::Attract));
+        assert!(s.add_wall_segment(100.0, 100.0, 200.0, 100.0));
+        let cap_before = s.max_particles();
+
+        s.resize(1600, 1200); // double both axes
+        assert_eq!(s.dimensions(), (1600, 1200));
+        // Coverage cap scales with area: 800*600/(4*10^2) = 1200 becomes
+        // 1600*1200/400 = 4800.
+        assert_eq!(cap_before, 1200);
+        assert_eq!(s.max_particles(), 4800);
+        let well = s.pinned_wells()[0];
+        assert!((well.x - 800.0).abs() < 1e-9 && (well.y - 600.0).abs() < 1e-9);
+        let seg = s.wall_segments()[0];
+        assert!((seg.x1 - 200.0).abs() < 1e-9 && (seg.y1 - 200.0).abs() < 1e-9);
+        assert!(
+            s.particles().iter().all(|p| p.x <= 1600.0 && p.y <= 1200.0),
+            "rescaled particles stay in bounds"
+        );
+
+        // Shrinking brings everything back and every particle stays
+        // inside the new arena after a step settles the boundaries.
+        s.resize(400, 300);
+        let mut now = Instant::now();
+        now += Duration::from_millis(10);
+        s.step(0.01, now, None);
+        assert!(
+            s.particles()
+                .iter()
+                .all(|p| p.x <= 400.0 && p.y <= 300.0 && p.x >= 0.0 && p.y >= 0.0),
+            "particles inside the shrunk arena"
+        );
+        assert_eq!(s.max_particles(), MIN_PARTICLE_CAP.max(10)); // 400*300/400 = 300 -> floor 1000
+    }
+
+    #[test]
+    fn resize_updates_an_in_flight_explosion() {
+        let mut s = sim(&["--min-particles", "30"]);
+        assert!(s.trigger_manual_explosion(400.0, 300.0));
+        let reach_before = s.explosion().expect("active").max_radius;
+
+        s.resize(1600, 1200);
+        let exp = s.explosion().expect("still active");
+        assert!((exp.x - 800.0).abs() < 1e-9 && (exp.y - 600.0).abs() < 1e-9);
+        assert!(
+            exp.max_radius > reach_before,
+            "reach recomputed from the larger arena"
+        );
+
+        // The ring must still complete against the new far corner.
+        let mut now = Instant::now();
+        let mut steps = 0;
+        while s.explosion().is_some() {
+            now += Duration::from_millis(50);
+            s.step(0.05, now, None);
+            steps += 1;
+            assert!(steps < 200, "explosion completes after resize");
+        }
+    }
+
+    #[test]
+    fn resize_is_deterministic_across_runs() {
+        let run = || {
+            let mut s = sim(&["--min-particles", "40", "--self-gravity"]);
+            let mut now = Instant::now();
+            for frame in 0..60 {
+                if frame == 30 {
+                    s.resize(1200, 500);
+                }
+                now += Duration::from_millis(10);
+                s.step(0.01, now, None);
+            }
+            s.particles()
+                .iter()
+                .map(|p| (p.x.to_bits(), p.y.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run(), "same seed + same resize = same world");
     }
 
     #[test]

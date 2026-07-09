@@ -719,6 +719,15 @@ impl App {
                     sim.trigger_manual_explosion(x, y);
                 }
             }
+            WebCommand::Resize(width, height) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.resize(width, height);
+                    let (w, h) = sim.dimensions();
+                    if let Some(ref mut render) = self.render {
+                        render.resize_sim(w, h);
+                    }
+                }
+            }
         }
     }
 

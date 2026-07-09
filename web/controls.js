@@ -116,6 +116,21 @@ function bind(handle) {
 
   $("panel-toggle").onclick = () => $("panel").classList.toggle("open");
   canvas.addEventListener("pointerdown", () => canvas.focus());
+
+  // Live resize: the arena tracks the canvas's CSS size (debounced so a
+  // drag-resize doesn't thrash the O(n) rescale). Between debounces the
+  // CSS letterboxing keeps the old frame displayed correctly.
+  let resizeTimer;
+  new ResizeObserver(() => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      const w = Math.round(canvas.clientWidth);
+      const h = Math.round(canvas.clientHeight);
+      if (w > 0 && h > 0 && (w !== latest.width || h !== latest.height)) {
+        handle.resize(w, h);
+      }
+    }, 250);
+  }).observe(canvas);
 }
 
 function download(blob, name) {
