@@ -52,6 +52,10 @@ web-sys = { version = "0.3", features = [
     "Window", "Document", "Element", "HtmlCanvasElement",
     "CanvasRenderingContext2d", "ImageData", "console", "DomRect",
     "CssStyleDeclaration",
+    # WebAudio backend
+    "AudioContext", "AudioContextOptions", "AudioBuffer",
+    "AudioBufferSourceNode", "AudioDestinationNode", "AudioNode",
+    "AudioParam", "StereoPannerNode",
 ] }
 
 [lints.clippy]

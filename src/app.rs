@@ -730,6 +730,16 @@ impl App {
                     }
                 }
             }
+            WebCommand::SetMuted(muted) => {
+                if self.audio.is_muted() != muted {
+                    self.audio.toggle_mute();
+                }
+            }
+            WebCommand::SetMusic(music) => {
+                if self.audio.is_music() != music {
+                    self.audio.toggle_music();
+                }
+            }
         }
     }
 
@@ -764,6 +774,9 @@ impl App {
             walls: sim.wall_segments().len(),
             width: sim.dimensions().0,
             height: sim.dimensions().1,
+            muted: self.audio.is_muted(),
+            music: self.audio.is_music(),
+            audio_ready: crate::audio::web_ready(),
         };
         shared.scene_toml = scene_toml;
     }

@@ -36,6 +36,10 @@ pub enum WebCommand {
     /// Live-resize the arena to a new logical size (`Simulation::resize`
     /// plus a frame-buffer reallocation).
     Resize(u32, u32),
+    /// Absolute mute state (the panel sends state, not toggles).
+    SetMuted(bool),
+    /// Absolute musical-mode state.
+    SetMusic(bool),
 }
 
 /// The HUD as data: everything the panel's readouts show, refreshed once
@@ -61,6 +65,11 @@ pub struct Snapshot {
     pub walls: usize,
     pub width: u32,
     pub height: u32,
+    pub muted: bool,
+    pub music: bool,
+    /// Whether the `WebAudio` engine has been created (needs a user
+    /// gesture; see [`WebHandle::enable_audio`]).
+    pub audio_ready: bool,
 }
 
 /// The mailbox shared between the running [`App`] and the [`WebHandle`]
@@ -217,6 +226,32 @@ impl WebHandle {
     /// from a debounced `ResizeObserver`, so the arena tracks the canvas).
     pub fn resize(&self, width: u32, height: u32) {
         self.push(WebCommand::Resize(width, height));
+    }
+
+    /// Create (or resume) the `WebAudio` engine and unmute. Browsers only
+    /// allow audio to start inside a user gesture, so the page must call
+    /// this synchronously from a click handler — the wasm call inherits
+    /// the gesture's user activation. Returns whether audio is ready.
+    pub fn enable_audio(&self) -> bool {
+        let ready = crate::audio::web_enable();
+        if ready {
+            self.push(WebCommand::SetMuted(false));
+        }
+        ready
+    }
+
+    /// Whether the `WebAudio` engine exists (direct read, same value the
+    /// snapshot's `audio_ready` reports).
+    pub fn audio_ready(&self) -> bool {
+        crate::audio::web_ready()
+    }
+
+    pub fn set_muted(&self, muted: bool) {
+        self.push(WebCommand::SetMuted(muted));
+    }
+
+    pub fn set_music(&self, music: bool) {
+        self.push(WebCommand::SetMusic(music));
     }
 }
 

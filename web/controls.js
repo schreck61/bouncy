@@ -89,6 +89,20 @@ function bind(handle) {
   $("tg-selfgrav").onchange = () => handle.toggle_self_gravity();
   $("tg-trails").onchange = () => handle.toggle_trails();
   $("tg-kaleido").onchange = () => handle.toggle_kaleidoscope();
+  $("tg-music").onchange = (e) => handle.set_music(e.target.checked);
+
+  // First click creates the WebAudio engine (must happen synchronously
+  // inside the gesture, per autoplay policy) and unmutes; afterwards the
+  // button is a plain mute toggle.
+  $("btn-sound").onclick = () => {
+    if (!latest.audio_ready) {
+      if (!handle.enable_audio()) {
+        fail("WebAudio unavailable in this browser");
+      }
+    } else {
+      handle.set_muted(!latest.muted);
+    }
+  };
 
   $("btn-shot").onclick = () => {
     canvas.toBlob((blob) => {
@@ -186,12 +200,25 @@ function reflect(s) {
   $("tg-selfgrav").checked = s.self_gravity;
   $("tg-trails").checked = s.trails;
   $("tg-kaleido").checked = s.kaleidoscope;
+  $("tg-music").checked = s.music;
+  $("btn-sound").textContent = !s.audio_ready
+    ? "Enable sound"
+    : s.muted ? "Unmute" : "Mute";
 }
 
 (async () => {
   try {
     const { mod, initPool } = await loadBouncy();
-    const handle = new mod.WebHandle(location.search);
+    // Loader-only parameters are not CLI options; strip them before the
+    // query reaches the config parser (st: force single-threaded;
+    // cb: cache-buster).
+    const params = new URLSearchParams(location.search);
+    params.delete("st");
+    params.delete("cb");
+    const handle = new mod.WebHandle(params.toString());
+    // Console access for tinkering: bouncyHandle.set_gravity(-500) etc.
+    // (Not `bouncy`: the canvas id already claims that DOM global.)
+    globalThis.bouncyHandle = handle;
     bind(handle);
     const poll = () => {
       const s = handle.state();

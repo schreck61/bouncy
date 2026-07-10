@@ -72,6 +72,11 @@
         <label><input id="tg-selfgrav" type="checkbox"> Self-gravity</label>
         <label><input id="tg-trails" type="checkbox"> Trails</label>
         <label><input id="tg-kaleido" type="checkbox"> Kaleidoscope</label>
+        <label><input id="tg-music" type="checkbox"> Musical pings</label>
+      </div>
+
+      <div class="row">
+        <button id="btn-sound">Enable sound</button>
       </div>
 
       <div class="row">
@@ -95,14 +100,14 @@
       </p>
       <p class="fine">
         <a href="https://github.com/schreck61/bouncy">Source</a> ·
-        <a href="../">API docs</a> · runs entirely in your browser; audio is
-        native-only for now.
+        <a href="../">API docs</a> · runs entirely in your browser. Sound
+        starts after the button above (browsers require a click).
       </p>
     </aside>
   </main>
 
   <div id="error" hidden></div>
-  <script src="coi.js"></script>
-  <script type="module" src="controls.js"></script>
+  <script src="coi.js?v=2"></script>
+  <script type="module" src="controls.js?v=2"></script>
 </body>
 </html>
