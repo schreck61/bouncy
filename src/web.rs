@@ -255,6 +255,18 @@ impl WebHandle {
     }
 }
 
+/// Names of the built-in presets, for the panel's launch-options
+/// dropdown — sourced from the same enum the CLI parses, so the list
+/// cannot drift.
+#[wasm_bindgen]
+pub fn preset_names() -> Vec<String> {
+    use clap::ValueEnum;
+    crate::presets::Preset::value_variants()
+        .iter()
+        .map(|p| p.label().to_string())
+        .collect()
+}
+
 /// Initialize the rayon thread pool over wasm threads. Exposed only when
 /// built with the `web-threads` feature on a cross-origin-isolated page;
 /// the loader awaits this before constructing a [`WebHandle`].

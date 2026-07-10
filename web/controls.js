@@ -162,6 +162,34 @@ function bind(handle) {
   }).observe(canvas);
 }
 
+// Launch options: construction-time parameters (the native command
+// line's role). Applying rebuilds the URL — preserving any parameters
+// typed by hand — and reloads; the CLI parser validates on the way back
+// in, surfacing any error in the panel.
+function bindLaunchOptions(mod) {
+  const params = new URLSearchParams(location.search);
+  const sel = $("lo-preset");
+  for (const name of mod.preset_names()) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name;
+    sel.appendChild(option);
+  }
+  const fields = [["lo-size", "particle-size"], ["lo-speed", "initial-speed"],
+                  ["lo-seed", "seed"], ["lo-min", "min-particles"]];
+  sel.value = params.get("preset") ?? "";
+  for (const [id, key] of fields) $(id).value = params.get(key) ?? "";
+
+  $("lo-apply").onclick = () => {
+    const p = new URLSearchParams(location.search);
+    p.delete("cb");
+    const set = (key, value) => (value ? p.set(key, value) : p.delete(key));
+    set("preset", sel.value);
+    for (const [id, key] of fields) set(key, $(id).value.trim());
+    location.search = p.toString();
+  };
+}
+
 function download(blob, name) {
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -220,6 +248,7 @@ function reflect(s) {
     // (Not `bouncy`: the canvas id already claims that DOM global.)
     globalThis.bouncyHandle = handle;
     bind(handle);
+    bindLaunchOptions(mod);
     const poll = () => {
       const s = handle.state();
       if (s) reflect(s);

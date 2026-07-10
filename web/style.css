@@ -126,6 +126,39 @@ button:active { transform: translateY(1px); }
 }
 #toggles input { accent-color: var(--accent); margin-right: 6px; }
 
+#launch {
+  margin: 12px 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+#launch summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink);
+}
+#launch[open] summary { margin-bottom: 4px; }
+.launch-field {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0;
+  font-size: 12.5px;
+  color: var(--dim);
+}
+.launch-field select,
+.launch-field input {
+  width: 120px;
+  background: #0f1319;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12.5px;
+}
+
 .fine { color: var(--dim); font-size: 11.5px; }
 .fine a { color: var(--accent); text-decoration: none; }
 #threads-note { color: var(--dim); font-size: 11.5px; margin: 8px 0 0; }
