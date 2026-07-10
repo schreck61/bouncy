@@ -1958,7 +1958,7 @@ mod tests {
 
         // A stopped simulation ignores steps...
         let events = s.step(0.01, now, None);
-        assert!(events.max_collision_energy == 0.0);
+        assert_eq!(events.max_collision_energy, 0.0);
 
         // ...until something wakes it.
         s.spawn_burst(100.0, 100.0);

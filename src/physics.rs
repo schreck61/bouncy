@@ -611,7 +611,7 @@ pub(crate) fn pair_mut(
     i: usize,
     j: usize,
 ) -> (&mut Particle, &mut Particle) {
-    debug_assert!(i != j);
+    debug_assert_ne!(i, j);
     let (lo, hi) = if i < j { (i, j) } else { (j, i) };
     let (left, right) = particles.split_at_mut(hi);
     if i < j {
