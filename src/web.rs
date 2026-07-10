@@ -70,6 +70,10 @@ pub struct Snapshot {
     /// Whether the `WebAudio` engine has been created (needs a user
     /// gesture; see [`WebHandle::enable_audio`]).
     pub audio_ready: bool,
+    /// CLI value names (the same strings the parser accepts), so the
+    /// share link can carry them.
+    pub spawn_mode: String,
+    pub color_mode: String,
 }
 
 /// The mailbox shared between the running [`App`] and the [`WebHandle`]

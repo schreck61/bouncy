@@ -125,6 +125,12 @@ pub enum Command {
     LaunchComet,
 }
 
+/// Canonical CLI value name of a `ValueEnum` variant — the same string
+/// the parser accepts, shared by scene export and the web snapshot.
+fn value_name(pv: Option<clap::builder::PossibleValue>) -> String {
+    pv.expect("no skipped variants").get_name().to_string()
+}
+
 /// Convert physical pixels to logical pixels given a scale factor.
 #[inline]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -777,6 +783,8 @@ impl App {
             muted: self.audio.is_muted(),
             music: self.audio.is_music(),
             audio_ready: crate::audio::web_ready(),
+            spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
+            color_mode: value_name(self.color_mode.to_possible_value()),
         };
         shared.scene_toml = scene_toml;
     }
@@ -1083,9 +1091,6 @@ impl App {
             })
             .collect();
 
-        let value_name = |pv: Option<clap::builder::PossibleValue>| {
-            pv.expect("no skipped variants").get_name().to_string()
-        };
         // Counts are far below i64::MAX.
         #[allow(clippy::cast_possible_wrap)]
         let mut settings: Vec<(&str, toml::Value)> = vec![

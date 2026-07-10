@@ -117,27 +117,7 @@ function bind(handle) {
     }
   };
   $("btn-share").onclick = async () => {
-    const s = latest;
-    const params = new URLSearchParams();
-    if (s.gravity !== 100) params.set("gravity", s.gravity);
-    if (s.particle_elasticity !== 1) {
-      params.set("particle-elasticity", s.particle_elasticity.toFixed(2));
-    }
-    if (s.wall_elasticity !== 1) {
-      params.set("wall-elasticity", s.wall_elasticity.toFixed(2));
-    }
-    if (s.explosion_threshold !== 30) {
-      params.set("explosion-threshold", s.explosion_threshold);
-    }
-    for (const [key, on] of [["matter", s.matter], ["flow", s.flow],
-                             ["self-gravity", s.self_gravity],
-                             ["trails", s.trails],
-                             ["kaleidoscope", s.kaleidoscope]]) {
-      if (on) params.set(key, "");
-    }
-    const url = `${location.origin}${location.pathname}?${params}`
-      .replace(/=(?=&|$)/g, "");
-    await navigator.clipboard.writeText(url);
+    await navigator.clipboard.writeText(shareUrl());
     const btn = $("btn-share");
     btn.textContent = "Copied!";
     setTimeout(() => (btn.textContent = "Copy share link"), 1200);
@@ -199,6 +179,56 @@ function download(blob, name) {
 }
 
 let latest = { paused: false };
+// The configuration the session started with (first real snapshot):
+// the share link carries the launch URL plus only what changed since.
+let initialState = null;
+
+// Build a URL that reproduces this session: start from the launch
+// parameters (so ?preset=...&seed=... survive), then overlay every
+// runtime setting the user changed during play — later parameters win
+// in the CLI parser, exactly like typing them after a preset. Booleans
+// switched OFF are best-effort: the parameter is removed, but a value
+// baked into a preset cannot be negated (the CLI has the same limit).
+function shareUrl() {
+  const p = new URLSearchParams(location.search);
+  p.delete("cb");
+  const s = latest;
+  const init = initialState ?? s;
+
+  const numeric = [
+    ["gravity", s.gravity, init.gravity, String],
+    ["particle-elasticity", s.particle_elasticity, init.particle_elasticity,
+     (v) => v.toFixed(2)],
+    ["wall-elasticity", s.wall_elasticity, init.wall_elasticity,
+     (v) => v.toFixed(2)],
+    ["explosion-threshold", s.explosion_threshold, init.explosion_threshold,
+     String],
+    ["spawn-mode", s.spawn_mode, init.spawn_mode, String],
+    ["color-mode", s.color_mode, init.color_mode, String],
+  ];
+  for (const [key, now, was, fmt] of numeric) {
+    if (now !== was) p.set(key, fmt(now));
+  }
+  const flags = [
+    ["matter", s.matter, init.matter],
+    ["flow", s.flow, init.flow],
+    ["self-gravity", s.self_gravity, init.self_gravity],
+    ["trails", s.trails, init.trails],
+    ["kaleidoscope", s.kaleidoscope, init.kaleidoscope],
+    ["music", s.music, init.music],
+    ["mute", s.muted, init.muted],
+  ];
+  for (const [key, now, was] of flags) {
+    if (now !== was) {
+      if (now) p.set(key, "");
+      else p.delete(key);
+    }
+  }
+  const query = p.toString().replace(/=(?=&|$)/g, "");
+  return `${location.origin}${location.pathname}${query ? "?" + query : ""}`;
+}
+// Console access for testing and tinkering.
+globalThis.bouncyShareUrl = shareUrl;
 
 // Reflect the snapshot into the panel. Sliders follow the simulation
 // unless the user is mid-drag (their element has focus).
@@ -251,7 +281,11 @@ function reflect(s) {
     bindLaunchOptions(mod);
     const poll = () => {
       const s = handle.state();
-      if (s) reflect(s);
+      if (s) {
+        // width > 0 distinguishes a published snapshot from the default.
+        if (!initialState && s.width > 0) initialState = s;
+        reflect(s);
+      }
       requestAnimationFrame(poll);
     };
     requestAnimationFrame(poll);
