@@ -46,3 +46,7 @@ tarpaulin-report.html
 *.temp
 *.log
 .claude/
+
+# wasm demo bundles are build artifacts (web/build.sh, CI)
+/web/pkg/
+/web/pkg-mt/

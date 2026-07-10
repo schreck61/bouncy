@@ -23,16 +23,23 @@ python3 -m http.server 8321 --directory web
 
 Rayon over wasm threads needs SharedArrayBuffer, which needs a
 cross-origin-isolated page. GitHub Pages cannot set the COOP/COEP
-headers, so `coi-serviceworker.js` injects them client-side (one reload
+headers, so `coi.js` (a small service worker of ours) injects them client-side (one reload
 on first visit). The build needs nightly and a rebuilt std:
 
 ```sh
 rustup toolchain install nightly --component rust-src
-RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals --cfg getrandom_backend="wasm_js"' \
-  rustup run nightly wasm-pack build --target web --release \
-  --out-dir web/pkg-mt --features web-threads \
-  -Z build-std=panic_abort,std
+./web/build.sh    # builds both bundles; see the script for the details
 ```
+
+Two hard-won details live in that script: rustc does **not** add the
+shared-memory link args itself (`--import-memory --shared-memory
+--max-memory` plus exported TLS/heap symbols must be passed as
+`link-arg`s, or the module builds with ordinary memory and the thread
+pool cannot start), and `wasm-bindgen-rayon` needs its `no-bundler`
+feature for plain ES-module loading. One web-platform consequence of
+shared memory: `ImageData` refuses views into a SharedArrayBuffer, so
+the Canvas2D backend blits through a persistent JS-side copy of the
+frame.
 
 The loader (`controls.js`) prefers `pkg-mt/` when
 `globalThis.crossOriginIsolated` is true and falls back to `pkg/`

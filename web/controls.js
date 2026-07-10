@@ -12,27 +12,42 @@ function fail(message) {
   el.hidden = false;
 }
 
+// Surface silent failures (wasm traps inside rAF callbacks never reach
+// the console API) on the page itself.
+window.addEventListener("error", (e) => {
+  fail(`${e.message}\n@ ${e.filename}:${e.lineno}`);
+});
+window.addEventListener("unhandledrejection", (e) => {
+  fail(`unhandled rejection: ${e.reason}`);
+});
+
 // Load the single-threaded bundle by default. A multi-threaded bundle
 // (pkg-mt/) is used when the page is cross-origin isolated and the
-// bundle exists; see web/README.md.
+// bundle exists (?st forces single-threaded); see web/README.md.
+// Returns { mod, initPool }: the thread pool initializes after the app
+// is up, since rayon is only consulted above the population thresholds.
 async function loadBouncy() {
-  if (globalThis.crossOriginIsolated) {
+  const forceSt = new URLSearchParams(location.search).has("st");
+  if (globalThis.crossOriginIsolated && !forceSt) {
     try {
       const mt = await import("./pkg-mt/bouncy.js");
       await mt.default();
-      await mt.initThreadPool(navigator.hardwareConcurrency ?? 4);
-      $("threads-note").textContent =
-        `Multi-threaded build: ${navigator.hardwareConcurrency ?? "?"} threads.`;
-      return mt;
+      const threads = navigator.hardwareConcurrency ?? 4;
+      const initPool = async () => {
+        await mt.initThreadPool(threads);
+        $("threads-note").textContent = `Multi-threaded build: ${threads} threads.`;
+      };
+      return { mod: mt, initPool };
     } catch {
-      // No MT bundle deployed (or it failed to init): fall through.
+      // No MT bundle deployed (or it failed to load): fall through.
     }
   }
   const st = await import("./pkg/bouncy.js");
   await st.default();
-  $("threads-note").textContent =
-    "Single-threaded build (multi-threading needs cross-origin isolation).";
-  return st;
+  $("threads-note").textContent = globalThis.crossOriginIsolated && !forceSt
+    ? "Single-threaded build (no multi-threaded bundle deployed)."
+    : "Single-threaded build (multi-threading needs cross-origin isolation).";
+  return { mod: st, initPool: null };
 }
 
 function bind(handle) {
@@ -175,7 +190,7 @@ function reflect(s) {
 
 (async () => {
   try {
-    const mod = await loadBouncy();
+    const { mod, initPool } = await loadBouncy();
     const handle = new mod.WebHandle(location.search);
     bind(handle);
     const poll = () => {
@@ -184,6 +199,10 @@ function reflect(s) {
       requestAnimationFrame(poll);
     };
     requestAnimationFrame(poll);
+    if (initPool) {
+      $("threads-note").textContent = "Starting thread pool...";
+      await initPool();
+    }
   } catch (e) {
     fail(e);
     console.error(e);

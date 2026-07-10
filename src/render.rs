@@ -535,6 +535,22 @@ pub struct RenderContext {
     buffer: Vec<u8>,
     canvas: web_sys::HtmlCanvasElement,
     ctx2d: web_sys::CanvasRenderingContext2d,
+    /// A JS-side copy of the frame. ImageData cannot wrap a view into
+    /// wasm memory when that memory is shared (the multi-threaded
+    /// build), so every present copies the frame into this ordinary
+    /// Uint8ClampedArray, which `image_data` wraps once per size.
+    js_frame: js_sys::Uint8ClampedArray,
+    image_data: web_sys::ImageData,
+}
+
+/// Build the persistent JS frame array + ImageData pair for a size.
+#[cfg(target_arch = "wasm32")]
+fn js_frame_pair(width: u32, height: u32) -> (js_sys::Uint8ClampedArray, web_sys::ImageData) {
+    let js_frame = js_sys::Uint8ClampedArray::new_with_length(width * height * 4);
+    let image_data =
+        web_sys::ImageData::new_with_js_u8_clamped_array_and_sh(&js_frame, width, height)
+            .expect("ImageData creation failed");
+    (js_frame, image_data)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -559,14 +575,9 @@ impl RenderContext {
     }
 
     pub fn present(&mut self) -> Result<(), String> {
-        let data = web_sys::ImageData::new_with_u8_clamped_array_and_sh(
-            wasm_bindgen::Clamped(&self.buffer),
-            self.width,
-            self.height,
-        )
-        .map_err(|_| "ImageData creation failed".to_string())?;
+        self.js_frame.copy_from(&self.buffer);
         self.ctx2d
-            .put_image_data(&data, 0.0, 0.0)
+            .put_image_data(&self.image_data, 0.0, 0.0)
             .map_err(|_| "putImageData failed".to_string())
     }
 
@@ -597,12 +608,14 @@ impl RenderContext {
     /// simulation size, not the window.
     pub fn resize_surface(&mut self, _width: u32, _height: u32) {}
 
-    /// Resize the frame to a new simulation size: reallocate the buffer
-    /// and the canvas backing store (live-resize support).
+    /// Resize the frame to a new simulation size: reallocate the buffer,
+    /// the JS-side frame, and the canvas backing store (live-resize
+    /// support).
     pub fn resize_sim(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
         self.buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+        (self.js_frame, self.image_data) = js_frame_pair(width, height);
         self.canvas.set_width(width);
         self.canvas.set_height(height);
     }
@@ -635,6 +648,7 @@ pub fn create_render_context(
         .dyn_into::<web_sys::CanvasRenderingContext2d>()
         .expect("2d context has unexpected type");
     let buffer = vec![0u8; (width as usize) * (height as usize) * 4];
+    let (js_frame, image_data) = js_frame_pair(width, height);
     RenderContext {
         window: Rc::clone(window),
         width,
@@ -642,6 +656,8 @@ pub fn create_render_context(
         buffer,
         canvas,
         ctx2d,
+        js_frame,
+        image_data,
     }
 }
 
