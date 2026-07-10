@@ -7,10 +7,17 @@ use crate::physics::Particle;
 use rand::Rng;
 use rand::seq::SliceRandom;
 
+/// Sliding window (seconds) the birth rate is measured over.
 pub const SPAWN_RATE_WINDOW: f64 = 1.0;
+/// Default births-per-second that trigger an automatic explosion
+/// (the --explosion-threshold default).
 pub const SPAWN_RATE_THRESHOLD: usize = 30;
+/// Fraction of the population an explosion dooms (survivors are never
+/// culled below the base particle count).
 pub const EXPLOSION_KILL_RATIO: f64 = 0.99;
+/// Ring expansion speed in pixels per second.
 pub const EXPLOSION_SPEED: f64 = 800.0;
+/// Rendered thickness of the expanding ring in pixels.
 pub const EXPLOSION_RING_WIDTH: f64 = 20.0;
 
 /// An expanding ring that kills doomed particles as it reaches them.

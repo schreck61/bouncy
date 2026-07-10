@@ -17,9 +17,14 @@ use rayon::prelude::*;
 const THREADS_AVAILABLE: bool = cfg!(any(not(target_arch = "wasm32"), feature = "web-threads"));
 
 // Physics constants
+/// Downward acceleration (pixels/s²) at --gravity 100.
 pub const GRAVITY: f64 = 100.0;
+/// Particle radius (pixels) at the default --particle-size.
 pub const DEFAULT_PARTICLE_RADIUS: f64 = 1.5;
+/// Top speed (pixels/s) of newly created particles at the default
+/// --initial-speed; spawns start at 50-100% of it.
 pub const INITIAL_VELOCITY: f64 = 600.0;
+/// Clearance (pixels) kept from the walls when placing new particles.
 pub const PARTICLE_MARGIN: f64 = 10.0;
 /// Terminal speed (pixels/s): the ceiling the per-substep clamp in
 /// `Particle::update` enforces. ~10 screen-crossings per second on a large

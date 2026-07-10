@@ -2,7 +2,7 @@
 
 A GPU-accelerated particle simulation written in Rust featuring elastic collisions, gravity, dynamic particle spawning, and explosive chain reactions with synthesized audio feedback.
 
-**[Try it in your browser](https://schreck61.github.io/bouncy/demo/)** — the same simulation compiled to WebAssembly, with a control panel for every parameter (multi-threaded where the browser allows; see [web/README.md](web/README.md)).
+**[Try it in your browser](https://schreck61.github.io/bouncy/demo/)** — the same simulation compiled to WebAssembly, with a control panel for every parameter (multi-threaded where the browser allows; see [web/README.md](web/README.md)). The demo is currently optimized for Chrome; frame rates in other browsers can be substantially lower.
 
 ## Features
 
@@ -29,7 +29,7 @@ Particles bounce around the screen with realistic physics. Each collision spawns
 
 - Rust 1.85 or later
 - A GPU with Vulkan, Metal, or DX12 support (optional — CPU rendering is used as a fallback)
-- Linux only: ALSA development headers (`libasound2-dev` on Debian/Ubuntu)
+- Linux only: ALSA and udev development headers (`libasound2-dev` and `libudev-dev` on Debian/Ubuntu)
 
 ### Building
 
@@ -57,7 +57,7 @@ cargo run --release -- --spawn-at-collision
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--preset <NAME>` | Apply a settings bundle: a built-in (`fireworks`, `blob`, `billiards`, `peace`, `orbits`, `mandala`) or a preset from the user presets file; explicit options override the preset | None |
+| `--preset <NAME>` | Apply a settings bundle: a built-in (`fireworks`, `blob`, `billiards`, `peace`, `orbits`, `mandala`, `accretion`) or a preset from the user presets file; explicit options override the preset | None |
 | `--presets-file <PATH>` | Load user presets from this TOML file instead of the platform default location | Platform config dir |
 | `--list-presets` | List built-in and user presets (and where the user file was loaded from), then exit | |
 | `--spawn-mode <MODE>` | Where collision spawns appear: `center`, `collision`, or `off` | center |
@@ -410,6 +410,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Version History
+
+See [CHANGELOG.md](CHANGELOG.md) for the release history.
 
 ## Contributing
 

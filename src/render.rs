@@ -555,18 +555,22 @@ fn js_frame_pair(width: u32, height: u32) -> (js_sys::Uint8ClampedArray, web_sys
 
 #[cfg(target_arch = "wasm32")]
 impl RenderContext {
+    /// The winit window (canvas wrapper) this context renders into.
     pub fn window(&self) -> &Window {
         &self.window
     }
 
+    /// Frame width in simulation (logical) pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Frame height in simulation (logical) pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// Run the drawing closure over the RGBA frame buffer.
     pub fn with_frame<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut [u8]) -> R,
@@ -574,6 +578,8 @@ impl RenderContext {
         f(self.buffer.as_mut_slice())
     }
 
+    /// Blit the frame to the canvas: copy into the JS-side array (shared
+    /// wasm memory cannot back an `ImageData`) and `putImageData`.
     pub fn present(&mut self) -> Result<(), String> {
         self.js_frame.copy_from(&self.buffer);
         self.ctx2d

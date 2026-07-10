@@ -81,6 +81,7 @@ git commit -s -m "Your commit message"
 
 - Rust 1.85 or later
 - A GPU with Vulkan, Metal, or DX12 support (optional — CPU rendering is a fallback)
+- Linux only: ALSA and udev development headers (`libasound2-dev` and `libudev-dev` on Debian/Ubuntu)
 - Git
 
 ### Setting Up Your Development Environment

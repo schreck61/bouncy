@@ -133,86 +133,109 @@ impl WebHandle {
         self.shared.borrow_mut().commands.push(cmd);
     }
 
+    /// Absolute pause state (the P key toggles; the panel sends state).
     pub fn set_paused(&self, paused: bool) {
         self.push(WebCommand::SetPaused(paused));
     }
 
+    /// Advance one frame (only meaningful while paused; the N key).
     pub fn step_frame(&self) {
         self.push(WebCommand::Plain(Command::StepFrame));
     }
 
+    /// Restart the simulation with its launch configuration (the R key).
     pub fn reset(&self) {
         self.push(WebCommand::Plain(Command::Reset));
     }
 
+    /// Gravity as a percentage of standard, clamped like --gravity.
     pub fn set_gravity(&self, percent: i32) {
         self.push(WebCommand::SetGravity(percent));
     }
 
+    /// Particle restitution, clamped like --particle-elasticity.
     pub fn set_particle_elasticity(&self, e: f64) {
         self.push(WebCommand::SetParticleElasticity(e));
     }
 
+    /// Wall restitution, clamped like --wall-elasticity.
     pub fn set_wall_elasticity(&self, e: f64) {
         self.push(WebCommand::SetWallElasticity(e));
     }
 
+    /// Simulation speed multiplier, clamped to the hotkeys' 0.1x-4x range.
     pub fn set_time_scale(&self, scale: f64) {
         self.push(WebCommand::SetTimeScale(scale));
     }
 
+    /// Births-per-second explosion trigger (0 disables), clamped like
+    /// --explosion-threshold.
     pub fn set_explosion_threshold(&self, threshold: i32) {
         self.push(WebCommand::SetExplosionThreshold(threshold));
     }
 
+    /// Toggle matter mechanics (fusion/fission; the X key).
     pub fn toggle_matter(&self) {
         self.push(WebCommand::Plain(Command::ToggleMatter));
     }
 
+    /// Toggle the ambient flow field (the F key).
     pub fn toggle_flow(&self) {
         self.push(WebCommand::Plain(Command::ToggleFlow));
     }
 
+    /// Toggle self-gravity — mass attracts mass (the A key).
     pub fn toggle_self_gravity(&self) {
         self.push(WebCommand::Plain(Command::ToggleSelfGravity));
     }
 
+    /// Toggle motion trails (the T key).
     pub fn toggle_trails(&self) {
         self.push(WebCommand::Plain(Command::ToggleTrails));
     }
 
+    /// Toggle the 4-fold kaleidoscope mirror (the K key).
     pub fn toggle_kaleidoscope(&self) {
         self.push(WebCommand::Plain(Command::ToggleKaleidoscope));
     }
 
+    /// Cycle solid/velocity coloring (the C key).
     pub fn cycle_color_mode(&self) {
         self.push(WebCommand::Plain(Command::CycleColorMode));
     }
 
+    /// Cycle spawn mode: center / collision points / off (the B key).
     pub fn cycle_spawn_mode(&self) {
         self.push(WebCommand::Plain(Command::CycleSpawnMode));
     }
 
+    /// Cycle the canvas HUD: off / stats / stats+keys (the H key).
     pub fn cycle_hud(&self) {
         self.push(WebCommand::Plain(Command::CycleHud));
     }
 
+    /// Remove every pinned gravity well (Shift+R).
     pub fn clear_wells(&self) {
         self.push(WebCommand::Plain(Command::ClearWells));
     }
 
+    /// Remove every drawn wall segment (Shift+V).
     pub fn clear_walls(&self) {
         self.push(WebCommand::Plain(Command::ClearWalls));
     }
 
+    /// Spawn a burst of particles at simulation coordinates (left click).
     pub fn spawn_burst(&self, x: f64, y: f64) {
         self.push(WebCommand::SpawnBurst(x, y));
     }
 
+    /// Launch a comet from the far edge toward the point (middle click).
     pub fn launch_comet(&self, x: f64, y: f64) {
         self.push(WebCommand::LaunchComet(x, y));
     }
 
+    /// Pin a persistent gravity well at the point; `repel` inverts its
+    /// polarity (the W / Shift+W keys).
     pub fn pin_well(&self, x: f64, y: f64, repel: bool) {
         let polarity = if repel {
             Polarity::Repel
@@ -222,6 +245,7 @@ impl WebHandle {
         self.push(WebCommand::PinWell(x, y, polarity));
     }
 
+    /// Trigger an explosion ring centered on the point (right click).
     pub fn trigger_explosion(&self, x: f64, y: f64) {
         self.push(WebCommand::TriggerExplosion(x, y));
     }
@@ -250,13 +274,24 @@ impl WebHandle {
         crate::audio::web_ready()
     }
 
+    /// Absolute mute state (see [`WebHandle::enable_audio`] for the
+    /// user-gesture path that unmutes for the first time).
     pub fn set_muted(&self, muted: bool) {
         self.push(WebCommand::SetMuted(muted));
     }
 
+    /// Absolute musical-pings state (pentatonic collision pitches).
     pub fn set_music(&self, music: bool) {
         self.push(WebCommand::SetMusic(music));
     }
+}
+
+/// The crate version, for the demo page's header stamp — read from
+/// Cargo.toml at compile time, so the page can never disagree with the
+/// wasm it is running.
+#[wasm_bindgen]
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// Names of the built-in presets, for the panel's launch-options

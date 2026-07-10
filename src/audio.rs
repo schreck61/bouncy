@@ -18,6 +18,8 @@
 use crate::physics::COLLISION_ENERGY_NORMALIZER;
 use rand::Rng;
 
+/// Sample rate (Hz) all buffers are synthesized at, shared by both
+/// backends so the same sample math yields the same pitches.
 pub const AUDIO_SAMPLE_RATE: u32 = 44100;
 const PING_DURATION_MS: u64 = 80;
 const PING_MIN_FREQ: f32 = 300.0;
@@ -199,6 +201,7 @@ mod native {
             self.muted
         }
 
+        /// Whether audio is currently muted.
         pub fn is_muted(&self) -> bool {
             self.muted
         }
@@ -209,6 +212,7 @@ mod native {
             self.music
         }
 
+        /// Whether musical (pentatonic) mode is on.
         pub fn is_music(&self) -> bool {
             self.music
         }
@@ -364,28 +368,36 @@ mod web {
     }
 
     impl Audio {
+        /// State-only construction; the `WebAudio` engine itself is
+        /// created later by [`super::web_enable`] inside a user gesture.
         pub fn new(muted: bool, music: bool) -> Self {
             Audio { muted, music }
         }
 
+        /// Toggle mute; returns the new muted state.
         pub fn toggle_mute(&mut self) -> bool {
             self.muted = !self.muted;
             self.muted
         }
 
+        /// Whether audio is currently muted.
         pub fn is_muted(&self) -> bool {
             self.muted
         }
 
+        /// Toggle musical mode; returns the new state.
         pub fn toggle_music(&mut self) -> bool {
             self.music = !self.music;
             self.music
         }
 
+        /// Whether musical (pentatonic) mode is on.
         pub fn is_music(&self) -> bool {
             self.music
         }
 
+        /// Play a collision ping (see the native backend for the pitch and
+        /// pan semantics); dropped silently until the engine exists.
         pub fn play_ping(&self, energy: f64, pan: f32) {
             if self.muted || !ping_audible(energy) {
                 return;
@@ -401,6 +413,8 @@ mod web {
             );
         }
 
+        /// Play the explosion rumble; dropped silently until the engine
+        /// exists.
         pub fn play_explosion(&self) {
             if self.muted {
                 return;

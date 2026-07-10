@@ -5,6 +5,12 @@ wrapped in an HTML control panel. Deployed to
 `schreck61.github.io/bouncy/demo` by CI on every push to main; this
 directory is the page source.
 
+The demo is currently optimized for Chrome (and Chromium-based
+browsers). Other browsers run it, but frame rates can be substantially
+lower — Firefox in particular pays a much higher per-frame cost for the
+thread-pool fan-out and the Canvas2D present path (`?st` may help
+there).
+
 ## Build (single-threaded)
 
 ```sh
@@ -52,3 +58,9 @@ Every CLI option works as a query parameter, resolved by the same
 parser with the same validation: `?preset=accretion`,
 `?gravity=50&matter&seed=7`, `?width=800&height=600`. Value-less keys
 (or `=true`) are boolean flags; `=false` drops the key.
+
+Two loader-only parameters are handled by `controls.js` and stripped
+before the query reaches the config parser: `?st` forces the
+single-threaded bundle even on an isolated page, and `?cb=<anything>`
+is accepted as a cache-buster (ignored by the simulation and removed
+from share and restart links).

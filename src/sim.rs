@@ -417,10 +417,12 @@ impl Simulation {
 
     // --- Accessors -------------------------------------------------------
 
+    /// The live particles, in a stable order the renderer can iterate.
     pub fn particles(&self) -> &[Particle] {
         &self.particles
     }
 
+    /// Current population size.
     pub fn particle_count(&self) -> usize {
         self.particles.len()
     }
@@ -437,14 +439,18 @@ impl Simulation {
         self.max_particles
     }
 
+    /// The explosion ring in progress, if one is expanding.
     pub fn explosion(&self) -> Option<&Explosion> {
         self.explosion.as_ref()
     }
 
+    /// The persistent gravity wells (W pins them; distinct from the
+    /// transient held-G well, which is per-frame input).
     pub fn pinned_wells(&self) -> &[Well] {
         &self.pinned_wells
     }
 
+    /// The drawn wall segments particles bounce off (V draws them).
     pub fn wall_segments(&self) -> &[Segment] {
         &self.segments
     }
@@ -466,6 +472,8 @@ impl Simulation {
         (self.width, self.height)
     }
 
+    /// Whether all motion has ceased (velocities below threshold for
+    /// ~1 second); cleared by [`Simulation::wake`].
     pub fn stopped(&self) -> bool {
         self.stopped
     }

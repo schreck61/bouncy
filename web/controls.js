@@ -267,6 +267,10 @@ function reflect(s) {
 (async () => {
   try {
     const { mod, initPool } = await loadBouncy();
+    // Stamp the header with the wasm module's own crate version
+    // (optional-chained so a stale cached bundle without the export
+    // still loads).
+    $("version").textContent = mod.version ? `v${mod.version()}` : "";
     // Loader-only parameters are not CLI options; strip them before the
     // query reaches the config parser (st: force single-threaded;
     // cb: cache-buster).

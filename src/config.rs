@@ -6,11 +6,14 @@
 use crate::presets::{Preset, Scene};
 use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 
-/// Limits for runtime-adjustable parameters, shared between the clap
-/// value parsers and the hotkey/command clamps in the app layer so the
-/// two can never disagree.
+// Limits for runtime-adjustable parameters, shared between the clap
+// value parsers and the hotkey/command clamps in the app layer so the
+// two can never disagree.
+/// Gravity magnitude bound (percent of standard), either sign.
 pub const GRAVITY_LIMIT: i32 = 1000;
+/// Elasticity ceiling for particles and walls (>1.0 adds energy).
 pub const ELASTICITY_MAX: f64 = 1.5;
+/// Explosion-threshold ceiling (births per second).
 pub const EXPLOSION_THRESHOLD_MAX: usize = 1000;
 
 /// How particles are colored.
@@ -62,8 +65,9 @@ impl SpawnMode {
           args_override_self = true)]
 pub struct Config {
     /// Apply a settings bundle: a built-in preset (fireworks, blob,
-    /// billiards, peace, orbits, mandala) or one from the user presets
-    /// file (see --list-presets); explicit options override its values
+    /// billiards, peace, orbits, mandala, accretion) or one from the user
+    /// presets file (see --list-presets); explicit options override its
+    /// values
     #[arg(long, value_name = "NAME")]
     pub preset: Option<String>,
 
@@ -414,6 +418,7 @@ pub const CONTROLS: &[(&str, &str)] = &[
         "E",
         "Export settings and scene (wells/walls) as a preset file",
     ),
+    ("J", "Launch a comet from the far edge toward the cursor"),
     ("Left click", "Spawn a burst of particles at the cursor"),
     (
         "Middle click",
@@ -687,6 +692,58 @@ mod tests {
             assert!(
                 readme.contains(input),
                 "control '{input}' is missing from the README controls table"
+            );
+        }
+    }
+
+    #[test]
+    fn readme_controls_table_lists_nothing_beyond_the_controls_source() {
+        // The reverse direction of the test above: every input row in the
+        // README's controls table must exist in CONTROLS, so a hotkey
+        // documented in the README but absent from --help fails too.
+        let readme = include_str!("../README.md");
+        let table = readme
+            .split("### Controls")
+            .nth(1)
+            .expect("README has a Controls section");
+        let rows: Vec<String> = table
+            .lines()
+            .skip_while(|l| !l.starts_with('|'))
+            .take_while(|l| l.starts_with('|'))
+            .skip(2) // header and separator rows
+            .map(|l| {
+                l.trim_start_matches('|')
+                    .split('|')
+                    .next()
+                    .expect("table row has a first cell")
+                    .replace('`', "")
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            !rows.is_empty(),
+            "failed to parse the README controls table"
+        );
+        for input in rows {
+            assert!(
+                CONTROLS.iter().any(|(i, _)| *i == input),
+                "README table input '{input}' is missing from config::CONTROLS (--help)"
+            );
+        }
+    }
+
+    #[test]
+    fn preset_help_names_every_builtin() {
+        // The --preset help text hand-lists the built-ins; a new preset
+        // variant must appear there or --help under-reports the options.
+        use clap::CommandFactory;
+        let help = Config::command().render_long_help().to_string();
+        for preset in Preset::value_variants() {
+            assert!(
+                help.contains(preset.label()),
+                "built-in preset '{}' is missing from the --preset help text",
+                preset.label()
             );
         }
     }
