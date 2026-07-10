@@ -2,6 +2,8 @@
 
 A GPU-accelerated particle simulation written in Rust featuring elastic collisions, gravity, dynamic particle spawning, and explosive chain reactions with synthesized audio feedback.
 
+**[Try it in your browser](https://schreck61.github.io/bouncy/demo/)** — the same simulation compiled to WebAssembly, with a control panel for every parameter (multi-threaded where the browser allows; see [web/README.md](web/README.md)).
+
 ## Features
 
 - **GPU-Accelerated Rendering**: Uses the `pixels` crate with wgpu backend for smooth, hardware-accelerated 2D rendering, with automatic CPU fallback via `softbuffer` when GPU is unavailable
