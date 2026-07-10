@@ -464,11 +464,27 @@ fn parse_initial_speed(s: &str) -> Result<f64, String> {
 /// Convert a URL query string into the CLI argument vector, so the web
 /// demo's `?preset=accretion&gravity=50&matter` resolves through the
 /// exact same parser, range checks, and error messages as the command
-/// line. Rules: `key=value` becomes `--key value`; a value-less key,
-/// `=`, `=true`, or `=1` becomes the bare flag `--key`; `=false` or
-/// `=0` drops the key entirely (the CLI cannot switch booleans off
-/// either). Percent-encoding and `+`-for-space are decoded.
+/// line. For boolean flags, a value-less key, `=`, `=true`, or `=1`
+/// becomes the bare flag `--key`, and `=false` or `=0` drops the key
+/// entirely (the CLI cannot switch booleans off either). For
+/// value-taking options, `key=value` becomes `--key value` verbatim —
+/// the truthiness aliases must not apply, or numeric values of 0 and 1
+/// (`?particle-size=1`) would be eaten as booleans. Percent-encoding
+/// and `+`-for-space are decoded.
 pub fn query_to_args(query: &str) -> Vec<std::ffi::OsString> {
+    // Which long options are boolean flags, straight from the clap
+    // schema so the query mapping can never disagree with the parser.
+    let cmd = Config::command();
+    let is_flag = |key: &str| {
+        cmd.get_arguments().any(|arg| {
+            arg.get_long() == Some(key)
+                && matches!(
+                    arg.get_action(),
+                    clap::ArgAction::SetTrue | clap::ArgAction::SetFalse
+                )
+        })
+    };
+
     let mut args: Vec<std::ffi::OsString> = vec!["bouncy".into()];
     for pair in query
         .trim_start_matches('?')
@@ -480,12 +496,20 @@ pub fn query_to_args(query: &str) -> Vec<std::ffi::OsString> {
             .map_or((pair, None), |(k, v)| (k, Some(v)));
         let key = percent_decode(key);
         let value = value.map(percent_decode);
-        match value.as_deref() {
-            Some("false" | "0") => {}
-            None | Some("" | "true" | "1") => args.push(format!("--{key}").into()),
-            Some(v) => {
-                args.push(format!("--{key}").into());
-                args.push(v.into());
+        if is_flag(&key) {
+            match value.as_deref() {
+                Some("false" | "0") => {}
+                _ => args.push(format!("--{key}").into()),
+            }
+        } else {
+            match value.as_deref() {
+                // A value-less (or empty) value-taking key becomes the
+                // bare option, so clap reports its missing-value error.
+                None | Some("") => args.push(format!("--{key}").into()),
+                Some(v) => {
+                    args.push(format!("--{key}").into());
+                    args.push(v.into());
+                }
             }
         }
     }
@@ -694,6 +718,32 @@ mod tests {
                 "control '{input}' is missing from the README controls table"
             );
         }
+    }
+
+    #[test]
+    fn query_truthy_aliases_apply_only_to_boolean_flags() {
+        // Regression: ?particle-size=1 used to become a bare
+        // --particle-size (the "1" eaten as a boolean alias, then clap
+        // demanding the missing value), and ?gravity=0 was dropped
+        // entirely, silently keeping the 100% default.
+        let args = query_to_args("?particle-size=1&gravity=0&matter=1&flow=true&trails");
+        let config = Config::try_resolve_with(&args, None).unwrap();
+        assert_eq!(config.particle_size, 1.0);
+        assert_eq!(config.gravity, 0);
+        assert!(config.matter, "=1 still switches a boolean flag on");
+        assert!(config.flow, "=true still switches a boolean flag on");
+        assert!(config.trails, "a value-less key still switches a flag on");
+
+        // Boolean flags still honor the off aliases.
+        let args = query_to_args("?matter=0&flow=false");
+        let config = Config::try_resolve_with(&args, None).unwrap();
+        assert!(!config.matter);
+        assert!(!config.flow);
+
+        // A value-less value-taking key still surfaces clap's
+        // missing-value error rather than being silently dropped.
+        assert!(Config::try_resolve_with(&query_to_args("?seed="), None).is_err());
+        assert!(Config::try_resolve_with(&query_to_args("?seed"), None).is_err());
     }
 
     #[test]

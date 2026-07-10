@@ -56,8 +56,10 @@ seed — thread-count invariance is enforced by tests.
 
 Every CLI option works as a query parameter, resolved by the same
 parser with the same validation: `?preset=accretion`,
-`?gravity=50&matter&seed=7`, `?width=800&height=600`. Value-less keys
-(or `=true`) are boolean flags; `=false` drops the key.
+`?gravity=50&matter&seed=7`, `?width=800&height=600`. For boolean
+flags, a value-less key (or `=true`/`=1`) switches the flag on and
+`=false`/`=0` drops it; values for every other option pass through
+verbatim, so `?particle-size=1` means one pixel, not "true".
 
 Two loader-only parameters are handled by `controls.js` and stripped
 before the query reaches the config parser: `?st` forces the
