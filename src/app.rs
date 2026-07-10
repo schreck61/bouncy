@@ -662,10 +662,12 @@ impl App {
         }
     }
 
-    /// Execute one panel command: plain Commands go through apply();
+    /// Execute one panel command: plain [`Command`]s go through `apply()`;
     /// pointer-shaped ones (which carry coordinates the cursor state
-    /// would otherwise supply) act directly, mirroring handle_mouse.
+    /// would otherwise supply) act directly, mirroring `handle_mouse`.
+    /// By-value deliberately: commands are consumed from the mailbox.
     #[cfg(target_arch = "wasm32")]
+    #[allow(clippy::needless_pass_by_value)]
     fn apply_web_command(&mut self, cmd: crate::web::WebCommand) {
         use crate::web::WebCommand;
         match cmd {
@@ -696,7 +698,7 @@ impl App {
             WebCommand::SetExplosionThreshold(t) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.explosion_threshold =
-                        t.clamp(0, EXPLOSION_THRESHOLD_MAX.try_into().unwrap_or(i32::MAX)) as usize;
+                        usize::try_from(t.max(0)).map_or(0, |v| v.min(EXPLOSION_THRESHOLD_MAX));
                 }
             }
             WebCommand::SpawnBurst(x, y) => {

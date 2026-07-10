@@ -1,12 +1,21 @@
 #!/bin/sh
 # Build the web demo bundles into web/pkg (single-threaded, stable) and
-# web/pkg-mt (multi-threaded, nightly). Run from the repository root.
-# CI runs the same steps (.github/workflows/docs.yml).
+# web/pkg-mt (multi-threaded, nightly). Run from the repository root:
+#   ./web/build.sh        both bundles
+#   ./web/build.sh st     single-threaded only
+#   ./web/build.sh mt     multi-threaded only
+# CI runs st and mt as separate steps so a nightly breakage in the
+# threaded build never blocks the docs+demo deployment.
 set -eu
 
+MODE="${1:-all}"
+
+if [ "$MODE" = "st" ] || [ "$MODE" = "all" ]; then
 echo "== single-threaded bundle (stable) =="
 wasm-pack build --target web --release --out-dir web/pkg
+fi
 
+if [ "$MODE" = "mt" ] || [ "$MODE" = "all" ]; then
 echo "== multi-threaded bundle (nightly + build-std) =="
 # Shared memory needs explicit link args: rustc does not add
 # --shared-memory/--import-memory for you, and wasm-bindgen's thread
@@ -36,6 +45,7 @@ fi
 rm -rf web/pkg-mt
 wasm-bindgen --target web --out-dir web/pkg-mt \
   target/wasm32-unknown-unknown/release/bouncy.wasm
+fi
 
 echo "== done =="
-ls -la web/pkg/bouncy_bg.wasm web/pkg-mt/bouncy_bg.wasm
+ls -la web/pkg/bouncy_bg.wasm web/pkg-mt/bouncy_bg.wasm 2>/dev/null || true

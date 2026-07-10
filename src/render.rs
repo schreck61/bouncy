@@ -535,15 +535,15 @@ pub struct RenderContext {
     buffer: Vec<u8>,
     canvas: web_sys::HtmlCanvasElement,
     ctx2d: web_sys::CanvasRenderingContext2d,
-    /// A JS-side copy of the frame. ImageData cannot wrap a view into
+    /// A JS-side copy of the frame. `ImageData` cannot wrap a view into
     /// wasm memory when that memory is shared (the multi-threaded
     /// build), so every present copies the frame into this ordinary
-    /// Uint8ClampedArray, which `image_data` wraps once per size.
+    /// `Uint8ClampedArray`, which `image_data` wraps once per size.
     js_frame: js_sys::Uint8ClampedArray,
     image_data: web_sys::ImageData,
 }
 
-/// Build the persistent JS frame array + ImageData pair for a size.
+/// Build the persistent JS frame array + `ImageData` pair for a size.
 #[cfg(target_arch = "wasm32")]
 fn js_frame_pair(width: u32, height: u32) -> (js_sys::Uint8ClampedArray, web_sys::ImageData) {
     let js_frame = js_sys::Uint8ClampedArray::new_with_length(width * height * 4);

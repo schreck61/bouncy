@@ -1,10 +1,10 @@
 name: Docs
 
-# Build the rustdoc API documentation and publish it to GitHub Pages on
-# every push to main. Bouncy is a binary crate, so private items are
-# documented too — the internal architecture (the headless Simulation
-# core, the render backends, the preset machinery) is the documentation
-# that matters.
+# Build the rustdoc API documentation plus the WebAssembly demo and
+# publish both to GitHub Pages on every push to main: rustdoc at the
+# site root, the demo at /demo. Private items are documented too — the
+# internal architecture (the headless Simulation core, the render
+# backends, the preset machinery) is the documentation that matters.
 
 on:
   push:
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   docs:
-    name: Build and deploy rustdoc
+    name: Build and deploy rustdoc + demo
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -32,8 +32,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install Rust toolchain (nightly, for the threaded demo)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: wasm32-unknown-unknown
+          components: rust-src
+
+      - name: Make stable the default toolchain
+        run: rustup default stable
 
       - name: Install Linux dependencies
         run: |
@@ -45,10 +56,37 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --document-private-items
 
-      - name: Add root redirect and fix permissions
+      - name: Install wasm-pack
+        run: curl -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+
+      - name: Build web demo bundle (single-threaded)
+        run: ./web/build.sh st
+
+      # Nightly breakage must never block the docs+demo deployment; the
+      # loader falls back to the single-threaded bundle when pkg-mt is
+      # absent.
+      - name: Build web demo bundle (multi-threaded)
+        continue-on-error: true
+        run: ./web/build.sh mt
+
+      - name: Enforce the single-threaded bundle size budget
+        run: |
+          size=$(wc -c < web/pkg/bouncy_bg.wasm)
+          echo "single-threaded wasm: ${size} bytes"
+          if [ "$size" -gt 1600000 ]; then
+            echo "::error::wasm bundle exceeds the 1.6 MB budget (${size} bytes)"
+            exit 1
+          fi
+
+      - name: Assemble the site (docs at root, demo at /demo)
         run: |
           echo '<meta http-equiv="refresh" content="0; url=bouncy/index.html">' > target/doc/index.html
           rm -f target/doc/.lock
+          mkdir -p target/doc/demo
+          cp web/index.html web/style.css web/controls.js web/coi.js target/doc/demo/
+          cp -R web/pkg target/doc/demo/
+          if [ -d web/pkg-mt ]; then cp -R web/pkg-mt target/doc/demo/; fi
+          rm -f target/doc/demo/pkg/.gitignore
           chmod -R +rX target/doc
 
       - name: Upload Pages artifact

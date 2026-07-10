@@ -156,6 +156,27 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # The library must keep compiling for the web demo's target; this
+  # tripwire catches native-only code creeping into shared modules.
+  wasm-check:
+    name: Check wasm32 target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Check library for wasm32
+        run: cargo check --target wasm32-unknown-unknown --lib
+
+      - name: Clippy for wasm32
+        run: cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings
+
   # Run the test suite on every supported host platform
   test:
     name: Test (${{ matrix.os }})

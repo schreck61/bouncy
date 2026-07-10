@@ -33,7 +33,7 @@ pub enum WebCommand {
     LaunchComet(f64, f64),
     PinWell(f64, f64, Polarity),
     TriggerExplosion(f64, f64),
-    /// Live-resize the arena to a new logical size (Simulation::resize
+    /// Live-resize the arena to a new logical size (`Simulation::resize`
     /// plus a frame-buffer reallocation).
     Resize(u32, u32),
 }
@@ -214,7 +214,7 @@ impl WebHandle {
     }
 
     /// Resize the simulation to a new logical size (the page calls this
-    /// from a debounced ResizeObserver, so the arena tracks the canvas).
+    /// from a debounced `ResizeObserver`, so the arena tracks the canvas).
     pub fn resize(&self, width: u32, height: u32) {
         self.push(WebCommand::Resize(width, height));
     }
