@@ -4,6 +4,24 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## 1.3.1 — 2026-07-10
+
+- Fixed URL-parameter parsing eating numeric values: the `=1`/`=0`
+  truthiness aliases now apply only to boolean flags, so
+  `?particle-size=1` (which the demo's launch options produce for
+  whole-number sizes) parses as one pixel and `?gravity=0` disables
+  gravity instead of being silently dropped.
+- The demo header shows the running version, stamped from the wasm
+  module itself.
+- Documentation accuracy sweep: `accretion` listed in the `--preset`
+  help, `J` (comet) listed in `--help`, `libudev-dev` added to the
+  Linux prerequisites, loader-only URL parameters documented, this
+  changelog added, the roadmap brought up to date, and doc comments on
+  the previously undocumented public API surface. New drift tests pin
+  the control and preset listings to the code.
+- The browser demo is now explicitly recommended for Chrome until the
+  frame-rate gap in other browsers is addressed.
+
 ## 1.3.0 — 2026-07-10
 
 The browser demo release: the simulation compiled to WebAssembly and
