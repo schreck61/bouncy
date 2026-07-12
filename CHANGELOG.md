@@ -4,6 +4,20 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## 1.4.0 — 2026-07-12
+
+- The demo's control panel is now state-complete: status chips show
+  running/paused/stopped, the launch preset, muted, and
+  explosion-in-progress; the spawn/color/HUD cycle buttons display
+  their current value; toggles render as switches; the clear buttons
+  count their targets; and the particle readout shows the population
+  cap. Every indicator renders from the per-frame snapshot, which
+  gained `stopped`, `exploding`, and `hud` fields.
+- The panel's position-taking buttons (burst, comet, pin well, pin
+  repeller, explode) arm a one-shot placement tool — click the button,
+  then click the canvas to place the action there. Previously they
+  acted at the arena center. Esc or a second press cancels.
+
 ## 1.3.1 — 2026-07-10
 
 - Fixed URL-parameter parsing eating numeric values: the `=1`/`=0`
