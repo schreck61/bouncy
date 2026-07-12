@@ -43,6 +43,15 @@ canvas#bouncy {
   touch-action: none;
 }
 
+/* Armed placement tool: an invisible layer over the stage catches the
+   next click before winit's canvas handlers can turn it into a burst. */
+#tool-overlay {
+  position: absolute;
+  inset: 0;
+  cursor: crosshair;
+  z-index: 4;
+}
+
 #hint {
   position: absolute;
   left: 0; right: 0; bottom: 8px;
@@ -62,9 +71,32 @@ canvas#bouncy {
 
 #panel h1 {
   font-size: 18px;
-  margin: 0 0 10px;
+  margin: 0 0 8px;
 }
 #panel h1 span { color: var(--dim); font-size: 12px; font-weight: normal; }
+
+/* Status chips: one pill per live state, shown/hidden from the
+   per-frame snapshot so they can never disagree with the simulation. */
+#chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+.chip {
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 10px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.chip.run  { background: #17301c; color: #8fdd9a; }
+.chip.pause{ background: #33270f; color: #f0c060; }
+.chip.stop { background: #3a1518; color: #f09595; }
+.chip.info { background: #12283a; color: #6cc3ff; }
+.chip.warn { background: #33270f; color: #f0c060; }
+.chip.boom { background: #2b1a33; color: #cf9df2; }
+.chip.tool { background: #0f3038; color: #6fe0d0; }
 
 #readouts {
   display: grid;
@@ -104,6 +136,25 @@ button {
 button:hover { border-color: var(--accent); }
 button:active { transform: translateY(1px); }
 
+/* A placement tool is armed: the button stays lit until the canvas
+   click lands (or Esc cancels). */
+button.armed {
+  border-color: var(--accent);
+  background: #14344d;
+  color: #cfeaff;
+}
+
+/* Cycle buttons show where in their cycle they are: a dim caption
+   (with the matching hotkey) over the current value. */
+button.cycle small {
+  display: block;
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: .03em;
+  margin-bottom: 1px;
+}
+button.cycle span { display: block; }
+
 .slider {
   display: block;
   margin: 10px 0 2px;
@@ -120,11 +171,52 @@ button:active { transform: translateY(1px); }
 #toggles {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 2px 10px;
+  gap: 6px 14px;
   margin: 10px 0;
   font-size: 13px;
 }
-#toggles input { accent-color: var(--accent); margin-right: 6px; }
+/* Checkboxes drawn as switches: on-state is unmistakable at a glance,
+   and the label brightens with it. The input stays a real checkbox
+   (keyboard and screen-reader behavior come free). */
+#toggles label {
+  display: flex;
+  /* The input precedes the text in the markup; visually the switch
+     belongs on the right, label on the left. */
+  flex-direction: row-reverse;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--dim);
+  cursor: pointer;
+}
+#toggles label:has(input:checked) { color: var(--ink); }
+#toggles input {
+  appearance: none;
+  flex: none;
+  width: 30px;
+  height: 17px;
+  margin: 0;
+  border-radius: 999px;
+  background: #2a333f;
+  position: relative;
+  cursor: pointer;
+  transition: background .12s ease-out;
+}
+#toggles input::after {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  background: #7c8794;
+  transition: transform .12s ease-out, background .12s ease-out;
+}
+#toggles input:checked { background: var(--accent); }
+#toggles input:checked::after {
+  transform: translateX(13px);
+  background: #0b0e12;
+}
+#toggles input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 #launch {
   margin: 12px 0 4px;

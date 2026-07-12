@@ -4,13 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Bouncy — particle physics in your browser</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=6">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='6' fill='%2378dcff'/></svg>">
 </head>
 <body>
   <main>
     <section id="stage">
       <canvas id="bouncy" tabindex="0"></canvas>
+      <!-- Click-catcher for armed placement tools: swallows the pointer
+           event before winit's canvas handlers see it. -->
+      <div id="tool-overlay" hidden></div>
       <div id="hint">
         click: burst &nbsp;•&nbsp; right-click: explosion &nbsp;•&nbsp; middle: comet
         &nbsp;•&nbsp; hold G: well &nbsp;•&nbsp; W: pin well &nbsp;•&nbsp; hold V: draw walls
@@ -23,9 +26,19 @@
     <aside id="panel">
       <h1>Bouncy <span id="version"></span></h1>
 
+      <!-- Status chips: always-current state, straight from the
+           per-frame snapshot (plus the launch preset and armed tool). -->
+      <div id="chips">
+        <span id="chip-state" class="chip run">running</span>
+        <span id="chip-preset" class="chip info" hidden></span>
+        <span id="chip-muted" class="chip warn" hidden>muted</span>
+        <span id="chip-exploding" class="chip boom" hidden>exploding</span>
+        <span id="chip-tool" class="chip tool" hidden></span>
+      </div>
+
       <div id="readouts">
         <div><span id="ro-fps">0</span><label>FPS</label></div>
-        <div><span id="ro-particles">0</span><label>particles</label></div>
+        <div><span id="ro-particles">0</span><label id="ro-cap">particles</label></div>
         <div><span id="ro-births">0</span><label>births/s</label></div>
         <div><span id="ro-size">–</span><label>arena</label></div>
       </div>
@@ -34,14 +47,14 @@
         <button id="btn-pause">Pause</button>
         <button id="btn-step" title="advance one frame while paused">Step</button>
         <button id="btn-reset">Reset</button>
-        <button id="btn-explode" title="explosion at the center">Explode</button>
+        <button id="btn-explode" title="then click the canvas to detonate there">Explode</button>
       </div>
 
       <div class="row">
-        <button id="btn-burst">Burst</button>
-        <button id="btn-comet">Comet</button>
-        <button id="btn-well">Pin well</button>
-        <button id="btn-repel">Pin repeller</button>
+        <button id="btn-burst" title="then click the canvas to place the burst">Burst</button>
+        <button id="btn-comet" title="then click the canvas to aim the comet">Comet</button>
+        <button id="btn-well" title="then click the canvas to pin a well there">Pin well</button>
+        <button id="btn-repel" title="then click the canvas to pin a repeller there">Pin repeller</button>
       </div>
 
       <div class="row">
@@ -80,9 +93,9 @@
       </div>
 
       <div class="row">
-        <button id="btn-color">Color mode</button>
-        <button id="btn-spawn">Spawn mode</button>
-        <button id="btn-hud">HUD</button>
+        <button id="btn-spawn" class="cycle"><small>spawn (B)</small><span id="val-spawn">…</span></button>
+        <button id="btn-color" class="cycle"><small>color (C)</small><span id="val-color">…</span></button>
+        <button id="btn-hud" class="cycle"><small>HUD (H)</small><span id="val-hud">…</span></button>
       </div>
 
       <div class="row">
@@ -136,7 +149,7 @@
   </main>
 
   <div id="error" hidden></div>
-  <script src="coi.js?v=5"></script>
-  <script type="module" src="controls.js?v=5"></script>
+  <script src="coi.js?v=6"></script>
+  <script type="module" src="controls.js?v=6"></script>
 </body>
 </html>

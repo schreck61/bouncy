@@ -84,6 +84,16 @@ impl HudMode {
             HudMode::StatsAndKeys => HudMode::Hidden,
         }
     }
+
+    /// Short name for the web panel's HUD cycle button.
+    #[cfg(target_arch = "wasm32")]
+    fn label(self) -> &'static str {
+        match self {
+            HudMode::Hidden => "hidden",
+            HudMode::Stats => "stats",
+            HudMode::StatsAndKeys => "stats+keys",
+        }
+    }
 }
 
 /// A runtime control action, decoupled from its input source. The
@@ -771,6 +781,8 @@ impl App {
             wall_elasticity: sim.wall_elasticity,
             time_scale: self.time_scale,
             paused: self.paused,
+            stopped: sim.stopped(),
+            exploding: sim.explosion().is_some(),
             matter: sim.matter,
             flow: sim.flow,
             self_gravity: sim.self_gravity,
@@ -785,6 +797,7 @@ impl App {
             audio_ready: crate::audio::web_ready(),
             spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
             color_mode: value_name(self.color_mode.to_possible_value()),
+            hud: self.hud_mode.label().to_string(),
         };
         shared.scene_toml = scene_toml;
     }

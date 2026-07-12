@@ -56,6 +56,10 @@ pub struct Snapshot {
     pub wall_elasticity: f64,
     pub time_scale: f64,
     pub paused: bool,
+    /// All motion has ceased (the STOPPED banner state).
+    pub stopped: bool,
+    /// An explosion ring is currently expanding.
+    pub exploding: bool,
     pub matter: bool,
     pub flow: bool,
     pub self_gravity: bool,
@@ -74,6 +78,9 @@ pub struct Snapshot {
     /// share link can carry them.
     pub spawn_mode: String,
     pub color_mode: String,
+    /// Current HUD overlay level (hidden / stats / stats+keys), so the
+    /// panel's cycle button can show where in the cycle it is.
+    pub hud: String,
 }
 
 /// The mailbox shared between the running [`App`] and the [`WebHandle`]

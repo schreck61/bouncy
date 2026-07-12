@@ -50,21 +50,96 @@ async function loadBouncy() {
   return { mod: st, initPool: null };
 }
 
+// ---- Placement tools ---------------------------------------------------
+// Position-shaped actions arm a one-shot tool: the button lights up, a
+// chip narrates it, and the next click on the canvas places the action
+// there. The overlay swallows that click before winit can turn it into
+// a burst; Esc or a second press on the button cancels. The keyboard
+// path (hover the canvas, press W etc.) is unchanged.
+let armed = null; // { id, label, act(x, y) }
+
+function disarmTool() {
+  if (!armed) return;
+  $(armed.id).classList.remove("armed");
+  armed = null;
+  $("tool-overlay").hidden = true;
+  $("chip-tool").hidden = true;
+}
+
+function armTool(id, spec) {
+  if (armed && armed.id === id) {
+    disarmTool(); // second press cancels
+    return;
+  }
+  disarmTool();
+  armed = { id, ...spec };
+  $(id).classList.add("armed");
+  $("tool-overlay").hidden = false;
+  const chip = $("chip-tool");
+  chip.textContent = `placing ${spec.label} — click the canvas (Esc cancels)`;
+  chip.hidden = false;
+}
+
+// Map a click's CSS position to simulation coordinates. The canvas
+// backing store stays at simulation size while object-fit: contain
+// letterboxes it in the element — this is the CSS-space twin of
+// render.rs::window_pos_to_sim, using the snapshot's arena size.
+function clickToSim(e) {
+  const s = latest;
+  if (!s.width || !s.height) return null;
+  const rect = $("bouncy").getBoundingClientRect();
+  const scale = Math.min(rect.width / s.width, rect.height / s.height);
+  const offX = (rect.width - s.width * scale) / 2;
+  const offY = (rect.height - s.height * scale) / 2;
+  const x = (e.clientX - rect.left - offX) / scale;
+  const y = (e.clientY - rect.top - offY) / scale;
+  return [
+    Math.min(Math.max(x, 0), s.width),
+    Math.min(Math.max(y, 0), s.height),
+  ];
+}
+
 function bind(handle) {
   const canvas = $("bouncy");
-  const center = () => {
-    const s = handle.state();
-    return [s.width / 2, s.height / 2];
-  };
-
   $("btn-pause").onclick = () => handle.set_paused(!latest.paused);
   $("btn-step").onclick = () => handle.step_frame();
   $("btn-reset").onclick = () => handle.reset();
-  $("btn-explode").onclick = () => handle.trigger_explosion(...center());
-  $("btn-burst").onclick = () => handle.spawn_burst(...center());
-  $("btn-comet").onclick = () => handle.launch_comet(...center());
-  $("btn-well").onclick = () => handle.pin_well(...center(), false);
-  $("btn-repel").onclick = () => handle.pin_well(...center(), true);
+
+  const tools = {
+    "btn-burst": { label: "burst", act: (x, y) => handle.spawn_burst(x, y) },
+    "btn-comet": { label: "comet", act: (x, y) => handle.launch_comet(x, y) },
+    "btn-well": { label: "well", act: (x, y) => handle.pin_well(x, y, false) },
+    "btn-repel": {
+      label: "repeller",
+      act: (x, y) => handle.pin_well(x, y, true),
+    },
+    "btn-explode": {
+      label: "explosion",
+      act: (x, y) => handle.trigger_explosion(x, y),
+    },
+  };
+  for (const [id, spec] of Object.entries(tools)) {
+    $(id).onclick = () => armTool(id, spec);
+  }
+  $("tool-overlay").onclick = (e) => {
+    const pos = armed && clickToSim(e);
+    if (pos) armed.act(...pos);
+    disarmTool();
+  };
+  // Capture phase: cancel the tool before winit's canvas listener can
+  // see the Escape (which would otherwise stop the whole event loop).
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (armed && e.key === "Escape") {
+        disarmTool();
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    },
+    true,
+  );
+
   $("btn-clear-wells").onclick = () => handle.clear_wells();
   $("btn-clear-walls").onclick = () => handle.clear_walls();
   $("btn-color").onclick = () => handle.cycle_color_mode();
@@ -235,11 +310,28 @@ globalThis.bouncyShareUrl = shareUrl;
 function reflect(s) {
   latest = s;
   $("ro-fps").textContent = s.fps.toFixed(0);
-  $("ro-particles").textContent = `${s.particles}`;
-  $("ro-particles").title = `cap ${s.max_particles}`;
+  $("ro-particles").textContent = s.particles.toLocaleString();
+  $("ro-cap").textContent = `of ${s.max_particles.toLocaleString()}`;
   $("ro-births").textContent = `${s.birth_rate}`;
   $("ro-size").textContent = `${s.width}×${s.height}`;
   $("btn-pause").textContent = s.paused ? "Resume" : "Pause";
+
+  // Status chips: the running/paused/stopped chip is always visible;
+  // the rest appear only while their state holds.
+  const state = $("chip-state");
+  state.textContent = s.stopped ? "stopped" : s.paused ? "paused" : "running";
+  state.className = `chip ${s.stopped ? "stop" : s.paused ? "pause" : "run"}`;
+  $("chip-muted").hidden = !s.muted;
+  $("chip-exploding").hidden = !s.exploding;
+
+  // Cycle buttons and clear buttons show where they currently stand.
+  $("val-spawn").textContent = s.spawn_mode;
+  $("val-color").textContent = s.color_mode;
+  $("val-hud").textContent = s.hud ?? "…"; // pre-1.3.2 bundle: no field yet
+  $("btn-clear-wells").textContent =
+    s.wells > 0 ? `Clear wells (${s.wells})` : "Clear wells";
+  $("btn-clear-walls").textContent =
+    s.walls > 0 ? `Clear walls (${s.walls})` : "Clear walls";
 
   const follow = (id, value, format) => {
     const el = $(`in-${id}`);
@@ -261,7 +353,7 @@ function reflect(s) {
   $("tg-music").checked = s.music;
   $("btn-sound").textContent = !s.audio_ready
     ? "Enable sound"
-    : s.muted ? "Unmute" : "Mute";
+    : s.muted ? "Muted — unmute" : "Sound on — mute";
 }
 
 (async () => {
@@ -277,6 +369,13 @@ function reflect(s) {
     const params = new URLSearchParams(location.search);
     params.delete("st");
     params.delete("cb");
+    // The preset chip comes from the launch URL: presets are
+    // construction-time state, so the snapshot has no field for them.
+    const preset = params.get("preset");
+    if (preset) {
+      $("chip-preset").textContent = `preset: ${preset}`;
+      $("chip-preset").hidden = false;
+    }
     const handle = new mod.WebHandle(params.toString());
     // Console access for tinkering: bouncyHandle.set_gravity(-500) etc.
     // (Not `bouncy`: the canvas id already claims that DOM global.)
