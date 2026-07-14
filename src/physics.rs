@@ -825,72 +825,42 @@ impl Segment {
     }
 }
 
-/// Closest pair of points between the motion segment `(ax, ay)→(bx, by)`
-/// and the wall segment `seg`: (point on motion, point on wall). Handles
-/// every degeneracy (either or both segments a point, parallel segments)
-/// by clamping into the valid parameter range.
-fn closest_points_of_segments(
-    ax: f64,
-    ay: f64,
-    bx: f64,
-    by: f64,
-    seg: &Segment,
-) -> ((f64, f64), (f64, f64)) {
-    const EPS: f64 = 1e-12;
-    let (d1x, d1y) = (bx - ax, by - ay);
-    let (d2x, d2y) = (seg.x2 - seg.x1, seg.y2 - seg.y1);
-    let (rx, ry) = (ax - seg.x1, ay - seg.y1);
-    let motion_len_sq = d1x * d1x + d1y * d1y;
-    let wall_len_sq = d2x * d2x + d2y * d2y;
-    let wall_dot_off = d2x * rx + d2y * ry;
-    let (s, t) = if motion_len_sq <= EPS && wall_len_sq <= EPS {
-        (0.0, 0.0)
-    } else if motion_len_sq <= EPS {
-        (0.0, (wall_dot_off / wall_len_sq).clamp(0.0, 1.0))
-    } else {
-        let motion_dot_off = d1x * rx + d1y * ry;
-        if wall_len_sq <= EPS {
-            ((-motion_dot_off / motion_len_sq).clamp(0.0, 1.0), 0.0)
-        } else {
-            let motion_dot_wall = d1x * d2x + d1y * d2y;
-            let denom = motion_len_sq * wall_len_sq - motion_dot_wall * motion_dot_wall;
-            let s = if denom > EPS {
-                ((motion_dot_wall * wall_dot_off - motion_dot_off * wall_len_sq) / denom)
-                    .clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let t = (motion_dot_wall * s + wall_dot_off) / wall_len_sq;
-            if t < 0.0 {
-                ((-motion_dot_off / motion_len_sq).clamp(0.0, 1.0), 0.0)
-            } else if t > 1.0 {
-                (
-                    ((motion_dot_wall - motion_dot_off) / motion_len_sq).clamp(0.0, 1.0),
-                    1.0,
-                )
-            } else {
-                (s, t)
-            }
-        }
-    };
-    (
-        (ax + s * d1x, ay + s * d1y),
-        (seg.x1 + t * d2x, seg.y1 + t * d2y),
-    )
+/// Signed side of `(px, py)` relative to the wall's directed infinite
+/// line: positive on the `(-aby, abx)` perpendicular's side, negative
+/// opposite, zero on the line.
+fn line_side(seg: &Segment, px: f64, py: f64) -> f64 {
+    (seg.x2 - seg.x1) * (py - seg.y1) - (seg.y2 - seg.y1) * (px - seg.x1)
 }
 
-/// Bounce particles off the drawn wall segments. Contact is decided by the
-/// closest approach between the wall and the particle's motion over the
-/// substep — `prev` holds each particle's center before this substep's
-/// position update (same indexing as `particles`) — so a fast particle
-/// whose single step lands it clear on the far side of the zero-thickness
-/// wall is still caught, instead of tunneling when the substep cap
-/// saturates at low frame rates. On contact the particle is pushed out
-/// along the contact normal (toward the side it came from), and its
-/// approaching velocity component reflects scaled by `wall_elasticity` —
-/// the arena-wall rule. A particle already receding only gets the position
-/// correction, so a bounce is never re-reflected back into the wall it
-/// just left.
+/// Whether the motion segment `(ox, oy)→(nx, ny)` properly crosses the
+/// wall segment: strict side changes on both segments, so touches,
+/// collinear overlaps, and crossings of the line beyond the wall's span
+/// all count as not crossing (the end-position overlap test owns those).
+fn motion_crosses_segment(seg: &Segment, ox: f64, oy: f64, nx: f64, ny: f64) -> bool {
+    if line_side(seg, ox, oy) * line_side(seg, nx, ny) >= 0.0 {
+        return false;
+    }
+    let (mdx, mdy) = (nx - ox, ny - oy);
+    let end1 = mdx * (seg.y1 - oy) - mdy * (seg.x1 - ox);
+    let end2 = mdx * (seg.y2 - oy) - mdy * (seg.x2 - ox);
+    end1 * end2 < 0.0
+}
+
+/// Bounce particles off the drawn wall segments. Two contact conditions,
+/// both resolved from the particle's *end* position so that sustained
+/// contact never erases tangential motion (a particle sliding along a
+/// wall must keep sliding, not stick): the end position overlaps the
+/// wall, or the motion over the substep — `prev` holds each particle's
+/// center before this substep's position update, same indexing as
+/// `particles` — crossed the wall outright. The crossing test is what
+/// prevents tunneling when the substep cap saturates at low frame rates:
+/// however far past the zero-thickness wall a single step lands, the
+/// particle is placed back on the side it came from, at the wall's
+/// closest point to where its step ended. On contact the particle is
+/// pushed out along the contact normal and its approaching velocity
+/// component reflects scaled by `wall_elasticity` — the arena-wall rule.
+/// A particle already receding only gets the position correction, so a
+/// bounce is never re-reflected back into the wall it just left.
 pub fn collide_with_segments(
     particles: &mut [Particle],
     prev: &[(f64, f64)],
@@ -901,7 +871,7 @@ pub fn collide_with_segments(
     for (p, &(ox, oy)) in particles.iter_mut().zip(prev) {
         for seg in segments {
             // Cheap AABB reject (over the whole motion) before the exact
-            // segment-segment test.
+            // tests.
             let r = p.radius;
             if p.x.max(ox) < seg.x1.min(seg.x2) - r
                 || p.x.min(ox) > seg.x1.max(seg.x2) + r
@@ -910,26 +880,26 @@ pub fn collide_with_segments(
             {
                 continue;
             }
-            let ((mx, my), (cx, cy)) = closest_points_of_segments(ox, oy, p.x, p.y, seg);
-            let (dx, dy) = (mx - cx, my - cy);
+            let (cx, cy) = seg.closest_point(p.x, p.y);
+            let (dx, dy) = (p.x - cx, p.y - cy);
             let d2 = dx * dx + dy * dy;
-            if d2 >= r * r {
+            let crossed = motion_crosses_segment(seg, ox, oy, p.x, p.y);
+            if !crossed && d2 >= r * r {
                 continue;
             }
-            // Contact normal from the wall toward the particle center at
-            // closest approach. A motion that crossed the wall (or a
-            // dead-center hit) has no direction; push out perpendicular to
-            // the segment, toward the side the motion started on (or
-            // straight up for a degenerate point segment).
+            // Contact normal. A crossing (or a dead-center overlap) has
+            // no radial direction from the end position; push out
+            // perpendicular to the segment, toward the side the motion
+            // started on (or straight up for a degenerate point segment).
             let d = d2.sqrt();
-            let (nx, ny) = if d > 1e-9 {
+            let (nx, ny) = if !crossed && d > 1e-9 {
                 (dx / d, dy / d)
             } else {
                 let (abx, aby) = (seg.x2 - seg.x1, seg.y2 - seg.y1);
                 let len = (abx * abx + aby * aby).sqrt();
                 if len > 1e-9 {
                     let (px, py) = (-aby / len, abx / len);
-                    if (ox - cx) * px + (oy - cy) * py < 0.0 {
+                    if line_side(seg, ox, oy) < 0.0 {
                         (-px, -py)
                     } else {
                         (px, py)
@@ -1929,6 +1899,36 @@ mod tests {
             p.y
         );
         assert!((p.vy - (-800.0)).abs() < 1e-9, "reflected: {}", p.vy);
+    }
+
+    #[test]
+    fn sliding_contact_preserves_tangential_motion() {
+        // A particle in sustained contact sliding parallel to a vertical
+        // wall: the contact must push it out along the normal only —
+        // never reset its tangential progress, which reads as the
+        // particle sticking to the wall.
+        let wall = Segment {
+            x1: 100.0,
+            y1: 0.0,
+            x2: 100.0,
+            y2: 200.0,
+        };
+        // Overlapping by 0.1 px, moving straight down at 100 px/s; this
+        // substep carried it from y=50 to y=51.
+        let mut particles = vec![particle(101.4, 51.0, 0.0, 100.0)];
+        collide_with_segments(&mut particles, &[(101.4, 50.0)], &[wall], 1.0);
+        let p = &particles[0];
+        assert!(
+            (p.y - 51.0).abs() < 1e-9,
+            "tangential progress kept: y={}",
+            p.y
+        );
+        assert!(
+            (p.x - (100.0 + RADIUS)).abs() < 1e-9,
+            "pushed out along the normal: x={}",
+            p.x
+        );
+        assert!((p.vy - 100.0).abs() < 1e-9, "slide velocity kept: {}", p.vy);
     }
 
     #[test]

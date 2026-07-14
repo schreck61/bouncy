@@ -2323,6 +2323,36 @@ mod tests {
     }
 
     #[test]
+    fn particles_slide_down_a_near_vertical_wall() {
+        // Regression for particles sticking to drawn walls: resolving
+        // contact at the motion's closest approach reset a sliding
+        // particle to its start-of-substep position every substep,
+        // freezing it in place. Against a near-vertical wall under
+        // gravity, a resting particle must keep descending.
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.gravity_percent = 100;
+        s.particles[1].x = 790.0;
+        s.particles[1].y = 10.0;
+        // Wall leaning 10 px over 500: essentially the screenshot stroke.
+        assert!(s.add_wall_segment(400.0, 50.0, 410.0, 550.0));
+        let r = s.particles[0].radius;
+        // Start pressed against the wall's upper reach, at rest.
+        s.particles[0].x = 401.0 + r;
+        s.particles[0].y = 100.0;
+
+        let now = Instant::now();
+        for _ in 0..120 {
+            s.step(1.0 / 60.0, now, None);
+        }
+        assert!(
+            s.particles[0].y > 300.0,
+            "particle must slide down the wall, not stick: y={}",
+            s.particles[0].y
+        );
+    }
+
+    #[test]
     fn pair_pushout_cannot_leave_a_particle_inside_a_wall() {
         // A particle resting on a wall takes a hit from above: the pair
         // solver's separation pushout shoves the rester into the wall

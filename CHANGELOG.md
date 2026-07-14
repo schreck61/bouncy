@@ -4,6 +4,16 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Fixed particles sticking to drawn walls, a 1.4.1 regression: wall
+  contact was resolved at the motion's closest approach to the wall,
+  which for a particle sliding along a wall is the start of its
+  substep motion — so every substep reset the slide and froze the
+  particle in place. Contact still triggers on end-position overlap or
+  on the motion crossing the wall (the tunneling guard), but it now
+  always resolves from the end position, preserving tangential motion.
+
 ## 1.4.1 — 2026-07-14
 
 - Fixed fast particles tunneling through drawn walls at low frame
