@@ -7,7 +7,7 @@ A GPU-accelerated particle simulation written in Rust featuring elastic collisio
 ## Features
 
 - **GPU-Accelerated Rendering**: Uses the `pixels` crate with wgpu backend for smooth, hardware-accelerated 2D rendering, with automatic CPU fallback via `softbuffer` when GPU is unavailable
-- **Realistic Physics**: Particle-particle collisions with a configurable coefficient of restitution, wall bounces, configurable gravity, and adaptive substepping so fast particles never tunnel through each other
+- **Realistic Physics**: Particle-particle collisions with a configurable coefficient of restitution, wall bounces, configurable gravity, adaptive substepping so fast particles never tunnel through each other, and swept wall contact so they never tunnel through drawn walls
 - **Fast Collision Detection**: A uniform spatial grid keeps collision detection near-linear, comfortably handling thousands of particles
 - **Dynamic Spawning**: New particles spawn on collision, creating organic growth patterns
 - **Explosion Mechanics**: When spawn rate exceeds threshold, a dramatic explosion kills 99% of particles
@@ -139,7 +139,8 @@ The simulation uses a simple but effective physics model:
 - **Gravity**: Constant downward (or upward) acceleration applied to all particles
 - **Collisions**: Particles exchange momentum along the collision normal using the reduced-mass impulse `j = (1 + e) · dvn · m₁m₂/(m₁ + m₂)`, with mass proportional to area — heavy particles plow through light ones, and unequal-size contacts behave correctly. `e = 1.0` is fully elastic; `e = 0.0` leaves both moving together
 - **Wall Bouncing**: Particles reflect off screen boundaries scaled by the wall elasticity
-- **Substepping**: Each frame is split into up to 8 physics substeps so that the fastest particle never travels more than one (smallest) radius per step, preventing tunneling
+- **Substepping**: Each frame is split into up to 8 physics substeps targeting at most one (smallest) radius of travel per step, keeping particle-particle contacts resolved
+- **Swept Wall Contact**: Drawn walls are tested against each particle's entire motion within a substep, not just its end position, so even when the substep cap saturates (a fast particle on a slow frame) nothing can cross a wall — and wall resolution runs after particle-particle resolution, so a crowd pressing a particle wall-ward can't shove it through either
 
 ### Matter Mechanics (`--matter` / `X`)
 
@@ -167,7 +168,7 @@ A slowly drifting field of currents that particles are *entrained into*: each pa
 
 ### Drawable Walls (`V`)
 
-Hold `V` and drag to paint static walls: the cursor path becomes a polyline of segments (up to 200) that particles bounce off under the same elasticity rule as the arena walls. `Shift+V` erases all walls; `R` (reset) clears them too. Collision-triggered spawns refuse positions inside a wall, so nothing materializes embedded in one. Combine with spawning and gravity for pachinko boards, funnels, and marble runs — this is a purely interactive tool, so it has no CLI flag.
+Hold `V` and drag to paint static walls: the cursor path becomes a polyline of segments (up to 200) that particles bounce off under the same elasticity rule as the arena walls. Wall contact is swept over each particle's motion and resolved after particle-particle collisions, so neither raw speed, a low frame rate, nor a crowd pressing from behind can force a particle through a wall. `Shift+V` erases all walls; `R` (reset) clears them too. Collision-triggered spawns refuse positions inside a wall, so nothing materializes embedded in one. Combine with spawning and gravity for pachinko boards, funnels, and marble runs — this is a purely interactive tool, so it has no CLI flag.
 
 ### Kaleidoscope (`--kaleidoscope` / `K`)
 

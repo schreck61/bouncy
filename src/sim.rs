@@ -175,6 +175,10 @@ pub struct Simulation {
     saturated_since: Option<Instant>,
     collisions: CollisionRecorder,
     grid: SpatialGrid,
+    /// Scratch: particle centers captured at the start of each substep,
+    /// feeding the swept segment test. Reused to avoid reallocation; only
+    /// filled while wall segments exist.
+    prev_positions: Vec<(f64, f64)>,
     rng: StdRng,
     stopped: bool,
     frames_without_motion: u32,
@@ -227,6 +231,7 @@ impl Simulation {
             saturated_since: None,
             collisions: CollisionRecorder::new(),
             grid: SpatialGrid::new(),
+            prev_positions: Vec::new(),
             rng,
             stopped: false,
             frames_without_motion: 0,
@@ -726,6 +731,14 @@ impl Simulation {
             if self.flow {
                 apply_flow(&mut self.particles, self.sim_time, sub_dt);
             }
+            // The segment test sweeps each particle's motion over the
+            // substep, so it needs the centers from before the position
+            // update.
+            if !self.segments.is_empty() {
+                self.prev_positions.clear();
+                self.prev_positions
+                    .extend(self.particles.iter().map(|p| (p.x, p.y)));
+            }
             update_physics(
                 &mut self.particles,
                 sub_dt,
@@ -734,9 +747,6 @@ impl Simulation {
                 gravity_multiplier,
                 self.wall_elasticity,
             );
-            if !self.segments.is_empty() {
-                collide_with_segments(&mut self.particles, &self.segments, self.wall_elasticity);
-            }
             let energy = handle_collisions(
                 &mut self.particles,
                 &mut self.grid,
@@ -746,6 +756,21 @@ impl Simulation {
                 self.particle_elasticity,
             );
             max_energy = max_energy.max(energy);
+            // Segments come last so wall containment is the invariant
+            // that holds at the end of every substep: the sweep covers
+            // the integration step *and* any pair-separation pushout
+            // that would otherwise shove a particle across a wall. The
+            // pair overlap a wall correction may reintroduce is the
+            // softer failure — the next substep's pair pass re-detects
+            // and resolves it.
+            if !self.segments.is_empty() {
+                collide_with_segments(
+                    &mut self.particles,
+                    &self.prev_positions,
+                    &self.segments,
+                    self.wall_elasticity,
+                );
+            }
         }
 
         events.max_collision_energy = max_energy;
@@ -2265,6 +2290,64 @@ mod tests {
             s.particles[0].x < 400.0,
             "and stay on its side of the wall: x={}",
             s.particles[0].x
+        );
+    }
+
+    #[test]
+    fn fast_particle_cannot_tunnel_a_wall_at_low_frame_rates() {
+        // Regression for tunneling at low frame rates: a 50 ms frame (the
+        // frame-dt cap) saturates MAX_SUBSTEPS, so a single substep moves
+        // a fast particle many radii, and the old end-of-substep overlap
+        // test let it step clear over the zero-thickness wall. The swept
+        // test must keep it contained for as long as the sim runs.
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.particles[1].x = 790.0;
+        s.particles[1].y = 10.0;
+        // Particle 0 falls fast onto a horizontal wall spanning the arena.
+        s.particles[0].x = 400.0;
+        s.particles[0].y = 100.0;
+        s.particles[0].vy = 2000.0;
+        assert!(s.add_wall_segment(100.0, 300.0, 700.0, 300.0));
+
+        let now = Instant::now();
+        for frame in 0..40 {
+            s.step(0.05, now, None);
+            assert!(
+                s.particles[0].y < 300.0,
+                "particle stays above the wall: y={} after frame {}",
+                s.particles[0].y,
+                frame
+            );
+        }
+    }
+
+    #[test]
+    fn pair_pushout_cannot_leave_a_particle_inside_a_wall() {
+        // A particle resting on a wall takes a hit from above: the pair
+        // solver's separation pushout shoves the rester into the wall
+        // within the same substep. The segment pass runs after pair
+        // resolution precisely so the substep still ends with the rester
+        // on its side of the wall (the old order left it embedded until
+        // the next frame's sweep).
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        assert!(s.add_wall_segment(100.0, 300.0, 700.0, 300.0));
+        let (r0, r1) = (s.particles[0].radius, s.particles[1].radius);
+        s.particles[0].x = 400.0;
+        s.particles[0].y = 300.0 - r0;
+        s.particles[1].x = 400.0;
+        // Half a pixel of clearance; one step's travel closes it and
+        // overlaps the pair, triggering impulse plus separation pushout.
+        s.particles[1].y = s.particles[0].y - (r0 + r1) - 0.5;
+        s.particles[1].vy = 100.0;
+
+        s.step(0.01, Instant::now(), None);
+        assert!(
+            s.particles[0].y <= 300.0 - r0 + 1e-6,
+            "rester stays on its side of the wall: y={}, r={}",
+            s.particles[0].y,
+            r0
         );
     }
 

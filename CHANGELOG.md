@@ -4,6 +4,19 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Fixed fast particles tunneling through drawn walls at low frame
+  rates. Wall contact is now swept: the test takes the closest approach
+  between the particle's motion over the substep and the wall segment,
+  instead of only checking the end position, so a step that would carry
+  a particle clear across the zero-thickness wall — possible once the
+  8-substep cap saturates on large frame deltas — bounces it instead.
+- Wall resolution moved after particle-particle resolution within each
+  substep, so a pile of particles pressing one against a wall can no
+  longer leave it embedded in (or pushed past) the wall at the end of
+  a substep.
+
 ## 1.4.0 — 2026-07-12
 
 - The demo's control panel is now state-complete: status chips show
