@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.4.1 — 2026-07-14
 
 - Fixed fast particles tunneling through drawn walls at low frame
   rates. Wall contact is now swept: the test takes the closest approach
