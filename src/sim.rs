@@ -2564,6 +2564,58 @@ mod tests {
     }
 
     #[test]
+    fn a_divided_arena_stays_divided() {
+        // The user-facing invariant behind all the wall work: an arena
+        // split by a full-height wall, with every particle on the right,
+        // must keep its left half empty through a spawning-and-matter
+        // runaway pressed against the divider — motion, pair pushout,
+        // births, bursts, fusion, and fission all respect the wall.
+        let mut s = sim(&[
+            "--explosion-threshold",
+            "0",
+            "--particle-elasticity",
+            "0.7",
+            "--wall-elasticity",
+            "0.9",
+            "--gravity",
+            "0",
+            "--self-gravity",
+            "--matter",
+            "--spawn-mode",
+            "collision",
+            "--particle-size",
+            "0.5",
+            "--min-particles",
+            "30",
+        ]);
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        for (k, p) in s.particles.iter_mut().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                p.x = 430.0 + (k % 10) as f64 * 35.0;
+                p.y = 60.0 + (k / 10) as f64 * 120.0;
+            }
+        }
+        s.spawn_burst(420.0, 200.0);
+        s.spawn_burst(420.0, 400.0);
+
+        let now = Instant::now();
+        for frame in 0..300 {
+            s.step(1.0 / 60.0, now, None);
+            assert!(
+                s.particles().iter().all(|p| p.x > 400.0),
+                "left half stays empty (frame {frame}, population {})",
+                s.particle_count()
+            );
+        }
+        assert!(
+            s.particle_count() > 55,
+            "the runaway actually ran: {}",
+            s.particle_count()
+        );
+    }
+
+    #[test]
     fn wall_segment_count_is_capped() {
         let mut s = sim(&["--min-particles", "2"]);
         for i in 0..MAX_WALL_SEGMENTS {

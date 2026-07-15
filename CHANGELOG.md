@@ -6,6 +6,11 @@ Notable changes to Bouncy, by release. Version numbers follow
 
 ## Unreleased
 
+- Fixed a rare pure-physics wall escape: particle-separation pushout
+  could park a particle just outside the arena bounds, beyond a wall's
+  endpoint, letting it slip around the wall while out of bounds and
+  re-enter on the far side. Separation now clamps to the arena, the
+  same bounds integration enforces.
 - Matter events respect drawn walls: fission picks the fragment
   direction that keeps both fragments on the parent's side (or bounces
   instead of shattering when pressed against a wall), and a fusion's

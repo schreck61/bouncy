@@ -723,6 +723,18 @@ pub fn handle_collisions(
             continue;
         }
         if let Some(result) = try_elastic_collision(p1, p2, particle_elasticity) {
+            // Separation must not eject a particle out of the arena: the
+            // sliver beyond the bounds is outside every wall segment's
+            // span, so a particle parked there can round a wall's
+            // endpoint and re-enter on the far side when the arena clamp
+            // pulls it back — the one pure-physics leak the divided-arena
+            // audit ever caught. Position-only, like the pushout itself;
+            // the next substep's integration handles any wall bounce.
+            let (w, h) = (f64::from(width), f64::from(height));
+            for p in [&mut *p1, &mut *p2] {
+                p.x = p.x.min(w - p.radius).max(p.radius);
+                p.y = p.y.min(h - p.radius).max(p.radius);
+            }
             max_energy = max_energy.max(result.energy);
             recorder.record(
                 i,
@@ -2007,6 +2019,30 @@ mod tests {
             p.y
         );
         assert!((p.vy - (-900.0)).abs() < 1e-9, "moving back away: {}", p.vy);
+    }
+
+    #[test]
+    fn pair_separation_stays_inside_the_arena() {
+        // Two deeply overlapped particles near the top edge: separation
+        // would push one out of bounds (y < radius). Out-of-bounds space
+        // lies beyond every wall segment's span, so parking a particle
+        // there lets it round a wall endpoint — the pushout must clamp
+        // to the arena instead.
+        let mut particles = vec![
+            particle(100.0, 1.6, 0.0, 50.0),
+            particle(100.0, 2.4, 0.0, -50.0),
+        ];
+        let mut grid = SpatialGrid::new();
+        let mut recorder = CollisionRecorder::new();
+        handle_collisions(&mut particles, &mut grid, &mut recorder, 800, 600, 1.0, &[]);
+        assert_eq!(recorder.sites().len(), 1, "the pair did collide");
+        for p in &particles {
+            assert!(
+                p.y >= RADIUS - 1e-9 && p.y <= 600.0 - RADIUS + 1e-9,
+                "separation kept the particle in bounds: y={}",
+                p.y
+            );
+        }
     }
 
     #[test]
