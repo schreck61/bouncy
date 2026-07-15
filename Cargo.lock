@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "bouncy"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "ab_glyph",
  "clap",
