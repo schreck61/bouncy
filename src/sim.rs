@@ -698,6 +698,19 @@ impl Simulation {
         events.explosion_completed = self.update_explosion(dt);
         self.sim_time += dt;
 
+        // No particle enters physics out of bounds. Out-of-bounds space
+        // lies beyond every wall segment's span (walls live inside the
+        // arena), so a stale out-of-bounds position can round a wall's
+        // endpoint undetected — the crossing happens outside the span the
+        // wall pass guards. Every position writer maintains this invariant
+        // already; this frame-start clamp is the safety net that keeps a
+        // future writer's slip from ever becoming a wall leak.
+        let (w, h) = (f64::from(self.width), f64::from(self.height));
+        for p in &mut self.particles {
+            p.x = p.x.min(w - p.radius).max(p.radius);
+            p.y = p.y.min(h - p.radius).max(p.radius);
+        }
+
         let gravity_multiplier = f64::from(self.gravity_percent) / 100.0;
         self.collisions.clear();
 
@@ -2605,6 +2618,34 @@ mod tests {
             }
         }
         assert_eq!(s.particle_count(), 4, "the impact did shatter");
+    }
+
+    #[test]
+    fn out_of_bounds_particles_cannot_round_a_wall_endpoint() {
+        // Defense in depth: hand-place a particle in the (normally
+        // unreachable) out-of-bounds sliver beyond the divider's top
+        // endpoint, moving fast toward the far side — the exact state a
+        // buggy position writer would have to produce for a leak. The
+        // frame-start clamp must pull it in bounds before physics runs,
+        // so the wall still blocks the crossing.
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.particles[1].x = 700.0;
+        s.particles[1].y = 300.0;
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        s.particles[0].x = 400.4;
+        s.particles[0].y = -0.8;
+        s.particles[0].vx = -269.0;
+
+        let now = Instant::now();
+        for _ in 0..30 {
+            s.step(1.0 / 60.0, now, None);
+        }
+        assert!(
+            s.particles[0].x > 400.0,
+            "clamped back in bounds and kept on its side: x={}",
+            s.particles[0].x
+        );
     }
 
     #[test]

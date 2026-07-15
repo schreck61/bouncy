@@ -6,6 +6,10 @@ Notable changes to Bouncy, by release. Version numbers follow
 
 ## Unreleased
 
+- A frame-start safety net clamps every particle into the arena
+  before physics runs, so no position writer — present or future —
+  can park a particle in the out-of-bounds sliver beyond a wall's
+  endpoints, the state every wall leak traced back to.
 - Fission fragments now clamp into the arena: a shattering impact
   against an arena edge could park a fragment out of bounds, beyond
   the reach of every drawn wall, from where it could round a wall's
