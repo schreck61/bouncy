@@ -845,7 +845,7 @@ fn line_side(seg: &Segment, px: f64, py: f64) -> f64 {
 /// wall segment: strict side changes on both segments, so touches,
 /// collinear overlaps, and crossings of the line beyond the wall's span
 /// all count as not crossing (the end-position overlap test owns those).
-fn motion_crosses_segment(seg: &Segment, ox: f64, oy: f64, nx: f64, ny: f64) -> bool {
+pub(crate) fn motion_crosses_segment(seg: &Segment, ox: f64, oy: f64, nx: f64, ny: f64) -> bool {
     if line_side(seg, ox, oy) * line_side(seg, nx, ny) >= 0.0 {
         return false;
     }

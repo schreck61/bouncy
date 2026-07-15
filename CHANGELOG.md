@@ -6,6 +6,10 @@ Notable changes to Bouncy, by release. Version numbers follow
 
 ## Unreleased
 
+- New particles now spawn strictly on their source's side of drawn
+  walls: collision-triggered births stay on their collision's side,
+  and click bursts stay on the click's side, instead of occasionally
+  materializing across a nearby wall.
 - Drawn walls now block particle-particle interaction: a contact whose
   center-to-center line crosses a wall is skipped, so particles no
   longer exchange impulses — or, with matter on, fuse — through a

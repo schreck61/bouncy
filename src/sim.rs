@@ -10,8 +10,8 @@ use crate::explosion::{EXPLOSION_KILL_RATIO, Explosion, SPAWN_RATE_WINDOW, max_r
 use crate::physics::{
     COLLISION_ENERGY_NORMALIZER, CollisionRecorder, MOTION_STOPPED_FRAMES, Particle, ParticleId,
     Segment, SpatialGrid, SpawnSite, WELL_STRENGTH, apply_attractor, apply_flow,
-    apply_self_gravity, collide_with_segments, handle_collisions, has_motion, max_radius, pair_mut,
-    substep_count, update_physics,
+    apply_self_gravity, collide_with_segments, handle_collisions, has_motion, max_radius,
+    motion_crosses_segment, pair_mut, substep_count, update_physics,
 };
 use crate::presets::Scene;
 use rand::rngs::StdRng;
@@ -544,7 +544,13 @@ impl Simulation {
                     let clearance = r + or + margin;
                     dx * dx + dy * dy >= clearance * clearance
                 });
-                (in_bounds && clear).then_some((bx, by))
+                // Stay on the click's side of every wall: a burst beside
+                // a wall must not scatter particles across it.
+                let same_side = !self
+                    .segments
+                    .iter()
+                    .any(|s| motion_crosses_segment(s, x, y, bx, by));
+                (in_bounds && clear && same_side).then_some((bx, by))
             });
             if let Some((bx, by)) = spot {
                 occupied.push((bx, by, r));
@@ -1107,7 +1113,7 @@ impl Simulation {
         ];
         candidates.into_iter().find_map(|((dx, dy), offset)| {
             let (x, y) = (site.x + dx * offset, site.y + dy * offset);
-            self.spawn_position_is_free(x, y, first_new, max_r)
+            self.spawn_position_is_free(site.x, site.y, x, y, first_new, max_r)
                 .then_some(((x, y), (dx, dy)))
         })
     }
@@ -1120,20 +1126,32 @@ impl Simulation {
         for _ in 0..CENTER_SPAWN_ATTEMPTS {
             let x = self.center_x + self.rng.random_range(-jitter..jitter);
             let y = self.center_y + self.rng.random_range(-jitter..jitter);
-            if self.spawn_position_is_free(x, y, first_new, max_r) {
+            if self.spawn_position_is_free(self.center_x, self.center_y, x, y, first_new, max_r) {
                 return Some((x, y));
             }
         }
         None
     }
 
-    /// A spawn position is usable when it lies inside the arena and clear
+    /// A spawn position is usable when it lies inside the arena, clear
     /// of every existing particle (checked via the grid for pre-existing
     /// particles and linearly for this frame's spawns, which the grid
-    /// cannot see yet) and of every drawn wall. The clearance is
-    /// conservative: the new particle's radius plus the largest radius in
-    /// the population.
-    fn spawn_position_is_free(&self, x: f64, y: f64, first_new: usize, max_r: f64) -> bool {
+    /// cannot see yet) and of every drawn wall, and on the same side of
+    /// every wall as the spawn's source point `(sx, sy)` — the collision
+    /// site, click, or center it emanates from. Without the side check,
+    /// a birth beside a collision hugging a wall could materialize on
+    /// the far side, crossing a divider no motion ever crossed. The
+    /// clearance is conservative: the new particle's radius plus the
+    /// largest radius in the population.
+    fn spawn_position_is_free(
+        &self,
+        sx: f64,
+        sy: f64,
+        x: f64,
+        y: f64,
+        first_new: usize,
+        max_r: f64,
+    ) -> bool {
         let r = self.base_radius;
         let clearance = r + max_r;
         if x < r || x > f64::from(self.width) - r || y < r || y > f64::from(self.height) - r {
@@ -1148,7 +1166,7 @@ impl Simulation {
             && !self
                 .segments
                 .iter()
-                .any(|s| s.distance_to(x, y) < clearance)
+                .any(|s| s.distance_to(x, y) < clearance || motion_crosses_segment(s, sx, sy, x, y))
     }
 
     /// Average position of this step's collisions.
@@ -2408,6 +2426,49 @@ mod tests {
             "both particles keep their sides: x0={}, x1={}",
             s.particles[0].x,
             s.particles[1].x
+        );
+    }
+
+    #[test]
+    fn collision_spawns_stay_on_their_side_of_a_wall() {
+        // Collisions armed just beside a full-height wall: every birth
+        // they trigger must land on the collision's side, never across.
+        let mut s = sim(&["--min-particles", "2", "--spawn-mode", "collision"]);
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        let now = Instant::now();
+        for round in 0..40 {
+            arm_collision(&mut s, 403.0, 60.0 + f64::from(round) * 12.0);
+            for _ in 0..6 {
+                s.step(0.01, now, None);
+            }
+            assert!(
+                s.particles().iter().all(|p| p.x > 400.0),
+                "everything stays right of the wall (round {round})"
+            );
+        }
+        assert!(
+            s.particle_count() > 2,
+            "collisions actually spawned: {}",
+            s.particle_count()
+        );
+    }
+
+    #[test]
+    fn bursts_stay_on_their_side_of_a_wall() {
+        // A click burst right beside the wall scatters particles around
+        // the click; none may land across the wall.
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.particles[0].x = 700.0;
+        s.particles[1].x = 720.0;
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        for _ in 0..4 {
+            s.spawn_burst(402.0, 300.0);
+        }
+        assert!(s.particle_count() > 2, "burst added particles");
+        assert!(
+            s.particles().iter().all(|p| p.x > 400.0),
+            "no burst particle crosses the wall"
         );
     }
 
