@@ -803,11 +803,28 @@ impl Simulation {
     /// partial fusion. Area and momentum are conserved exactly; the
     /// donor's own radius is left to the caller (full fusion kills it,
     /// partial fusion shrinks it by the transfer).
-    fn absorb(dst: &mut Particle, src: &Particle, mass: f64) {
+    ///
+    /// The position blend is skipped when it would carry `dst` across a
+    /// wall segment. Cross-wall pairs are already filtered at contact
+    /// detection, so for a straight wall the blend (a point on the
+    /// center-to-center chord) cannot cross; but contacts are recorded
+    /// mid-frame and resolved here after further substeps, so near a
+    /// short wall's free end the partner may have rounded the tip by
+    /// now — without the guard the merged particle could teleport
+    /// through the stub. Skipping the (cosmetic) centroid move keeps
+    /// mass and momentum conservation intact.
+    fn absorb(dst: &mut Particle, src: &Particle, mass: f64, segments: &[Segment]) {
         let dst_mass = dst.mass();
         let total = dst_mass + mass;
-        dst.x = (dst.x * dst_mass + src.x * mass) / total;
-        dst.y = (dst.y * dst_mass + src.y * mass) / total;
+        let bx = (dst.x * dst_mass + src.x * mass) / total;
+        let by = (dst.y * dst_mass + src.y * mass) / total;
+        if !segments
+            .iter()
+            .any(|s| motion_crosses_segment(s, dst.x, dst.y, bx, by))
+        {
+            dst.x = bx;
+            dst.y = by;
+        }
         dst.vx = (dst.vx * dst_mass + src.vx * mass) / total;
         dst.vy = (dst.vy * dst_mass + src.vy * mass) / total;
         dst.radius = total.sqrt();
@@ -853,7 +870,7 @@ impl Simulation {
                         continue; // never fuse below the minimum population
                     }
                     let (pi, pj) = pair_mut(&mut self.particles, i, j);
-                    Self::absorb(pi, pj, m2);
+                    Self::absorb(pi, pj, m2, &self.segments);
                     touched.insert(i);
                     touched.insert(j);
                     dead.push(j);
@@ -870,7 +887,7 @@ impl Simulation {
                         continue; // absorber full or donor at minimum: bounce
                     }
                     let (pb, ps) = pair_mut(&mut self.particles, big, small);
-                    Self::absorb(pb, ps, transfer);
+                    Self::absorb(pb, ps, transfer, &self.segments);
                     ps.radius = (ms - transfer).sqrt();
                     touched.insert(i);
                     touched.insert(j);
@@ -888,6 +905,33 @@ impl Simulation {
                         continue;
                     }
                     let offset = frag_r + 0.5;
+                    // The perpendicular's sign is arbitrary (it only picks
+                    // which fragment goes which way), so choose one that
+                    // keeps both fragments on the parent's side of every
+                    // wall; against a wall-hugging impact where neither
+                    // sign works, bounce instead of shattering across.
+                    let (ox, oy) = (self.particles[idx].x, self.particles[idx].y);
+                    let segs = &self.segments;
+                    let Some(sign) = [1.0f64, -1.0].into_iter().find(|s| {
+                        !segs.iter().any(|seg| {
+                            motion_crosses_segment(
+                                seg,
+                                ox,
+                                oy,
+                                ox + s * px * offset,
+                                oy + s * py * offset,
+                            ) || motion_crosses_segment(
+                                seg,
+                                ox,
+                                oy,
+                                ox - s * px * offset,
+                                oy - s * py * offset,
+                            )
+                        })
+                    }) else {
+                        continue;
+                    };
+                    let (px, py) = (sign * px, sign * py);
                     let parent = &mut self.particles[idx];
                     parent.radius = frag_r;
                     parent.x += px * offset;
@@ -2470,6 +2514,53 @@ mod tests {
             s.particles().iter().all(|p| p.x > 400.0),
             "no burst particle crosses the wall"
         );
+    }
+
+    #[test]
+    fn fission_fragments_stay_on_their_side_of_a_wall() {
+        // A shattering impact beside a wall recedes its fragments
+        // perpendicular to the impact — here straight at the wall. The
+        // perpendicular's sign must be flipped (or the shatter skipped)
+        // so no fragment materializes across.
+        let mut s = sim(&["--min-particles", "2", "--matter"]);
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        let now = Instant::now();
+
+        // Phase 1: impact pressed against the wall — neither sign keeps
+        // both fragments on the right side, so the shatter is skipped.
+        freeze(&mut s);
+        s.particles[0].x = 401.0;
+        s.particles[0].y = 290.0;
+        s.particles[0].vy = 400.0;
+        s.particles[1].x = 401.0;
+        s.particles[1].y = 310.0;
+        s.particles[1].vy = -400.0;
+        for _ in 0..30 {
+            s.step(1.0 / 120.0, now, None);
+            assert!(
+                s.particles().iter().all(|p| p.x > 400.0),
+                "wall-hugging impact leaks no fragment"
+            );
+        }
+        assert_eq!(s.particle_count(), 2, "shatter skipped at the wall");
+
+        // Phase 2: same impact with room on the right — the shatter goes
+        // ahead and every fragment stays on the right side.
+        freeze(&mut s);
+        s.particles[0].x = 405.0;
+        s.particles[0].y = 290.0;
+        s.particles[0].vy = 400.0;
+        s.particles[1].x = 405.0;
+        s.particles[1].y = 310.0;
+        s.particles[1].vy = -400.0;
+        for _ in 0..30 {
+            s.step(1.0 / 120.0, now, None);
+            assert!(
+                s.particles().iter().all(|p| p.x > 400.0),
+                "fragments stay on the impact's side"
+            );
+        }
+        assert_eq!(s.particle_count(), 4, "both participants shattered");
     }
 
     #[test]

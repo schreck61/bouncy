@@ -6,6 +6,10 @@ Notable changes to Bouncy, by release. Version numbers follow
 
 ## Unreleased
 
+- Matter events respect drawn walls: fission picks the fragment
+  direction that keeps both fragments on the parent's side (or bounces
+  instead of shattering when pressed against a wall), and a fusion's
+  merged position never crosses a wall.
 - New particles now spawn strictly on their source's side of drawn
   walls: collision-triggered births stay on their collision's side,
   and click bursts stay on the click's side, instead of occasionally
