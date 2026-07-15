@@ -766,6 +766,21 @@ impl Simulation {
                 gravity_multiplier,
                 self.wall_elasticity,
             );
+            // Walls resolve twice per substep, straddling the pair pass.
+            // This first pass corrects integration crossers *before*
+            // contact detection reads positions: a fast clump striking a
+            // wall pushes many particles across in the same integration
+            // step, and two simultaneous crossers otherwise look like a
+            // legitimate same-side contact — recording a far-side spawn
+            // site that outlives every later correction.
+            if !self.segments.is_empty() {
+                collide_with_segments(
+                    &mut self.particles,
+                    &self.prev_positions,
+                    &self.segments,
+                    self.wall_elasticity,
+                );
+            }
             let energy = handle_collisions(
                 &mut self.particles,
                 &mut self.grid,
@@ -776,13 +791,12 @@ impl Simulation {
                 &self.segments,
             );
             max_energy = max_energy.max(energy);
-            // Segments come last so wall containment is the invariant
+            // ... and this second pass keeps containment the invariant
             // that holds at the end of every substep: the sweep covers
-            // the integration step *and* any pair-separation pushout
-            // that would otherwise shove a particle across a wall. The
-            // pair overlap a wall correction may reintroduce is the
-            // softer failure — the next substep's pair pass re-detects
-            // and resolves it.
+            // any pair-separation pushout that would otherwise shove a
+            // particle across a wall. The pair overlap a wall correction
+            // may reintroduce is the softer failure — the next substep's
+            // pair pass re-detects and resolves it.
             if !self.segments.is_empty() {
                 collide_with_segments(
                     &mut self.particles,
@@ -2649,6 +2663,46 @@ mod tests {
     }
 
     #[test]
+    fn clump_strike_cannot_push_spawns_through_a_wall() {
+        // Joe's reproduction: a fused-blob clump full of fission-size
+        // smalls rams the divider with a pinned well holding it there.
+        // Mass-weighted separation shoves smalls across the wall
+        // mid-pass; the sites recorded from those transient positions
+        // must not seed births on the far side.
+        let mut s = sim(&[
+            "--explosion-threshold",
+            "0",
+            "--particle-elasticity",
+            "0.7",
+            "--wall-elasticity",
+            "0.95",
+            "--gravity",
+            "0",
+            "--self-gravity",
+            "--matter",
+            "--spawn-mode",
+            "collision",
+            "--particle-size",
+            "0.5",
+            "--min-particles",
+            "100",
+        ]);
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        assert!(s.pin_well(402.0, 300.0, Polarity::Attract));
+        strike_clump(&mut s, 2400.0, 300.0);
+
+        let now = Instant::now();
+        for frame in 0..150 {
+            s.step(1.0 / 60.0, now, None);
+            assert!(
+                s.particles().iter().all(|p| p.x > 400.0),
+                "nothing crosses the divider (frame {frame}, population {})",
+                s.particle_count()
+            );
+        }
+    }
+
+    #[test]
     fn a_divided_arena_stays_divided() {
         // The user-facing invariant behind all the wall work: an arena
         // split by a full-height wall, with every particle on the right,
@@ -3001,6 +3055,99 @@ mod tests {
         for (pa, pb) in a.particles().iter().zip(b.particles()) {
             assert!((pa.x - pb.x).abs() < 1e-12);
             assert!((pa.y - pb.y).abs() < 1e-12);
+        }
+    }
+
+    /// Build the clump-strike scenario at (650, 300): five max-size fused
+    /// blobs in a plus, wrapped in dense rings of fission-size smalls,
+    /// everything flying at `(-speed, vy)` — toward a wall at x=400.
+    fn strike_clump(s: &mut Simulation, speed: f64, vy: f64) {
+        for (k, p) in s.particles.iter_mut().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let kf = k as f64;
+            if k < 5 {
+                p.radius = 3.0;
+                let (dx, dy) = [(0.0, 0.0), (6.5, 0.0), (-6.5, 0.0), (0.0, 6.5), (0.0, -6.5)][k];
+                p.x = 650.0 + dx;
+                p.y = 300.0 + dy;
+            } else {
+                p.radius = 0.3;
+                let ring = 10.0 + (kf % 5.0) * 1.4;
+                let angle = kf * 0.66;
+                p.x = 650.0 + ring * angle.cos();
+                p.y = 300.0 + ring * angle.sin();
+            }
+            p.vx = -speed;
+            p.vy = vy;
+        }
+    }
+
+    /// Manual experiment for the clump-strike leak report: a fused blob
+    /// cluster stuffed with fission-size smalls is hurled at a full-height
+    /// wall across a sweep of speeds and pinned-well setups. Run with
+    /// `cargo test --release clump_strike_experiment -- --ignored --nocapture`.
+    /// Any particle left of the wall is a leak and is printed with context.
+    #[test]
+    #[ignore = "manual leak experiment"]
+    fn clump_strike_experiment() {
+        let wall_x = 400.0;
+        for &(speed, vy, well) in &[
+            (300.0, 0.0, None),
+            (600.0, 0.0, None),
+            (600.0, 200.0, None),
+            (1200.0, 0.0, None),
+            (1200.0, 0.0, Some((410.0, 300.0))),
+            (2400.0, 0.0, None),
+            (2400.0, 300.0, Some((402.0, 300.0))),
+            (6000.0, 0.0, None),
+            (6000.0, 0.0, Some((402.0, 300.0))),
+            (12000.0, 500.0, None),
+        ] {
+            let mut s = sim(&[
+                "--explosion-threshold",
+                "0",
+                "--particle-elasticity",
+                "0.7",
+                "--wall-elasticity",
+                "0.95",
+                "--gravity",
+                "0",
+                "--self-gravity",
+                "--matter",
+                "--spawn-mode",
+                "collision",
+                "--particle-size",
+                "0.5",
+                "--min-particles",
+                "100",
+            ]);
+            assert!(s.add_wall_segment(wall_x, 0.0, wall_x, 600.0));
+            if let Some((wx, wy)) = well {
+                assert!(s.pin_well(wx, wy, Polarity::Attract));
+            }
+            strike_clump(&mut s, speed, vy);
+            let mut leaked = 0u32;
+            let now = Instant::now();
+            for frame in 0..600 {
+                s.step(1.0 / 60.0, now, None);
+                for p in s.particles() {
+                    if p.x < wall_x && leaked < 5 {
+                        leaked += 1;
+                        println!(
+                            "LEAK speed={speed} vy={vy} well={well:?} frame={frame}: \
+                             id {} x={:.3} y={:.3} r={:.2} v=({:.0},{:.0})",
+                            p.id, p.x, p.y, p.radius, p.vx, p.vy
+                        );
+                    }
+                }
+                if leaked >= 5 {
+                    break;
+                }
+            }
+            println!(
+                "trial speed={speed} vy={vy} well={well:?}: leaked={leaked} pop={}",
+                s.particle_count()
+            );
         }
     }
 

@@ -4,6 +4,20 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Fixed collision spawns materializing across a wall when a fast,
+  dense clump strikes it (reported with fused blobs full of
+  fission-size particles). Integration can carry many particles
+  across a wall in the same substep, and contacts between two such
+  crossers recorded far-side spawn sites; walls now also resolve
+  before the pair pass, so contact detection never sees a cross-wall
+  state.
+- Pair-separation pushout is now wall-contained immediately, inside
+  the pair pass: a massive blob's separation shove could park a light
+  particle across a wall transiently, poisoning any spawn site
+  recorded from that position before the wall pass corrected it.
+
 ## 1.4.3 — 2026-07-14
 
 - A frame-start safety net clamps every particle into the arena
