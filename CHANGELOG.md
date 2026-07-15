@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.4.3 — 2026-07-14
 
 - A frame-start safety net clamps every particle into the arena
   before physics runs, so no position writer — present or future —
