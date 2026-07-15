@@ -703,6 +703,7 @@ pub fn handle_collisions(
     width: u32,
     height: u32,
     particle_elasticity: f64,
+    segments: &[Segment],
 ) -> f64 {
     let mut max_energy = 0.0f64;
     if particles.len() < 2 {
@@ -713,6 +714,14 @@ pub fn handle_collisions(
     for (i, j) in grid.detect_contacts(particles) {
         let (i, j) = (i as usize, j as usize);
         let (p1, p2) = pair_mut(particles, i, j);
+        // A wall between two centers means they are not touching: without
+        // this, particles hugging opposite faces of a zero-thickness wall
+        // exchange impulses — and, with matter on, fuse — straight through
+        // it. Filtering here also starves the recorder, so matter and
+        // spawning never see cross-wall pairs either.
+        if wall_between(p1, p2, segments) {
+            continue;
+        }
         if let Some(result) = try_elastic_collision(p1, p2, particle_elasticity) {
             max_energy = max_energy.max(result.energy);
             recorder.record(
@@ -844,6 +853,27 @@ fn motion_crosses_segment(seg: &Segment, ox: f64, oy: f64, nx: f64, ny: f64) -> 
     let end1 = mdx * (seg.y1 - oy) - mdy * (seg.x1 - ox);
     let end2 = mdx * (seg.y2 - oy) - mdy * (seg.x2 - ox);
     end1 * end2 < 0.0
+}
+
+/// Whether any drawn wall segment lies between the two particle centers
+/// (their center-to-center segment properly crosses it). Same strictness
+/// as `motion_crosses_segment`: a center exactly on a wall's line does
+/// not count as separated.
+pub fn wall_between(p1: &Particle, p2: &Particle, segments: &[Segment]) -> bool {
+    for seg in segments {
+        // Cheap AABB reject before the exact crossing test.
+        if p1.x.max(p2.x) < seg.x1.min(seg.x2)
+            || p1.x.min(p2.x) > seg.x1.max(seg.x2)
+            || p1.y.max(p2.y) < seg.y1.min(seg.y2)
+            || p1.y.min(p2.y) > seg.y1.max(seg.y2)
+        {
+            continue;
+        }
+        if motion_crosses_segment(seg, p1.x, p1.y, p2.x, p2.y) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Bounce particles off the drawn wall segments. Two contact conditions,
@@ -1571,11 +1601,11 @@ mod tests {
             .install(|| {
                 let mut grid = SpatialGrid::new();
                 let mut recorder = CollisionRecorder::new();
-                handle_collisions(&mut single, &mut grid, &mut recorder, 800, 600, 0.7);
+                handle_collisions(&mut single, &mut grid, &mut recorder, 800, 600, 0.7, &[]);
             });
         let mut grid = SpatialGrid::new();
         let mut recorder = CollisionRecorder::new();
-        handle_collisions(&mut multi, &mut grid, &mut recorder, 800, 600, 0.7);
+        handle_collisions(&mut multi, &mut grid, &mut recorder, 800, 600, 0.7, &[]);
 
         for (s, m) in single.iter().zip(&multi) {
             assert_eq!(s.x.to_bits(), m.x.to_bits(), "x must match exactly");
@@ -1590,7 +1620,7 @@ mod tests {
     fn collide_all(particles: &mut [Particle]) -> usize {
         let mut grid = SpatialGrid::new();
         let mut recorder = CollisionRecorder::new();
-        handle_collisions(particles, &mut grid, &mut recorder, 800, 600, 1.0);
+        handle_collisions(particles, &mut grid, &mut recorder, 800, 600, 1.0, &[]);
         recorder.sites().len()
     }
 
@@ -1756,11 +1786,11 @@ mod tests {
             let mut grid = SpatialGrid::new();
             let mut recorder = CollisionRecorder::new();
             for _ in 0..200 {
-                handle_collisions(particles, &mut grid, &mut recorder, 800, 600, 1.0);
+                handle_collisions(particles, &mut grid, &mut recorder, 800, 600, 1.0, &[]);
             }
             let t = std::time::Instant::now();
             for _ in 0..8 {
-                handle_collisions(particles, &mut grid, &mut recorder, 800, 600, 1.0);
+                handle_collisions(particles, &mut grid, &mut recorder, 800, 600, 1.0, &[]);
             }
             t.elapsed()
         };
@@ -1812,11 +1842,11 @@ mod tests {
             let mut grid = SpatialGrid::new();
             let mut recorder = CollisionRecorder::new();
             for _ in 0..200 {
-                handle_collisions(&mut mixed, &mut grid, &mut recorder, 1920, 1080, 0.7);
+                handle_collisions(&mut mixed, &mut grid, &mut recorder, 1920, 1080, 0.7, &[]);
             }
             let t = std::time::Instant::now();
             for _ in 0..8 {
-                handle_collisions(&mut mixed, &mut grid, &mut recorder, 1920, 1080, 0.7);
+                handle_collisions(&mut mixed, &mut grid, &mut recorder, 1920, 1080, 0.7, &[]);
             }
             (t.elapsed(), grid.cell_size, grid.oversized.len())
         };
@@ -1977,6 +2007,52 @@ mod tests {
             p.y
         );
         assert!((p.vy - (-900.0)).abs() < 1e-9, "moving back away: {}", p.vy);
+    }
+
+    #[test]
+    fn contacts_across_a_wall_are_ignored() {
+        // Two particles overlapping across a zero-thickness wall between
+        // them: with the wall present they must not exchange impulses or
+        // record a contact; without it, the same pair collides.
+        let wall = Segment {
+            x1: 400.0,
+            y1: 0.0,
+            x2: 400.0,
+            y2: 600.0,
+        };
+        let make = || {
+            vec![
+                particle(399.0, 300.0, 50.0, 0.0),
+                particle(401.0, 300.0, -50.0, 0.0),
+            ]
+        };
+        let mut grid = SpatialGrid::new();
+        let mut recorder = CollisionRecorder::new();
+
+        let mut blocked = make();
+        handle_collisions(
+            &mut blocked,
+            &mut grid,
+            &mut recorder,
+            800,
+            600,
+            1.0,
+            &[wall],
+        );
+        assert!(recorder.sites().is_empty(), "no contact through the wall");
+        assert!(
+            (blocked[0].vx - 50.0).abs() < 1e-9 && (blocked[1].vx + 50.0).abs() < 1e-9,
+            "velocities untouched through the wall"
+        );
+
+        recorder.clear();
+        let mut open = make();
+        handle_collisions(&mut open, &mut grid, &mut recorder, 800, 600, 1.0, &[]);
+        assert_eq!(
+            recorder.sites().len(),
+            1,
+            "the same pair collides once the wall is gone"
+        );
     }
 
     #[test]
@@ -2231,6 +2307,7 @@ mod tests {
                 width,
                 height,
                 1.0,
+                &[],
             );
             assert_eq!(
                 recorder.sites().len(),
@@ -2251,7 +2328,15 @@ mod tests {
         ];
         let mut grid = SpatialGrid::new();
         let mut recorder = CollisionRecorder::new();
-        handle_collisions(&mut particles, &mut grid, &mut recorder, width, height, 1.0);
+        handle_collisions(
+            &mut particles,
+            &mut grid,
+            &mut recorder,
+            width,
+            height,
+            1.0,
+            &[],
+        );
         assert_eq!(recorder.sites().len(), 1);
     }
 
@@ -2274,20 +2359,20 @@ mod tests {
         // substeps of each separation, but never fast enough to tunnel.
         let gravity_multiplier = 20.0;
         let sub_dt = 0.01;
-        let mut run_frame = |particles: &mut Vec<Particle>,
-                             recorder: &mut CollisionRecorder|
-         -> u32 {
-            recorder.clear();
-            let mut contact_substeps = 0;
-            for _ in 0..8 {
-                update_physics(particles, sub_dt, width, height, gravity_multiplier, 0.0);
-                let energy = handle_collisions(particles, &mut grid, recorder, width, height, 0.0);
-                if energy > 0.0 {
-                    contact_substeps += 1;
+        let mut run_frame =
+            |particles: &mut Vec<Particle>, recorder: &mut CollisionRecorder| -> u32 {
+                recorder.clear();
+                let mut contact_substeps = 0;
+                for _ in 0..8 {
+                    update_physics(particles, sub_dt, width, height, gravity_multiplier, 0.0);
+                    let energy =
+                        handle_collisions(particles, &mut grid, recorder, width, height, 0.0, &[]);
+                    if energy > 0.0 {
+                        contact_substeps += 1;
+                    }
                 }
-            }
-            contact_substeps
-        };
+                contact_substeps
+            };
 
         let contact_substeps = run_frame(&mut particles, &mut recorder);
         assert!(

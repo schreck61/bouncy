@@ -4,6 +4,14 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Drawn walls now block particle-particle interaction: a contact whose
+  center-to-center line crosses a wall is skipped, so particles no
+  longer exchange impulses — or, with matter on, fuse — through a
+  zero-thickness wall. This closes one of the ways particles could end
+  up on the far side of a dividing wall without ever crossing it.
+
 ## 1.4.2 — 2026-07-14
 
 - Fixed particles sticking to drawn walls, a 1.4.1 regression: wall

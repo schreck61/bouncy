@@ -754,6 +754,7 @@ impl Simulation {
                 self.width,
                 self.height,
                 self.particle_elasticity,
+                &self.segments,
             );
             max_energy = max_energy.max(energy);
             // Segments come last so wall containment is the invariant
@@ -2382,6 +2383,35 @@ mod tests {
     }
 
     #[test]
+    fn matter_cannot_fuse_across_a_wall() {
+        // Two particles pressed against opposite faces of a wall, closing
+        // slowly (fusion range): the wall must keep them apart — same
+        // count, same sides — instead of letting them pair through it
+        // and fuse onto whichever side the blend lands.
+        let mut s = sim(&["--min-particles", "2", "--matter"]);
+        freeze(&mut s);
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        s.particles[0].x = 399.0;
+        s.particles[0].y = 300.0;
+        s.particles[0].vx = 10.0;
+        s.particles[1].x = 401.0;
+        s.particles[1].y = 300.0;
+        s.particles[1].vx = -10.0;
+
+        let now = Instant::now();
+        for _ in 0..60 {
+            s.step(1.0 / 60.0, now, None);
+        }
+        assert_eq!(s.particle_count(), 2, "no fusion through the wall");
+        assert!(
+            s.particles[0].x < 400.0 && s.particles[1].x > 400.0,
+            "both particles keep their sides: x0={}, x1={}",
+            s.particles[0].x,
+            s.particles[1].x
+        );
+    }
+
+    #[test]
     fn wall_segment_count_is_capped() {
         let mut s = sim(&["--min-particles", "2"]);
         for i in 0..MAX_WALL_SEGMENTS {
@@ -2683,5 +2713,133 @@ mod tests {
             assert!((pa.x - pb.x).abs() < 1e-12);
             assert!((pa.y - pb.y).abs() < 1e-12);
         }
+    }
+
+    /// Manual experiment reproducing the divided-arena leak: run with
+    /// `cargo test --release leak_experiment -- --ignored --nocapture`.
+    /// Attributes every side change to a cause: a matter reposition
+    /// (radius changed the same frame), a birth, or — the one class the
+    /// wall pass is supposed to make impossible — a pure physics flip.
+    #[test]
+    #[ignore = "manual leak experiment"]
+    fn leak_experiment() {
+        use std::collections::HashMap;
+        let mut s = sim(&[
+            "--explosion-threshold",
+            "0",
+            "--particle-elasticity",
+            "0.7",
+            "--wall-elasticity",
+            "0.9",
+            "--gravity",
+            "0",
+            "--self-gravity",
+            "--matter",
+            "--spawn-mode",
+            "collision",
+            "--particle-size",
+            "0.5",
+            "--min-particles",
+            "60",
+        ]);
+        let wall_x = 400.0;
+        assert!(s.add_wall_segment(wall_x, 0.0, wall_x, 600.0));
+
+        // id -> (side sign, radius, x) from the previous frame.
+        let mut seen: HashMap<u64, (f64, f64, f64)> = HashMap::new();
+        let mut flips_matter = 0u32;
+        let mut flips_physics = 0u32;
+        let mut births = [0u32; 2];
+        let now = Instant::now();
+
+        let audit = |s: &Simulation,
+                     seen: &mut HashMap<u64, (f64, f64, f64)>,
+                     frame: usize,
+                     flips_matter: &mut u32,
+                     flips_physics: &mut u32,
+                     births: &mut [u32; 2]| {
+            for p in s.particles() {
+                let side = (p.x - wall_x).signum();
+                if let Some(&(prev_side, prev_r, prev_x)) = seen.get(&p.id) {
+                    if side != prev_side && side != 0.0 && prev_side != 0.0 {
+                        #[allow(clippy::float_cmp)]
+                        let same_radius = p.radius == prev_r;
+                        if same_radius {
+                            *flips_physics += 1;
+                            println!(
+                                "frame {frame}: PHYSICS flip id {} x {prev_x:.2}->{:.2} \
+                                 r {:.2} v ({:.0},{:.0})",
+                                p.id, p.x, p.radius, p.vx, p.vy
+                            );
+                        } else {
+                            *flips_matter += 1;
+                            println!(
+                                "frame {frame}: MATTER flip id {} x {prev_x:.2}->{:.2} \
+                                 r {prev_r:.2}->{:.2}",
+                                p.id, p.x, p.radius
+                            );
+                        }
+                    }
+                } else {
+                    births[usize::from(side > 0.0)] += 1;
+                    if (p.x - wall_x).abs() < 25.0 {
+                        println!(
+                            "frame {frame}: near-wall birth id {} at x {:.2} (side {})",
+                            p.id,
+                            p.x,
+                            if side < 0.0 { "L" } else { "R" }
+                        );
+                    }
+                }
+            }
+            seen.clear();
+            for p in s.particles() {
+                seen.insert(p.id, ((p.x - wall_x).signum(), p.radius, p.x));
+            }
+        };
+
+        // Settle phase.
+        for frame in 0..240 {
+            s.step(1.0 / 60.0, now, None);
+            audit(
+                &s,
+                &mut seen,
+                frame,
+                &mut flips_matter,
+                &mut flips_physics,
+                &mut births,
+            );
+        }
+        let count_sides = |s: &Simulation| {
+            let l = s.particles().iter().filter(|p| p.x < wall_x).count();
+            (l, s.particle_count() - l)
+        };
+        let (l0, r0) = count_sides(&s);
+        println!("after settle: L={l0} R={r0}");
+
+        // Bursts on the heavier side to force a birth runaway there.
+        let burst_x = if l0 >= r0 { 200.0 } else { 600.0 };
+        for burst in 0..6 {
+            s.spawn_burst(burst_x, 150.0 + f64::from(burst) * 60.0);
+        }
+        println!("bursts fired at x={burst_x}");
+
+        for frame in 240..2400 {
+            s.step(1.0 / 60.0, now, None);
+            audit(
+                &s,
+                &mut seen,
+                frame,
+                &mut flips_matter,
+                &mut flips_physics,
+                &mut births,
+            );
+        }
+        let (l1, r1) = count_sides(&s);
+        println!(
+            "final: L={l1} R={r1} | births L={} R={} | flips: matter={flips_matter} \
+             physics={flips_physics}",
+            births[0], births[1]
+        );
     }
 }
