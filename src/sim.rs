@@ -911,37 +911,46 @@ impl Simulation {
                     // wall; against a wall-hugging impact where neither
                     // sign works, bounce instead of shattering across.
                     let (ox, oy) = (self.particles[idx].x, self.particles[idx].y);
+                    // Candidate fragment positions clamp into the arena
+                    // first — out-of-bounds space lies beyond every wall's
+                    // span, so a fragment parked there could round a wall
+                    // endpoint and re-enter on the far side (the same hole
+                    // the pair-separation clamp closes). The wall-crossing
+                    // check then runs on the clamped targets.
+                    let (w, h) = (f64::from(self.width), f64::from(self.height));
+                    let place = |s: f64| {
+                        let clamp = |x: f64, y: f64| {
+                            (x.min(w - frag_r).max(frag_r), y.min(h - frag_r).max(frag_r))
+                        };
+                        (
+                            clamp(ox + s * px * offset, oy + s * py * offset),
+                            clamp(ox - s * px * offset, oy - s * py * offset),
+                        )
+                    };
                     let segs = &self.segments;
-                    let Some(sign) = [1.0f64, -1.0].into_iter().find(|s| {
-                        !segs.iter().any(|seg| {
-                            motion_crosses_segment(
-                                seg,
-                                ox,
-                                oy,
-                                ox + s * px * offset,
-                                oy + s * py * offset,
-                            ) || motion_crosses_segment(
-                                seg,
-                                ox,
-                                oy,
-                                ox - s * px * offset,
-                                oy - s * py * offset,
-                            )
+                    let Some((sign, ((pax, pay), (twx, twy)))) = [1.0f64, -1.0]
+                        .into_iter()
+                        .map(|s| (s, place(s)))
+                        .find(|&(_, (p, t))| {
+                            !segs.iter().any(|seg| {
+                                motion_crosses_segment(seg, ox, oy, p.0, p.1)
+                                    || motion_crosses_segment(seg, ox, oy, t.0, t.1)
+                            })
                         })
-                    }) else {
+                    else {
                         continue;
                     };
                     let (px, py) = (sign * px, sign * py);
                     let parent = &mut self.particles[idx];
                     parent.radius = frag_r;
-                    parent.x += px * offset;
-                    parent.y += py * offset;
+                    parent.x = pax;
+                    parent.y = pay;
                     parent.vx += px * kick;
                     parent.vy += py * kick;
                     let twin = Particle {
                         id: 0, // stamped below, once the parent borrow ends
-                        x: parent.x - 2.0 * px * offset,
-                        y: parent.y - 2.0 * py * offset,
+                        x: twx,
+                        y: twy,
                         vx: parent.vx - 2.0 * px * kick,
                         vy: parent.vy - 2.0 * py * kick,
                         radius: frag_r,
@@ -2564,6 +2573,41 @@ mod tests {
     }
 
     #[test]
+    fn fission_fragments_stay_inside_the_arena() {
+        // A horizontal shattering impact hugging the top edge recedes
+        // its fragments vertically — one target lies above the arena.
+        // Out-of-bounds space is beyond every wall's span, so a fragment
+        // parked there could round a wall endpoint later; placements
+        // must clamp into the arena.
+        let mut s = sim(&["--min-particles", "2", "--matter"]);
+        freeze(&mut s);
+        s.particles[0].x = 300.0;
+        s.particles[0].y = 1.6;
+        s.particles[0].vx = 400.0;
+        s.particles[1].x = 320.0;
+        s.particles[1].y = 1.6;
+        s.particles[1].vx = -400.0;
+
+        let now = Instant::now();
+        for _ in 0..30 {
+            s.step(1.0 / 120.0, now, None);
+            for p in s.particles() {
+                assert!(
+                    p.y >= p.radius - 1e-9
+                        && p.y <= 600.0 - p.radius + 1e-9
+                        && p.x >= p.radius - 1e-9
+                        && p.x <= 800.0 - p.radius + 1e-9,
+                    "every fragment stays in bounds: ({}, {}) r {}",
+                    p.x,
+                    p.y,
+                    p.radius
+                );
+            }
+        }
+        assert_eq!(s.particle_count(), 4, "the impact did shatter");
+    }
+
+    #[test]
     fn a_divided_arena_stays_divided() {
         // The user-facing invariant behind all the wall work: an arena
         // split by a full-height wall, with every particle on the right,
@@ -3028,7 +3072,12 @@ mod tests {
         }
         println!("bursts fired at x={burst_x}");
 
-        for frame in 240..2400 {
+        let frames: usize = std::env::var("LEAK_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2400);
+        let mut oob_logged: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for frame in 240..frames {
             s.step(1.0 / 60.0, now, None);
             audit(
                 &s,
@@ -3038,6 +3087,27 @@ mod tests {
                 &mut flips_physics,
                 &mut births,
             );
+            // A particle out of bounds at frame end escaped every
+            // in-frame clamp — name the writer's victim so the leak
+            // mechanism identifies itself.
+            for p in s.particles() {
+                let r = p.radius;
+                if (p.x < r || p.x > 800.0 - r || p.y < r || p.y > 600.0 - r)
+                    && oob_logged.insert(p.id)
+                {
+                    println!(
+                        "frame {frame}: OUT-OF-BOUNDS id {} at ({:.3},{:.3}) r {:.2} v ({:.0},{:.0})",
+                        p.id, p.x, p.y, p.radius, p.vx, p.vy
+                    );
+                }
+            }
+            if frame % 2000 == 0 {
+                let l = s.particles().iter().filter(|p| p.x < wall_x).count();
+                println!(
+                    "frame {frame}: L={l} R={} flips m={flips_matter} p={flips_physics}",
+                    s.particle_count() - l
+                );
+            }
         }
         let (l1, r1) = count_sides(&s);
         println!(

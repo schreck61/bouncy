@@ -6,6 +6,10 @@ Notable changes to Bouncy, by release. Version numbers follow
 
 ## Unreleased
 
+- Fission fragments now clamp into the arena: a shattering impact
+  against an arena edge could park a fragment out of bounds, beyond
+  the reach of every drawn wall, from where it could round a wall's
+  endpoint and re-enter on the far side — the long-run divider leak.
 - Fixed a rare pure-physics wall escape: particle-separation pushout
   could park a particle just outside the arena bounds, beyond a wall's
   endpoint, letting it slip around the wall while out of bounds and
