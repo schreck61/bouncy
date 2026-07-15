@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## 1.4.4 — 2026-07-14
+## 1.4.4 — 2026-07-15
 
 - Fixed collision spawns materializing across a wall when a fast,
   dense clump strikes it (reported with fused blobs full of
