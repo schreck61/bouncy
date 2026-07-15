@@ -722,6 +722,7 @@ pub fn handle_collisions(
         if wall_between(p1, p2, segments) {
             continue;
         }
+        let (p1_pre, p2_pre) = ((p1.x, p1.y), (p2.x, p2.y));
         if let Some(result) = try_elastic_collision(p1, p2, particle_elasticity) {
             // Separation must not eject a particle out of the arena: the
             // sliver beyond the bounds is outside every wall segment's
@@ -734,6 +735,13 @@ pub fn handle_collisions(
             for p in [&mut *p1, &mut *p2] {
                 p.x = p.x.min(w - p.radius).max(p.radius);
                 p.y = p.y.min(h - p.radius).max(p.radius);
+            }
+            // Nor across a wall, even transiently: later contacts in this
+            // same pass read these positions, and the spawn sites they
+            // record outlive the wall pass's correction.
+            if !segments.is_empty() {
+                contain_across_segments(p1, p1_pre.0, p1_pre.1, segments);
+                contain_across_segments(p2, p2_pre.0, p2_pre.1, segments);
             }
             max_energy = max_energy.max(result.energy);
             recorder.record(
@@ -886,6 +894,46 @@ pub fn wall_between(p1: &Particle, p2: &Particle, segments: &[Segment]) -> bool 
         }
     }
     false
+}
+
+/// Pull `p` back onto `(ox, oy)`'s side of any wall its position has
+/// crossed: position-only containment for mid-pass writes. The pair
+/// solver resolves contacts sequentially before the substep's wall pass
+/// runs, so an uncontained separation pushout would let a particle sit
+/// across a wall *within* the pass — and anything recorded from that
+/// transient position (collision spawn sites, most damagingly) keeps
+/// pointing at the wrong side long after the wall pass corrects the
+/// particle itself. Velocity is left alone; the wall pass at substep end
+/// owns reflection.
+pub(crate) fn contain_across_segments(p: &mut Particle, ox: f64, oy: f64, segments: &[Segment]) {
+    for seg in segments {
+        let r = p.radius;
+        if p.x.max(ox) < seg.x1.min(seg.x2) - r
+            || p.x.min(ox) > seg.x1.max(seg.x2) + r
+            || p.y.max(oy) < seg.y1.min(seg.y2) - r
+            || p.y.min(oy) > seg.y1.max(seg.y2) + r
+        {
+            continue;
+        }
+        if !motion_crosses_segment(seg, ox, oy, p.x, p.y) {
+            continue;
+        }
+        let (cx, cy) = seg.closest_point(p.x, p.y);
+        let (abx, aby) = (seg.x2 - seg.x1, seg.y2 - seg.y1);
+        let len = (abx * abx + aby * aby).sqrt();
+        let (nx, ny) = if len > 1e-9 {
+            let (px, py) = (-aby / len, abx / len);
+            if line_side(seg, ox, oy) < 0.0 {
+                (-px, -py)
+            } else {
+                (px, py)
+            }
+        } else {
+            (0.0, -1.0)
+        };
+        p.x = cx + nx * r;
+        p.y = cy + ny * r;
+    }
 }
 
 /// Bounce particles off the drawn wall segments. Two contact conditions,
@@ -2043,6 +2091,43 @@ mod tests {
                 p.y
             );
         }
+    }
+
+    #[test]
+    fn pair_pushout_is_contained_by_walls_immediately() {
+        // A massive blob rams a small particle pressed against a wall:
+        // mass-weighted separation would shove the small one across.
+        // Containment must happen inside the pair pass itself — later
+        // contacts and spawn-site records in the same pass read these
+        // positions, so a transient far-side position is already a leak.
+        let wall = Segment {
+            x1: 400.0,
+            y1: 0.0,
+            x2: 400.0,
+            y2: 600.0,
+        };
+        let mut small = particle(400.35, 300.0, 0.0, 0.0);
+        small.radius = 0.35;
+        let mut blob = particle(402.4, 300.0, -800.0, 0.0);
+        blob.radius = 3.0;
+        let mut particles = vec![small, blob];
+        let mut grid = SpatialGrid::new();
+        let mut recorder = CollisionRecorder::new();
+        handle_collisions(
+            &mut particles,
+            &mut grid,
+            &mut recorder,
+            800,
+            600,
+            1.0,
+            &[wall],
+        );
+        assert_eq!(recorder.sites().len(), 1, "the ram did collide");
+        assert!(
+            particles[0].x >= 400.0 + 0.35 - 1e-9,
+            "small particle stays on its side of the wall: x={}",
+            particles[0].x
+        );
     }
 
     #[test]
