@@ -43,14 +43,64 @@ file only tracks what's ahead.
   `pixels` exposes `render_with()` for egui's render pass. The
   CPU/softbuffer backend would stay hotkeys-only (documented
   limitation).
+- **The emergent instrument (staged).** From user feedback: walls that
+  play notes turn the sim into an Otomata-style generative sequencer,
+  and the primitives already exist (collision-driven synth, pentatonic
+  music mode, per-segment walls, stable particle ids, deterministic
+  core). Staged so each rung is independently shippable and the first
+  needs no external gear — most people don't have a DAW, so the
+  instrument must sound good standing alone:
+  1. *Wall chimes.* Tag drawn segments with an optional note; wall
+     hits route through the existing synth, quantized by the music
+     mode's scale so random geometry still sounds musical. Walls
+     flash on hit — visible rhythm doubles as feedback for anyone
+     playing muted (or deaf), and makes the beat legible on screen.
+     Zero new dependencies; a weekend rung that validates the vision.
+  2. *Instrument scenes.* Ship preset scenes that demonstrate the idea
+     in one click — a percussion box (parallel silent walls, sounding
+     end caps), a marimba stair — reusing scene geometry + share
+     links so a good instrument is a URL someone can send around.
+  3. *Emitters.* A pinned spawner with direction, rate, and count cap
+     (the burst/comet machinery is most of it): the "sequencer clock"
+     that makes rhythms reproducible instead of one-shot. An optional
+     in-app quantize snap serves the no-DAW majority; purists get
+     rubato by leaving it off.
+  4. *MIDI out.* Native via `midir`, browser via WebMIDI (Chrome,
+     matching the demo's existing Chrome-first stance); per-wall note
+     mapping becomes per-wall MIDI note/channel. Strict timing stays
+     the DAW's job. A capture/export path (MIDI file or WAV of the
+     internal synth) keeps creations for everyone else.
+  5. *Filter walls.* Semipermeable walls (every-Nth-particle gates,
+     key/mode filters on note-carrying particles) — the full
+     generative toolkit. Permeability must be an explicit wall *type*:
+     solid walls keep the absolute containment guarantee the 1.4.x
+     releases established, and every wall-invariant code path (pair
+     filter, spawn side-checks, matter containment) branches on type.
+     The divided-arena audit harness re-verifies each new type.
 
 ## Smaller / opportunistic
 
-- Particle springs/links: click two particles to bind with a spring; molecule
-  building. Medium effort, niche payoff. (Particles carry stable ids, so
-  the cross-frame identity problem is already solved.)
-- Screensaver/attract mode: cycle through presets on a timer
-  (`--cycle <secs>`); the sim is a screensaver at heart.
+- Demo legibility pass (from user feedback): a short "what am I
+  looking at" blurb on the demo page for drive-by visitors (the tour
+  PDF is deliberately not public, so the demo currently ships with no
+  explanation), plus tooltips on the panel's mechanic toggles that say
+  what to *expect* — one line each beats a manual nobody opens.
+- Masked-mechanic hints (from user feedback): flow toggled at 100%
+  gravity reads as "everything sinks" — the current is real but
+  gravity swamps it (`peace` pairs flow with weightlessness for a
+  reason). When a toggled mechanic is masked by the current settings,
+  say so in the HUD/panel and name the setting to change. Audit the
+  other combos for the same trap (self-gravity under full gravity,
+  kaleidoscope with trails off).
+- HUD/status contrast: the on-screen instructions are easy to miss;
+  raise text contrast (or add a subtle backing strip) so first-run
+  guidance actually lands.
+- Held-tool assists (from user feedback): while `G` is held, enable
+  trails presentationally and restore the prior state on release, so
+  the well's effect on trajectories is visible without hunting for
+  `T`. Same pattern as bullet time: choreography, never physics. Keep
+  it to one or two hand-picked assists rather than a general combo
+  system — hidden state changes confuse more than they help.
 
 ## Tuning debts / watch items
 
