@@ -36,12 +36,20 @@ file only tracks what's ahead.
   once; raise the parallel thresholds on wasm (the 1024 break-even was
   measured natively); cap the web thread pool below
   `hardwareConcurrency`; longer-term, a WebGL/WebGPU present path.
-- **Native GUI: the edge-reveal panel (promoted).** Previously demoted
-  because permanent chrome would spoil the full-bleed screensaver
-  aesthetic; the edge-reveal design removes that objection — zero
-  chrome until the mouse asks for it. The groundwork holds: widgets
-  issue the same `Command`s as hotkeys, and `pixels` exposes
-  `render_with()` for egui's pass. Staged:
+- **Native GUI: the edge-reveal panel (built; ships next release).**
+  Previously demoted because permanent chrome would spoil the
+  full-bleed screensaver aesthetic; the edge-reveal design removed
+  that objection — zero chrome until the mouse asks for it. Built
+  hand-rolled rather than egui: the version matrix vetoed egui
+  outright (pixels 0.15 pins wgpu 0.19; no egui release pairs that
+  with winit 0.30), and drawing into the frame buffer like the HUD
+  turned out strictly better — no new dependencies, works on the CPU
+  backend too, and the detents/translucency/handle feel are owned
+  outright. All five rungs below are implemented (src/gui.rs); one
+  follow-up remains open: panel placement tools (click a button, then
+  click the arena) to match the web panel's 1.4.0 behavior — actions
+  currently land at the arena center. Original staging, for the
+  record:
   1. *egui plumbing.* Render integration, strict input routing (a
      click on the panel must never fall through and fire a burst or
      draw a wall), and a plain Tab-toggled panel as the accessible

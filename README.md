@@ -77,6 +77,7 @@ cargo run --release -- --spawn-at-collision
 | `--music` | Quantize collision pings to a pentatonic scale (energy picks the note) | Off |
 | `--kaleidoscope` | Mirror the frame 4-fold around the screen center | Off |
 | `--trails` | Leave motion trails behind particles | Off |
+| `--panel` | Start with the native control panel open (Tab toggles; the right-edge handle also reveals it) | Off |
 | `--particle-size <R>` | Particle radius in pixels (0.5-10.0) | 1.5 |
 | `--initial-speed <V>` | Top speed of newly created particles in px/sec (10-2000); they start at 50-100% of it | 600 |
 | `--color-mode <MODE>` | `solid` or `velocity` (hue follows speed) | solid |
