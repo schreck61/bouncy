@@ -36,13 +36,37 @@ file only tracks what's ahead.
   once; raise the parallel thresholds on wasm (the 1024 break-even was
   measured natively); cap the web thread pool below
   `hardwareConcurrency`; longer-term, a WebGL/WebGPU present path.
-- **Native GUI overlay (egui), demoted.** An egui panel inside the
-  native window (Tab to toggle): the web panel now covers the
-  browser, but the native binary is still hotkeys-only. The groundwork
-  holds — widgets would issue the same `Command`s as hotkeys, and
-  `pixels` exposes `render_with()` for egui's render pass. The
-  CPU/softbuffer backend would stay hotkeys-only (documented
-  limitation).
+- **Native GUI: the edge-reveal panel (promoted).** Previously demoted
+  because permanent chrome would spoil the full-bleed screensaver
+  aesthetic; the edge-reveal design removes that objection — zero
+  chrome until the mouse asks for it. The groundwork holds: widgets
+  issue the same `Command`s as hotkeys, and `pixels` exposes
+  `render_with()` for egui's pass. Staged:
+  1. *egui plumbing.* Render integration, strict input routing (a
+     click on the panel must never fall through and fire a burst or
+     draw a wall), and a plain Tab-toggled panel as the accessible
+     baseline that ships first and stays forever as the keyboard path.
+  2. *Panel parity with the web demo.* Same sections, same controls,
+     scrollable, all driving the existing `Command` dispatch — one
+     mental model across native and browser.
+  3. *The edge-reveal interaction.* Mouse reaching the right edge
+     reveals a thin vertical handle at mid-height; click or drag slides
+     the panel in, click again or push it home slides it out, and the
+     handle fades with the idle cursor (matching the existing
+     pointer-idle behavior). The reveal strip stays a few pixels wide
+     and dwell-gated so it never steals wall-drawing or well-holding
+     near the edge. Panel motion is a short critically-damped ease —
+     settle, not bounce.
+  4. *Slider detents.* Snap-to stops where behavior qualitatively
+     changes: gravity 0 (weightlessness is where flow and self-gravity
+     become legible) and 100, particle/wall elasticity 1.0 (the
+     energy-neutral point), time scale 1.0. A held modifier bypasses
+     the snap for fine control.
+  5. *Translucent panel.* Simple alpha fill so the show never stops
+     behind the controls — readability sets the opacity floor, and a
+     frosted blur is deliberately out of scope (an extra render pass
+     for a garnish). The CPU/softbuffer backend stays hotkeys-only
+     (documented limitation).
 - **The emergent instrument (staged).** From user feedback: walls that
   play notes turn the sim into an Otomata-style generative sequencer,
   and the primitives already exist (collision-driven synth, pentatonic
