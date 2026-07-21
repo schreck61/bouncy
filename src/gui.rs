@@ -66,18 +66,22 @@ const SIZE_POINTS: &[(f64, f64)] = &[(0.5, 0.0), (10.0, 1.0)];
 const SPEED_POINTS: &[(f64, f64)] = &[(10.0, 0.0), (1000.0, 0.75), (2000.0, 1.0)];
 /// 0 means "auto" (sized from the window), drawn as such.
 const MIN_PARTICLES_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 1.0)];
-/// Built-in presets the launch section cycles through; index 0 is none.
-/// A test pins every non-none name to a real built-in.
-const PRESET_NAMES: &[&str] = &[
-    "none",
-    "fireworks",
-    "blob",
-    "billiards",
-    "peace",
-    "orbits",
-    "mandala",
-    "accretion",
-];
+/// Built-in presets the launch section cycles through; index 0 is
+/// "none". Derived from the preset enum itself — the same source the
+/// web panel's dropdown uses — so the list can never drift.
+fn preset_names() -> &'static [&'static str] {
+    use clap::ValueEnum;
+    static NAMES: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut names = vec!["none"];
+        names.extend(
+            crate::presets::Preset::value_variants()
+                .iter()
+                .map(|p| p.label()),
+        );
+        names
+    })
+}
 
 /// Identity of a value slider.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -334,7 +338,7 @@ impl Gui {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         PanelCommand::Relaunch {
             preset: (self.launch.preset_idx > 0)
-                .then(|| PRESET_NAMES[self.launch.preset_idx].to_string()),
+                .then(|| preset_names()[self.launch.preset_idx].to_string()),
             particle_size: self.launch.particle_size,
             initial_speed: self.launch.initial_speed,
             min_particles: (self.launch.min_particles >= 1.5)
@@ -505,7 +509,7 @@ impl Gui {
             self.launch.particle_size = state.launch_particle_size;
             self.launch.initial_speed = state.launch_initial_speed;
             self.launch.min_particles = state.launch_min_particles.map_or(0.0, f64::from);
-            self.launch.preset_idx = PRESET_NAMES
+            self.launch.preset_idx = preset_names()
                 .iter()
                 .position(|n| *n == state.launch_preset)
                 .unwrap_or(0);
@@ -603,7 +607,8 @@ impl Gui {
                             Some(pressed)
                         };
                     } else if pressed == ButtonId::CyclePreset {
-                        self.launch.preset_idx = (self.launch.preset_idx + 1) % PRESET_NAMES.len();
+                        self.launch.preset_idx =
+                            (self.launch.preset_idx + 1) % preset_names().len();
                     } else if pressed == ButtonId::Relaunch {
                         commands.push(self.relaunch_command());
                     } else {
@@ -1149,7 +1154,7 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         &mut out,
         &[(
             ButtonId::CyclePreset,
-            &format!("Preset: {}", PRESET_NAMES[draft.preset_idx]),
+            &format!("Preset: {}", preset_names()[draft.preset_idx]),
         )],
         x,
         w,
@@ -1851,7 +1856,7 @@ mod tests {
             gui.tick(0.016, s, 800, 600, false, 0.0)
         };
         click_button(&mut gui, &s, ButtonId::CyclePreset);
-        assert_eq!(PRESET_NAMES[gui.launch.preset_idx], "fireworks");
+        assert_eq!(preset_names()[gui.launch.preset_idx], "fireworks");
         let cmds = click_button(&mut gui, &s, ButtonId::Relaunch);
         assert!(
             cmds.iter().any(|c| matches!(c, PanelCommand::Relaunch {
@@ -1867,7 +1872,7 @@ mod tests {
     #[test]
     fn preset_cycle_names_are_real_builtins() {
         use clap::ValueEnum;
-        for name in &PRESET_NAMES[1..] {
+        for name in &preset_names()[1..] {
             assert!(
                 crate::presets::Preset::from_str(name, true).is_ok(),
                 "panel preset '{name}' is not a built-in"
