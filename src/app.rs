@@ -1968,7 +1968,7 @@ mod tests {
 
     /// An App with a live simulation, as if the window had opened.
     fn test_app() -> App {
-        let config = Config::try_resolve_from(["bouncy", "--seed", "7"]).unwrap();
+        let config = Config::try_resolve_from(["bouncy", "--seed", "7", "--mute"]).unwrap();
         let mut app = App::new(config.clone());
         app.sim = Some(Simulation::new(&config, 800, 600));
         app
@@ -2187,7 +2187,7 @@ mod tests {
     fn time_scale_steps_retrace_to_the_starting_point() {
         // Regression: the old multiplicative step (x1.25) could never
         // land back on 1.0 after clamping at either end of the range.
-        let config = Config::try_resolve_from(["bouncy"]).unwrap();
+        let config = Config::try_resolve_from(["bouncy", "--mute"]).unwrap();
         let mut app = App::new(config);
         assert_eq!(app.time_scale, 1.0);
 

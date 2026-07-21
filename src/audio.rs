@@ -169,17 +169,11 @@ mod native {
 
     impl Audio {
         /// Open the default audio device, degrading to silence if unavailable.
+        /// A muted start never touches the device at all — the stream is
+        /// opened lazily on first unmute, so `--mute` runs (and unit tests)
+        /// stay off the audio hardware entirely.
         pub fn new(muted: bool, music: bool) -> Self {
-            let stream = match OutputStreamBuilder::open_default_stream() {
-                Ok(mut stream) => {
-                    stream.log_on_drop(false);
-                    Some(stream)
-                }
-                Err(e) => {
-                    eprintln!("Audio unavailable ({e}); running silently");
-                    None
-                }
-            };
+            let stream = if muted { None } else { Self::open_stream() };
 
             let (pings, notes) = synth_ping_palettes();
             Audio {
@@ -195,9 +189,26 @@ mod native {
             }
         }
 
-        /// Toggle mute; returns the new muted state.
+        fn open_stream() -> Option<OutputStream> {
+            match OutputStreamBuilder::open_default_stream() {
+                Ok(mut stream) => {
+                    stream.log_on_drop(false);
+                    Some(stream)
+                }
+                Err(e) => {
+                    eprintln!("Audio unavailable ({e}); running silently");
+                    None
+                }
+            }
+        }
+
+        /// Toggle mute; returns the new muted state. Unmuting opens the
+        /// device on first use (and retries if it was unavailable before).
         pub fn toggle_mute(&mut self) -> bool {
             self.muted = !self.muted;
+            if !self.muted && self.stream.is_none() {
+                self.stream = Self::open_stream();
+            }
             self.muted
         }
 
@@ -245,6 +256,24 @@ mod native {
                 return;
             };
             stream.mixer().add(self.explosion.clone());
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Audio;
+
+        /// Regression: a muted Audio must never open the output device.
+        /// Parallel test-suite Apps grabbing real WASAPI streams crashed
+        /// the Windows CI runner with `STATUS_ACCESS_VIOLATION`.
+        #[test]
+        fn muted_construction_stays_off_the_audio_device() {
+            let audio = Audio::new(true, false);
+            assert!(audio.muted);
+            assert!(
+                audio.stream.is_none(),
+                "muted Audio must not hold an output stream"
+            );
         }
     }
 }
