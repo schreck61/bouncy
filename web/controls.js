@@ -21,6 +21,14 @@ window.addEventListener("unhandledrejection", (e) => {
   fail(`unhandled rejection: ${e.reason}`);
 });
 
+// Cache-busting: index.html loads this file as controls.js?v=<crate
+// version> (a drift test pins the tag to the Rust version), and that
+// tag is forwarded to the wasm module chain below. Without it, browsers
+// heuristically cache pkg/bouncy.js and the .wasm for months, and a
+// returning visitor keeps running a stale simulation after a deploy.
+const BUNDLE_V = new URL(import.meta.url).searchParams.get("v") ?? "dev";
+const versioned = (path) => `${path}?v=${BUNDLE_V}`;
+
 // Load the single-threaded bundle by default. A multi-threaded bundle
 // (pkg-mt/) is used when the page is cross-origin isolated and the
 // bundle exists (?st forces single-threaded); see web/README.md.
@@ -30,8 +38,10 @@ async function loadBouncy() {
   const forceSt = new URLSearchParams(location.search).has("st");
   if (globalThis.crossOriginIsolated && !forceSt) {
     try {
-      const mt = await import("./pkg-mt/bouncy.js");
-      await mt.default();
+      const mt = await import(versioned("./pkg-mt/bouncy.js"));
+      await mt.default({
+        module_or_path: new URL(versioned("pkg-mt/bouncy_bg.wasm"), location.href),
+      });
       const threads = navigator.hardwareConcurrency ?? 4;
       const initPool = async () => {
         await mt.initThreadPool(threads);
@@ -42,8 +52,10 @@ async function loadBouncy() {
       // No MT bundle deployed (or it failed to load): fall through.
     }
   }
-  const st = await import("./pkg/bouncy.js");
-  await st.default();
+  const st = await import(versioned("./pkg/bouncy.js"));
+  await st.default({
+    module_or_path: new URL(versioned("pkg/bouncy_bg.wasm"), location.href),
+  });
   $("threads-note").textContent = globalThis.crossOriginIsolated && !forceSt
     ? "Single-threaded build (no multi-threaded bundle deployed)."
     : "Single-threaded build (multi-threading needs cross-origin isolation).";

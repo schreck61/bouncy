@@ -745,6 +745,29 @@ mod tests {
     }
 
     #[test]
+    fn web_asset_version_tags_match_the_crate_version() {
+        // Drift insurance for the demo's cache-busting: index.html tags
+        // its scripts with ?v=<crate version>, and controls.js forwards
+        // that tag to the wasm module chain. A stale tag means returning
+        // visitors keep a cached old simulation after a deploy (observed
+        // as a v1.3.x bundle rejecting newer query flags), so a release
+        // that forgets to move the tag must fail here.
+        let html = include_str!("../web/index.html");
+        let tag = concat!("?v=", env!("CARGO_PKG_VERSION"));
+        for asset in ["coi.js", "controls.js"] {
+            assert!(
+                html.contains(&format!("{asset}{tag}\"")),
+                "web/index.html must reference {asset} as {asset}{tag}"
+            );
+        }
+        let stale = html
+            .matches("?v=")
+            .count()
+            .saturating_sub(html.matches(tag).count());
+        assert_eq!(stale, 0, "web/index.html carries a stale ?v= tag");
+    }
+
+    #[test]
     fn query_truthy_aliases_apply_only_to_boolean_flags() {
         // Regression: ?particle-size=1 used to become a bare
         // --particle-size (the "1" eaten as a boolean alias, then clap
