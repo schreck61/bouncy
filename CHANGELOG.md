@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.5.0 — 2026-07-20
 
 - The web demo's "Apply & restart" now starts from the share link's
   parameters rather than the page URL, so settings adjusted during the
