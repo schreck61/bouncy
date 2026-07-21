@@ -45,11 +45,10 @@ file only tracks what's ahead.
   with winit 0.30), and drawing into the frame buffer like the HUD
   turned out strictly better — no new dependencies, works on the CPU
   backend too, and the detents/translucency/handle feel are owned
-  outright. All five rungs below are implemented (src/gui.rs); one
-  follow-up remains open: panel placement tools (click a button, then
-  click the arena) to match the web panel's 1.4.0 behavior — actions
-  currently land at the arena center. Original staging, for the
-  record:
+  outright. All five rungs below are implemented (src/gui.rs), plus
+  the web panel's one-shot placement tools (click a button, then
+  click the arena; second press or Esc cancels) so the two panels
+  cannot diverge. Original staging, for the record:
   1. *egui plumbing.* Render integration, strict input routing (a
      click on the panel must never fall through and fire a burst or
      draw a wall), and a plain Tab-toggled panel as the accessible

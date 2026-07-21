@@ -932,6 +932,10 @@ impl App {
         };
 
         match key_code {
+            // Esc cancels an armed panel placement tool before it means
+            // exit — you are mid-gesture, not asking to leave.
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyCode::Escape if self.gui.is_armed() => self.gui.disarm(),
             KeyCode::Space | KeyCode::Escape | KeyCode::KeyQ => event_loop.exit(),
             KeyCode::KeyG => {
                 // A stopped simulation self-wakes while the well is held.
@@ -1586,6 +1590,15 @@ impl ApplicationHandler for App {
                 if let Some((w, h)) = self.dimensions() {
                     if button == MouseButton::Left && self.gui.on_press_at(w, h) {
                         return;
+                    }
+                    // An armed placement tool claims the next arena
+                    // click: place at the cursor, exactly like the web
+                    // panel's one-shot tools.
+                    if button == MouseButton::Left {
+                        if let Some(cmd) = self.gui.place_armed(self.cursor.x, self.cursor.y) {
+                            self.apply_panel_command(cmd);
+                            return;
+                        }
                     }
                 }
                 self.handle_mouse(button);

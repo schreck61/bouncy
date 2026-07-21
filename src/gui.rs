@@ -214,6 +214,10 @@ pub struct Gui {
     /// beyond the click slop (drag) or not (click).
     handle_grab_x: f64,
     handle_moved: bool,
+    /// A one-shot placement tool armed by an action button: the next
+    /// arena click places it (web-panel semantics; a second press or
+    /// Esc cancels).
+    armed: Option<ButtonId>,
 }
 
 impl Default for Gui {
@@ -233,6 +237,7 @@ impl Default for Gui {
             handle_drag: false,
             handle_grab_x: 0.0,
             handle_moved: false,
+            armed: None,
         }
     }
 }
@@ -254,6 +259,31 @@ impl Gui {
     /// Record the cursor position (frame coordinates).
     pub fn set_cursor(&mut self, x: f64, y: f64) {
         self.cursor = (x, y);
+    }
+
+    /// Whether a placement tool is currently armed.
+    pub fn is_armed(&self) -> bool {
+        self.armed.is_some()
+    }
+
+    /// Cancel the armed placement tool (Esc, or the app's discretion).
+    pub fn disarm(&mut self) {
+        self.armed = None;
+    }
+
+    /// Consume the armed tool with an arena click at `(x, y)`: returns
+    /// the placement command and disarms.
+    pub fn place_armed(&mut self, x: f64, y: f64) -> Option<PanelCommand> {
+        let tool = self.armed.take()?;
+        Some(match tool {
+            ButtonId::Burst => PanelCommand::SpawnBurst(x, y),
+            ButtonId::Comet => PanelCommand::LaunchComet(x, y),
+            ButtonId::Explode => PanelCommand::TriggerExplosion(x, y),
+            ButtonId::PinWell => PanelCommand::PinWell(x, y, Polarity::Attract),
+            ButtonId::PinRepeller => PanelCommand::PinWell(x, y, Polarity::Repel),
+            // Non-placement ids never arm.
+            _ => return None,
+        })
     }
 
     /// The panel's left edge for the current slide progress. Linear in
@@ -392,6 +422,7 @@ impl Gui {
             self.dragging = None;
             self.pressed_button = None;
             self.hover = None;
+            self.armed = None;
             self.input = PanelInput::default();
             return commands;
         }
@@ -465,7 +496,17 @@ impl Gui {
                         && laid.row.contains(cx, cy)
                 });
                 if over {
-                    commands.push(button_command(pressed, state, width, height));
+                    if is_placement(pressed) {
+                        // Arm (or, pressed again, cancel) the one-shot
+                        // placement tool — the arena click does the work.
+                        self.armed = if self.armed == Some(pressed) {
+                            None
+                        } else {
+                            Some(pressed)
+                        };
+                    } else {
+                        commands.push(button_command(pressed, state));
+                    }
                 }
             }
         }
@@ -525,6 +566,22 @@ impl Gui {
                 .hover
                 .is_some_and(|h| (h.y - laid.row.y).abs() < 0.5 && laid.row.contains_rect(&h));
             self.draw_item(frame, width, height, laid, hovered);
+        }
+
+        // An armed placement tool follows the cursor with its hint.
+        if let Some(tool) = self.armed {
+            let (cx, cy) = self.cursor;
+            if cx >= 0.0 && cy >= 0.0 {
+                draw_text(
+                    frame,
+                    width,
+                    height,
+                    placement_label(tool),
+                    11.0,
+                    to_f32(cx + 12.0, cy + 12.0),
+                    [200, 215, 240],
+                );
+            }
         }
 
         // Scrollbar sliver when the content overflows.
@@ -653,34 +710,43 @@ impl Gui {
                     to_f32(row.x, row.y + 2.0),
                     [210, 213, 220],
                 );
-                let (fill, border) = if *on {
-                    ([90, 140, 220], [120, 165, 235])
+                // A capsule switch: border pill, inset fill pill, and a
+                // round knob that slides right when on.
+                let (fill, border, knob) = if *on {
+                    ([90, 140, 220], [120, 165, 235], [240, 244, 250])
                 } else {
-                    ([40, 44, 52], [90, 96, 108])
+                    ([40, 44, 52], [90, 96, 108], [140, 146, 158])
                 };
-                fill_rect(frame, width, height, *hit, fill, 255);
-                stroke_rect(frame, width, height, *hit, border);
-                if *on {
-                    let dot = Rect {
-                        x: hit.x + hit.w - hit.h + 3.0,
-                        y: hit.y + 3.0,
-                        w: hit.h - 6.0,
-                        h: hit.h - 6.0,
-                    };
-                    fill_rect(frame, width, height, dot, [240, 244, 250], 255);
+                fill_pill(frame, width, height, *hit, border, 255);
+                let inner = Rect {
+                    x: hit.x + 1.0,
+                    y: hit.y + 1.0,
+                    w: hit.w - 2.0,
+                    h: hit.h - 2.0,
+                };
+                fill_pill(frame, width, height, inner, fill, 255);
+                let kr = hit.h / 2.0 - 2.5;
+                let kx = if *on {
+                    hit.x + hit.w - hit.h / 2.0
                 } else {
-                    let dot = Rect {
-                        x: hit.x + 3.0,
-                        y: hit.y + 3.0,
-                        w: hit.h - 6.0,
-                        h: hit.h - 6.0,
-                    };
-                    fill_rect(frame, width, height, dot, [140, 146, 158], 255);
-                }
+                    hit.x + hit.h / 2.0
+                };
+                fill_circle(
+                    frame,
+                    width,
+                    height,
+                    (kx, hit.y + hit.h / 2.0),
+                    kr,
+                    knob,
+                    255,
+                );
             }
             Item::Button { id, label, hit } => {
                 let pressed = self.pressed_button == Some(*id);
-                let bg = if pressed {
+                let armed = self.armed == Some(*id);
+                let bg = if armed {
+                    [90, 140, 220]
+                } else if pressed {
                     [28, 32, 40]
                 } else if hovered {
                     [56, 62, 74]
@@ -688,7 +754,17 @@ impl Gui {
                     [42, 47, 57]
                 };
                 fill_rect(frame, width, height, *hit, bg, 240);
-                stroke_rect(frame, width, height, *hit, [95, 102, 116]);
+                stroke_rect(
+                    frame,
+                    width,
+                    height,
+                    *hit,
+                    if armed {
+                        [160, 195, 245]
+                    } else {
+                        [95, 102, 116]
+                    },
+                );
                 let (tw, th) = crate::text::measure_text(label, 12.0);
                 draw_text(
                     frame,
@@ -918,14 +994,7 @@ fn layout(state: &PanelState, panel_x: f64, scroll: f64) -> (Vec<Laid>, f64) {
         &mut y,
     );
 
-    push_item(
-        &mut out,
-        x,
-        w,
-        Item::Header("actions (at center)"),
-        24.0,
-        &mut y,
-    );
+    push_item(&mut out, x, w, Item::Header("actions"), 24.0, &mut y);
     button_row(
         &mut out,
         &[(ButtonId::Burst, "Burst"), (ButtonId::Comet, "Comet")],
@@ -1172,25 +1241,49 @@ fn slider_command(id: SliderId, value: f64) -> PanelCommand {
     }
 }
 
-/// The command a button click emits. Placement actions land at the
-/// arena center (cursor-follow placement is future work).
-fn button_command(id: ButtonId, state: &PanelState, width: u32, height: u32) -> PanelCommand {
-    let (cx, cy) = (f64::from(width) / 2.0, f64::from(height) / 2.0);
+/// The five buttons that arm a one-shot placement tool.
+fn is_placement(id: ButtonId) -> bool {
+    matches!(
+        id,
+        ButtonId::Burst
+            | ButtonId::Comet
+            | ButtonId::Explode
+            | ButtonId::PinWell
+            | ButtonId::PinRepeller
+    )
+}
+
+/// Tooltip label for an armed placement tool.
+fn placement_label(id: ButtonId) -> &'static str {
+    match id {
+        ButtonId::Burst => "click to place burst",
+        ButtonId::Comet => "click to aim comet",
+        ButtonId::Explode => "click to place explosion",
+        ButtonId::PinWell => "click to pin well",
+        ButtonId::PinRepeller => "click to pin repeller",
+        _ => "",
+    }
+}
+
+/// The command a non-placement button click emits.
+fn button_command(id: ButtonId, state: &PanelState) -> PanelCommand {
     match id {
         ButtonId::PauseResume => PanelCommand::SetPaused(!state.paused),
         ButtonId::Reset => PanelCommand::Plain(Command::Reset),
         ButtonId::CycleSpawn => PanelCommand::Plain(Command::CycleSpawnMode),
         ButtonId::CycleColor => PanelCommand::Plain(Command::CycleColorMode),
         ButtonId::CycleHud => PanelCommand::Plain(Command::CycleHud),
-        ButtonId::Burst => PanelCommand::SpawnBurst(cx, cy),
-        ButtonId::Comet => PanelCommand::LaunchComet(cx, cy),
-        ButtonId::Explode => PanelCommand::TriggerExplosion(cx, cy),
         ButtonId::Screenshot => PanelCommand::Plain(Command::Screenshot),
-        ButtonId::PinWell => PanelCommand::PinWell(cx, cy, Polarity::Attract),
-        ButtonId::PinRepeller => PanelCommand::PinWell(cx, cy, Polarity::Repel),
         ButtonId::ClearWells => PanelCommand::Plain(Command::ClearWells),
         ButtonId::ClearWalls => PanelCommand::Plain(Command::ClearWalls),
         ButtonId::ExportScene => PanelCommand::Plain(Command::ExportScene),
+        ButtonId::Burst
+        | ButtonId::Comet
+        | ButtonId::Explode
+        | ButtonId::PinWell
+        | ButtonId::PinRepeller => {
+            unreachable!("placement buttons arm a tool; the arena click emits")
+        }
     }
 }
 
@@ -1219,6 +1312,65 @@ fn fill_rect(frame: &mut [u8], width: u32, height: u32, rect: Rect, rgb: [u8; 3]
                 {
                     frame[idx + channel] = ((u16::from(c) * a + dst * (255 - a)) / 255) as u8;
                 }
+            }
+            frame[idx + 3] = 255;
+        }
+    }
+}
+
+/// Alpha-blend a filled capsule (pill): a center rectangle with a
+/// semicircle at each end.
+fn fill_pill(frame: &mut [u8], width: u32, height: u32, rect: Rect, rgb: [u8; 3], alpha: u8) {
+    let r = rect.h / 2.0;
+    let (cy, lx, rx) = (rect.y + r, rect.x + r, rect.x + rect.w - r);
+    fill_rect(
+        frame,
+        width,
+        height,
+        Rect {
+            x: lx,
+            y: rect.y,
+            w: rect.w - 2.0 * r,
+            h: rect.h,
+        },
+        rgb,
+        alpha,
+    );
+    fill_circle(frame, width, height, (lx, cy), r, rgb, alpha);
+    fill_circle(frame, width, height, (rx, cy), r, rgb, alpha);
+}
+
+/// Alpha-blend a filled circle centered at `center`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn fill_circle(
+    frame: &mut [u8],
+    width: u32,
+    height: u32,
+    center: (f64, f64),
+    r: f64,
+    rgb: [u8; 3],
+    alpha: u8,
+) {
+    let (cx, cy) = center;
+    let (x0, x1) = (
+        (cx - r).max(0.0) as u32,
+        (cx + r + 1.0).min(f64::from(width)) as u32,
+    );
+    let (y0, y1) = (
+        (cy - r).max(0.0) as u32,
+        (cy + r + 1.0).min(f64::from(height)) as u32,
+    );
+    let a = u16::from(alpha);
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let (dx, dy) = (f64::from(px) + 0.5 - cx, f64::from(py) + 0.5 - cy);
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            let idx = ((py * width + px) * 4) as usize;
+            for (channel, &c) in rgb.iter().enumerate() {
+                let dst = u16::from(frame[idx + channel]);
+                frame[idx + channel] = ((u16::from(c) * a + dst * (255 - a)) / 255) as u8;
             }
             frame[idx + 3] = 255;
         }
@@ -1424,6 +1576,58 @@ mod tests {
         gui.on_release();
         gui.tick(0.016, &s, 800, 600, false, 0.0);
         assert!(!gui.open, "released near home: closed");
+    }
+
+    #[test]
+    fn placement_buttons_arm_place_and_cancel() {
+        let mut gui = open_gui();
+        let s = state();
+        let hit = layout(&s, 800.0 - PANEL_WIDTH, 0.0)
+            .0
+            .iter()
+            .find_map(|laid| match &laid.item {
+                Item::Button { id, hit, .. } if *id == ButtonId::Burst => Some(*hit),
+                _ => None,
+            })
+            .expect("burst button");
+
+        let click = |gui: &mut Gui, s: &PanelState| {
+            gui.set_cursor(hit.x + 2.0, hit.y + 2.0);
+            gui.input.pressed = true;
+            gui.tick(0.016, s, 800, 600, false, 0.0);
+            gui.input.released = true;
+            gui.tick(0.016, s, 800, 600, false, 0.0)
+        };
+
+        // Click arms without emitting; the arena click places at the
+        // cursor and disarms.
+        let cmds = click(&mut gui, &s);
+        assert!(cmds.is_empty(), "arming emits nothing");
+        assert!(gui.is_armed());
+        let placed = gui.place_armed(150.0, 220.0);
+        assert!(
+            matches!(placed, Some(PanelCommand::SpawnBurst(x, y))
+                if (x - 150.0).abs() < 1e-9 && (y - 220.0).abs() < 1e-9),
+            "placed at the arena click"
+        );
+        assert!(!gui.is_armed(), "placing disarms");
+
+        // A second press cancels instead of double-arming.
+        click(&mut gui, &s);
+        assert!(gui.is_armed());
+        click(&mut gui, &s);
+        assert!(!gui.is_armed(), "second press cancels");
+
+        // Esc-style disarm and closing the panel both drop the tool.
+        click(&mut gui, &s);
+        gui.disarm();
+        assert!(!gui.is_armed());
+        click(&mut gui, &s);
+        gui.open = false;
+        gui.slide = 0.0;
+        gui.tick(0.016, &s, 800, 600, false, 0.0);
+        assert!(!gui.is_armed(), "hidden panel drops the tool");
+        assert!(gui.place_armed(10.0, 10.0).is_none());
     }
 
     #[test]

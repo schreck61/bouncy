@@ -14,6 +14,11 @@ Notable changes to Bouncy, by release. Version numbers follow
   control. Hand-drawn into the frame buffer like the HUD, so it works
   on both the GPU and CPU render backends. `--panel` starts with it
   open.
+- The panel's action buttons are one-shot placement tools, exactly
+  like the web panel's: click "Pin well" (or burst, comet, explode,
+  repeller), then click the arena to place it there — a hint follows
+  the cursor while armed, a second press or Esc cancels. Toggles are
+  capsule switches matching the web panel's look.
 - The panel also opens without the keyboard: dwelling at the window's
   right edge reveals a thin handle at mid-height — click it to slide
   the panel in or out, or grab and drag it to any position and let
