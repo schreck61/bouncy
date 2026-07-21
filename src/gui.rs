@@ -33,6 +33,20 @@ const WHEEL_STEP: f64 = 24.0;
 /// Slide animation rate (1/s): the exponential approach constant for the
 /// panel's settle — critically-damped feel, no bounce.
 const SLIDE_RATE: f64 = 14.0;
+/// Width of the strip along the right edge that arms the reveal handle.
+const REVEAL_STRIP: f64 = 6.0;
+/// How long the cursor must dwell in the strip before the handle shows —
+/// quick passes (drawing a wall to the edge) never see it.
+const HANDLE_DWELL_SECS: f64 = 0.15;
+/// Handle geometry: a thin vertical pill at mid-height.
+const HANDLE_W: f64 = 5.0;
+const HANDLE_H: f64 = 56.0;
+/// Handle fade rate (1/s).
+const HANDLE_FADE_RATE: f64 = 10.0;
+/// Cursor idle time after which the handle fades with the cursor.
+const HANDLE_IDLE_SECS: f64 = 2.0;
+/// Press-to-release travel under this is a click (toggle), not a drag.
+const CLICK_SLOP: f64 = 3.0;
 
 /// Identity of a value slider.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -174,6 +188,16 @@ pub struct Gui {
     input: PanelInput,
     /// Cursor position in frame coordinates (mirrors the app's cursor).
     cursor: (f64, f64),
+    /// Edge-reveal handle visibility (0..1, animated).
+    handle_alpha: f64,
+    /// How long the cursor has dwelt in the right-edge reveal strip.
+    edge_dwell: f64,
+    /// The handle is currently grabbed.
+    handle_drag: bool,
+    /// Cursor x when the handle was grabbed, and whether it has moved
+    /// beyond the click slop (drag) or not (click).
+    handle_grab_x: f64,
+    handle_moved: bool,
 }
 
 impl Default for Gui {
@@ -188,6 +212,11 @@ impl Default for Gui {
             hover: None,
             input: PanelInput::default(),
             cursor: (-1.0, -1.0),
+            handle_alpha: 0.0,
+            edge_dwell: 0.0,
+            handle_drag: false,
+            handle_grab_x: 0.0,
+            handle_moved: false,
         }
     }
 }
@@ -211,23 +240,51 @@ impl Gui {
         self.cursor = (x, y);
     }
 
-    /// The panel's left edge for the current slide progress.
+    /// The panel's left edge for the current slide progress. Linear in
+    /// `slide`: the exponential approach in `tick` supplies the settle,
+    /// and a grabbed handle must track the cursor exactly.
     fn panel_x(&self, width: u32) -> f64 {
-        f64::from(width) - PANEL_WIDTH * ease(self.slide)
+        f64::from(width) - PANEL_WIDTH * self.slide
+    }
+
+    /// The reveal handle's rectangle: a thin pill hugging the panel's
+    /// left edge (the window's right edge while the panel is hidden).
+    fn handle_rect(&self, width: u32, height: u32) -> Rect {
+        Rect {
+            x: self.panel_x(width) - HANDLE_W,
+            y: f64::from(height) / 2.0 - HANDLE_H / 2.0,
+            w: HANDLE_W,
+            h: HANDLE_H,
+        }
     }
 
     /// Whether the panel currently owns the pointer: over the visible
     /// panel, or mid-interaction (a drag must not leak to the sim even
     /// if the cursor strays off the panel).
     pub fn wants_pointer(&self, width: u32) -> bool {
-        if self.dragging.is_some() || self.pressed_button.is_some() {
+        if self.dragging.is_some() || self.pressed_button.is_some() || self.handle_drag {
+            return true;
+        }
+        if self.handle_alpha > 0.3 && self.cursor.0 >= self.panel_x(width) - HANDLE_W {
             return true;
         }
         self.slide > 0.0 && self.cursor.0 >= self.panel_x(width)
     }
 
-    /// A mouse press: returns true when the panel consumes it.
-    pub fn on_press(&mut self, width: u32) -> bool {
+    /// A mouse press: returns true when the panel consumes it. A press
+    /// on the visible handle grabs it (drag decides open/closed; a
+    /// no-travel release toggles); `height` locates the handle.
+    pub fn on_press_at(&mut self, width: u32, height: u32) -> bool {
+        if self.handle_alpha > 0.3
+            && self
+                .handle_rect(width, height)
+                .contains(self.cursor.0, self.cursor.1)
+        {
+            self.handle_drag = true;
+            self.handle_grab_x = self.cursor.0;
+            self.handle_moved = false;
+            return true;
+        }
         if self.wants_pointer(width) {
             self.input.pressed = true;
             true
@@ -261,12 +318,56 @@ impl Gui {
         width: u32,
         height: u32,
         shift: bool,
+        cursor_idle: f64,
     ) -> Vec<PanelCommand> {
+        let dt = dt.max(0.0);
+        let (cx0, cy0) = self.cursor;
+        let w_f = f64::from(width);
+
+        // Edge dwell arms the reveal handle; quick passes never see it.
+        if cx0 >= w_f - REVEAL_STRIP && cy0 >= 0.0 {
+            self.edge_dwell += dt;
+        } else {
+            self.edge_dwell = 0.0;
+        }
+        let handle_visible = self.handle_drag
+            || self.open
+            || self.slide > 0.0
+            || (self.edge_dwell >= HANDLE_DWELL_SECS && cursor_idle < HANDLE_IDLE_SECS);
+        let handle_target = if handle_visible { 1.0 } else { 0.0 };
+        self.handle_alpha +=
+            (handle_target - self.handle_alpha) * (1.0 - (-HANDLE_FADE_RATE * dt).exp());
+        if (self.handle_alpha - handle_target).abs() < 0.001 {
+            self.handle_alpha = handle_target;
+        }
+
+        // A grabbed handle drives the slide directly and decides
+        // open/closed by where it is let go.
+        if self.handle_drag {
+            if (cx0 - self.handle_grab_x).abs() > CLICK_SLOP {
+                self.handle_moved = true;
+            }
+            if self.handle_moved {
+                self.slide = ((w_f - cx0 - HANDLE_W / 2.0) / PANEL_WIDTH).clamp(0.0, 1.0);
+                self.open = self.slide >= 0.5;
+            }
+            if self.input.released {
+                self.input.released = false;
+                if !self.handle_moved {
+                    // A clean click toggles.
+                    self.open = !self.open;
+                }
+                self.handle_drag = false;
+            }
+        }
+
         // Exponential approach: critically-damped settle, no bounce.
-        let target = if self.open { 1.0 } else { 0.0 };
-        self.slide += (target - self.slide) * (1.0 - (-SLIDE_RATE * dt.max(0.0)).exp());
-        if (self.slide - target).abs() < 0.001 {
-            self.slide = target;
+        if !self.handle_drag || !self.handle_moved {
+            let target = if self.open { 1.0 } else { 0.0 };
+            self.slide += (target - self.slide) * (1.0 - (-SLIDE_RATE * dt).exp());
+            if (self.slide - target).abs() < 0.001 {
+                self.slide = target;
+            }
         }
 
         let mut commands = Vec::new();
@@ -360,6 +461,27 @@ impl Gui {
     /// Draw the panel over the finished frame. Uses the same layout the
     /// tick resolved interactions against.
     pub fn draw(&self, frame: &mut [u8], state: &PanelState, width: u32, height: u32) {
+        // The reveal handle draws whenever it has any presence — panel
+        // open or closed.
+        if self.handle_alpha > 0.01 {
+            let hr = self.handle_rect(width, height);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let a = (self.handle_alpha * 225.0) as u8;
+            fill_rect(frame, width, height, hr, [205, 210, 220], a);
+            // Grip nicks so the pill reads as grabbable.
+            for k in 0..3 {
+                let ny = hr.y + hr.h / 2.0 - 8.0 + f64::from(k) * 8.0;
+                hline(
+                    frame,
+                    width,
+                    height,
+                    hr.x + 1.0,
+                    hr.x + hr.w - 1.0,
+                    ny,
+                    [90, 96, 108, 255],
+                );
+            }
+        }
         if self.slide <= 0.0 {
             return;
         }
@@ -955,11 +1077,6 @@ fn button_row(out: &mut Vec<Laid>, buttons: &[(ButtonId, &str)], x: f64, w: f64,
     *y += 26.0;
 }
 
-/// Smoothstep easing for the slide animation's spatial mapping.
-fn ease(t: f64) -> f64 {
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// Slider value for a cursor x position over a track.
 fn slider_value_at(cx: f64, track: &Rect, min: f64, max: f64) -> f64 {
     let t = ((cx - track.x) / track.w).clamp(0.0, 1.0);
@@ -1198,12 +1315,71 @@ mod tests {
             })
             .expect("reset");
         gui.set_cursor(reset.x + 4.0, reset.y + 4.0);
-        let _ = gui.tick(0.016, &s, w, h, false);
+        gui.handle_alpha = 1.0;
+        let _ = gui.tick(0.016, &s, w, h, false, 0.0);
         gui.draw(&mut frame, &s, w, h);
 
         let path = std::path::Path::new("target/panel-preview.png");
         crate::render::write_png(path, &frame, w, h).expect("png written");
         println!("panel preview written to {}", path.display());
+    }
+
+    #[test]
+    fn edge_dwell_reveals_the_handle_and_quick_passes_do_not() {
+        let mut gui = Gui::new();
+        let s = state();
+        // A quick pass through the strip: two short ticks, no reveal.
+        gui.set_cursor(797.0, 300.0);
+        gui.tick(0.05, &s, 800, 600, false, 0.0);
+        gui.set_cursor(400.0, 300.0);
+        gui.tick(0.05, &s, 800, 600, false, 0.0);
+        assert!(gui.handle_alpha < 0.3, "quick pass never arms the handle");
+        // Dwelling in the strip reveals it.
+        gui.set_cursor(797.0, 300.0);
+        for _ in 0..20 {
+            gui.tick(0.05, &s, 800, 600, false, 0.0);
+        }
+        assert!(
+            gui.handle_alpha > 0.9,
+            "dwell reveals: {}",
+            gui.handle_alpha
+        );
+        // An idle cursor fades it back out.
+        for _ in 0..20 {
+            gui.tick(0.05, &s, 800, 600, false, 10.0);
+        }
+        assert!(gui.handle_alpha < 0.1, "idle fades: {}", gui.handle_alpha);
+    }
+
+    #[test]
+    fn handle_click_toggles_and_drag_slides() {
+        let mut gui = Gui::new();
+        let s = state();
+        // Arm the handle by dwelling at the edge, at handle height.
+        gui.set_cursor(797.0, 300.0);
+        for _ in 0..20 {
+            gui.tick(0.05, &s, 800, 600, false, 0.0);
+        }
+        // Click (press + release without travel) opens.
+        assert!(gui.on_press_at(800, 600), "handle press consumed");
+        gui.on_release();
+        for _ in 0..40 {
+            gui.tick(0.05, &s, 800, 600, false, 0.0);
+        }
+        assert!(gui.open, "click opened the panel");
+        assert!((gui.slide - 1.0).abs() < 0.01, "settled out: {}", gui.slide);
+
+        // Grab the handle (now at the panel's left edge) and push it
+        // most of the way home: releases closed.
+        let hr = gui.handle_rect(800, 600);
+        gui.set_cursor(hr.x + 2.0, hr.y + 10.0);
+        assert!(gui.on_press_at(800, 600), "grab consumed");
+        gui.set_cursor(790.0, hr.y + 10.0);
+        gui.tick(0.016, &s, 800, 600, false, 0.0);
+        assert!(gui.slide < 0.2, "panel tracked the drag: {}", gui.slide);
+        gui.on_release();
+        gui.tick(0.016, &s, 800, 600, false, 0.0);
+        assert!(!gui.open, "released near home: closed");
     }
 
     #[test]
@@ -1239,7 +1415,7 @@ mod tests {
         // inside the detent radius (3% of 2000 = 60) around 0.
         gui.set_cursor(track.x + track.w * 0.49, track.y + 2.0);
         gui.input.pressed = true;
-        let cmds = gui.tick(0.016, &s, 800, 600, false);
+        let cmds = gui.tick(0.016, &s, 800, 600, false, 0.0);
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, PanelCommand::SetGravity(0))),
@@ -1261,7 +1437,7 @@ mod tests {
             .expect("matter toggle");
         gui.set_cursor(row.x + 4.0, row.y + row.h / 2.0);
         gui.input.pressed = true;
-        let cmds = gui.tick(0.016, &s, 800, 600, false);
+        let cmds = gui.tick(0.016, &s, 800, 600, false, 0.0);
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, PanelCommand::Plain(Command::ToggleMatter))),
@@ -1283,18 +1459,18 @@ mod tests {
             .expect("reset button");
         gui.set_cursor(row.x + 2.0, row.y + 2.0);
         gui.input.pressed = true;
-        let cmds = gui.tick(0.016, &s, 800, 600, false);
+        let cmds = gui.tick(0.016, &s, 800, 600, false, 0.0);
         assert!(cmds.is_empty(), "no fire on press");
         // Release off the button cancels.
         gui.set_cursor(0.0, 0.0);
         gui.input.released = true;
-        assert!(gui.tick(0.016, &s, 800, 600, false).is_empty());
+        assert!(gui.tick(0.016, &s, 800, 600, false, 0.0).is_empty());
         // Press and release over it fires.
         gui.set_cursor(row.x + 2.0, row.y + 2.0);
         gui.input.pressed = true;
-        gui.tick(0.016, &s, 800, 600, false);
+        gui.tick(0.016, &s, 800, 600, false, 0.0);
         gui.input.released = true;
-        let cmds = gui.tick(0.016, &s, 800, 600, false);
+        let cmds = gui.tick(0.016, &s, 800, 600, false, 0.0);
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, PanelCommand::Plain(Command::Reset))),
@@ -1314,7 +1490,7 @@ mod tests {
         assert!(gui.wants_pointer(800));
         // Scroll far past the end: clamped to the content overflow.
         gui.input.wheel = 1000.0;
-        gui.tick(0.016, &s, 800, 600, false);
+        gui.tick(0.016, &s, 800, 600, false, 0.0);
         assert!(
             gui.scroll <= (gui.content_height - 600.0).max(0.0) + 1e-9,
             "scroll clamped: {} vs content {}",
@@ -1323,7 +1499,7 @@ mod tests {
         );
         // And back up: never negative.
         gui.input.wheel = -10_000.0;
-        gui.tick(0.016, &s, 800, 600, false);
+        gui.tick(0.016, &s, 800, 600, false, 0.0);
         assert!(gui.scroll.abs() < 1e-9, "scroll floor at zero");
     }
 }

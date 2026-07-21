@@ -14,6 +14,11 @@ Notable changes to Bouncy, by release. Version numbers follow
   control. Hand-drawn into the frame buffer like the HUD, so it works
   on both the GPU and CPU render backends. `--panel` starts with it
   open.
+- The panel also opens without the keyboard: dwelling at the window's
+  right edge reveals a thin handle at mid-height — click it to slide
+  the panel in or out, or grab and drag it to any position and let
+  go. The handle fades with the idle cursor, and quick passes through
+  the edge strip (drawing a wall to the edge) never see it.
 
 ## 1.4.4 — 2026-07-15
 

@@ -705,7 +705,10 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let state = self.panel_state();
-            let commands = self.gui.tick(dt, &state, width, height, self.shift_down);
+            let idle = self.cursor.last_move.elapsed().as_secs_f64();
+            let commands = self
+                .gui
+                .tick(dt, &state, width, height, self.shift_down, idle);
             for command in commands {
                 self.apply_panel_command(command);
             }
@@ -1580,8 +1583,8 @@ impl ApplicationHandler for App {
                 // The panel owns clicks over it; nothing may fall
                 // through and fire a burst or start a wall.
                 #[cfg(not(target_arch = "wasm32"))]
-                if let Some((w, _)) = self.dimensions() {
-                    if button == MouseButton::Left && self.gui.on_press(w) {
+                if let Some((w, h)) = self.dimensions() {
+                    if button == MouseButton::Left && self.gui.on_press_at(w, h) {
                         return;
                     }
                 }
