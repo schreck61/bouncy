@@ -26,8 +26,9 @@ use crate::text::draw_text;
 pub const PANEL_WIDTH: f64 = 200.0;
 /// Inner padding between the panel edge and its content.
 const PAD: f64 = 10.0;
-/// Snap radius for slider detents, as a fraction of the slider's range.
-const DETENT_FRACTION: f64 = 0.03;
+/// Snap radius for slider detents, as a fraction of the track's length
+/// (track space, not value space: magnified sliders must snap uniformly).
+const DETENT_FRACTION: f64 = 0.025;
 /// Scroll wheel speed, pixels per line.
 const WHEEL_STEP: f64 = 24.0;
 /// Slide animation rate (1/s): the exponential approach constant for the
@@ -47,6 +48,18 @@ const HANDLE_FADE_RATE: f64 = 10.0;
 const HANDLE_IDLE_SECS: f64 = 2.0;
 /// Press-to-release travel under this is a click (toggle), not a drag.
 const CLICK_SLOP: f64 = 3.0;
+
+/// Gravity spans the CLI's full ±1000%, but everyday play lives in
+/// -100..100 — so that band gets 60% of the track (every 10% step is
+/// several pixels) and the extremes compress into the outer fifths. A
+/// linear ±1000 track put 0 and 100 nine pixels apart and the detents
+/// swallowed everything between them.
+const GRAVITY_POINTS: &[(f64, f64)] = &[(-1000.0, 0.0), (-100.0, 0.2), (100.0, 0.8), (1000.0, 1.0)];
+const ELASTICITY_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (1.5, 1.0)];
+const TIME_POINTS: &[(f64, f64)] = &[(0.1, 0.0), (4.0, 1.0)];
+/// Same treatment as gravity: thresholds people actually set (0-100
+/// births/s) get most of the track.
+const THRESHOLD_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 0.6), (1000.0, 1.0)];
 
 /// Identity of a value slider.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -138,8 +151,11 @@ enum Item {
     Slider {
         id: SliderId,
         label: &'static str,
-        min: f64,
-        max: f64,
+        /// Piecewise-linear (value, track-t) control points, ascending in
+        /// both coordinates, spanning t = 0..1. A plain linear slider is
+        /// two points; a magnified slider gives its everyday band most of
+        /// the track and compresses the extremes into the ends.
+        points: &'static [(f64, f64)],
         value: f64,
         detents: &'static [f64],
         text: String,
@@ -421,8 +437,7 @@ impl Gui {
             for laid in &layout {
                 if let Item::Slider {
                     id,
-                    min,
-                    max,
+                    points,
                     value,
                     detents,
                     track,
@@ -432,8 +447,8 @@ impl Gui {
                     if *id != drag {
                         continue;
                     }
-                    let raw = slider_value_at(cx, track, *min, *max);
-                    let snapped = snap_to_detents(raw, detents, *max - *min, shift);
+                    let raw = slider_value_at(cx, track, points);
+                    let snapped = snap_to_detents(raw, detents, points, shift);
                     if (snapped - value).abs() > 1e-9 {
                         commands.push(slider_command(drag, snapped));
                     }
@@ -571,8 +586,7 @@ impl Gui {
             }
             Item::Slider {
                 label,
-                min,
-                max,
+                points,
                 value,
                 detents,
                 text,
@@ -601,7 +615,7 @@ impl Gui {
                 // Track, detent ticks, filled portion, then the knob.
                 fill_rect(frame, width, height, *track, [55, 60, 70], 255);
                 for d in *detents {
-                    let dx = track.x + (d - min) / (max - min) * track.w;
+                    let dx = track.x + value_to_t(points, *d) * track.w;
                     vline(
                         frame,
                         width,
@@ -612,7 +626,7 @@ impl Gui {
                         [130, 140, 155, 255],
                     );
                 }
-                let t = ((value - min) / (max - min)).clamp(0.0, 1.0);
+                let t = value_to_t(points, *value).clamp(0.0, 1.0);
                 let filled = Rect {
                     w: track.w * t,
                     ..*track
@@ -759,8 +773,7 @@ fn layout(state: &PanelState, panel_x: f64, scroll: f64) -> (Vec<Laid>, f64) {
         w,
         SliderId::Gravity,
         "Gravity",
-        -1000.0,
-        1000.0,
+        GRAVITY_POINTS,
         f64::from(state.gravity),
         &[0.0, 100.0],
         format!("{}%", state.gravity),
@@ -772,8 +785,7 @@ fn layout(state: &PanelState, panel_x: f64, scroll: f64) -> (Vec<Laid>, f64) {
         w,
         SliderId::ParticleElasticity,
         "Particle elasticity",
-        0.0,
-        1.5,
+        ELASTICITY_POINTS,
         state.particle_elasticity,
         &[1.0],
         format!("{:.2}", state.particle_elasticity),
@@ -785,8 +797,7 @@ fn layout(state: &PanelState, panel_x: f64, scroll: f64) -> (Vec<Laid>, f64) {
         w,
         SliderId::WallElasticity,
         "Wall elasticity",
-        0.0,
-        1.5,
+        ELASTICITY_POINTS,
         state.wall_elasticity,
         &[1.0],
         format!("{:.2}", state.wall_elasticity),
@@ -798,8 +809,7 @@ fn layout(state: &PanelState, panel_x: f64, scroll: f64) -> (Vec<Laid>, f64) {
         w,
         SliderId::TimeScale,
         "Time scale",
-        0.1,
-        4.0,
+        TIME_POINTS,
         state.time_scale,
         &[1.0],
         format!("{:.2}x", state.time_scale),
@@ -811,8 +821,7 @@ fn layout(state: &PanelState, panel_x: f64, scroll: f64) -> (Vec<Laid>, f64) {
         w,
         SliderId::ExplosionThreshold,
         "Explosions at",
-        0.0,
-        1000.0,
+        THRESHOLD_POINTS,
         f64::from(state.explosion_threshold),
         &[0.0],
         if state.explosion_threshold == 0 {
@@ -988,8 +997,7 @@ fn push_slider(
     w: f64,
     id: SliderId,
     label: &'static str,
-    min: f64,
-    max: f64,
+    points: &'static [(f64, f64)],
     value: f64,
     detents: &'static [f64],
     text: String,
@@ -1005,8 +1013,7 @@ fn push_slider(
         item: Item::Slider {
             id,
             label,
-            min,
-            max,
+            points,
             value,
             detents,
             text,
@@ -1077,23 +1084,60 @@ fn button_row(out: &mut Vec<Laid>, buttons: &[(ButtonId, &str)], x: f64, w: f64,
     *y += 26.0;
 }
 
-/// Slider value for a cursor x position over a track.
-fn slider_value_at(cx: f64, track: &Rect, min: f64, max: f64) -> f64 {
-    let t = ((cx - track.x) / track.w).clamp(0.0, 1.0);
-    min + t * (max - min)
+/// Track position (0..1) for a value under a piecewise-linear mapping.
+fn value_to_t(points: &[(f64, f64)], v: f64) -> f64 {
+    let (first, last) = (points[0], points[points.len() - 1]);
+    if v <= first.0 {
+        return first.1;
+    }
+    if v >= last.0 {
+        return last.1;
+    }
+    for pair in points.windows(2) {
+        let ((v0, t0), (v1, t1)) = (pair[0], pair[1]);
+        if v <= v1 {
+            return t0 + (v - v0) / (v1 - v0) * (t1 - t0);
+        }
+    }
+    last.1
 }
 
-/// Snap a value to the nearest detent within reach, unless Shift is
-/// held (fine control bypasses the snap).
-fn snap_to_detents(value: f64, detents: &[f64], range: f64, shift: bool) -> f64 {
+/// Value for a track position (0..1) under a piecewise-linear mapping.
+fn t_to_value(points: &[(f64, f64)], t: f64) -> f64 {
+    let (first, last) = (points[0], points[points.len() - 1]);
+    if t <= first.1 {
+        return first.0;
+    }
+    if t >= last.1 {
+        return last.0;
+    }
+    for pair in points.windows(2) {
+        let ((v0, t0), (v1, t1)) = (pair[0], pair[1]);
+        if t <= t1 {
+            return v0 + (t - t0) / (t1 - t0) * (v1 - v0);
+        }
+    }
+    last.0
+}
+
+/// Slider value for a cursor x position over a track.
+fn slider_value_at(cx: f64, track: &Rect, points: &[(f64, f64)]) -> f64 {
+    let t = ((cx - track.x) / track.w).clamp(0.0, 1.0);
+    t_to_value(points, t)
+}
+
+/// Snap a value to the nearest detent within reach, measured along the
+/// track so magnified sliders snap uniformly; Shift bypasses for fine
+/// control.
+fn snap_to_detents(value: f64, detents: &[f64], points: &[(f64, f64)], shift: bool) -> f64 {
     if shift {
         return value;
     }
-    let radius = range * DETENT_FRACTION;
+    let t = value_to_t(points, value);
     detents
         .iter()
         .copied()
-        .find(|d| (value - d).abs() <= radius)
+        .find(|&d| (t - value_to_t(points, d)).abs() <= DETENT_FRACTION)
         .unwrap_or(value)
 }
 
@@ -1384,12 +1428,63 @@ mod tests {
 
     #[test]
     fn detents_snap_and_shift_bypasses() {
-        assert!((snap_to_detents(0.4, &[0.0], 100.0, false)).abs() < 1e-12);
-        assert!((snap_to_detents(2.9, &[0.0], 100.0, false)).abs() < 1e-12);
-        let free = snap_to_detents(2.9, &[0.0], 100.0, true);
-        assert!((free - 2.9).abs() < 1e-12, "shift bypasses the snap");
-        let out_of_reach = snap_to_detents(4.0, &[0.0], 100.0, false);
+        // Linear 0..100 mapping: the track-space radius (2.5%) reaches
+        // 2.5 value units.
+        const LINEAR: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 1.0)];
+        assert!((snap_to_detents(0.4, &[0.0], LINEAR, false)).abs() < 1e-12);
+        assert!((snap_to_detents(2.4, &[0.0], LINEAR, false)).abs() < 1e-12);
+        let free = snap_to_detents(2.4, &[0.0], LINEAR, true);
+        assert!((free - 2.4).abs() < 1e-12, "shift bypasses the snap");
+        let out_of_reach = snap_to_detents(4.0, &[0.0], LINEAR, false);
         assert!((out_of_reach - 4.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn gravity_mapping_magnifies_the_everyday_band() {
+        // Round trips through the piecewise mapping.
+        for v in [
+            -1000.0, -400.0, -100.0, -30.0, 0.0, 10.0, 50.0, 100.0, 700.0,
+        ] {
+            let t = value_to_t(GRAVITY_POINTS, v);
+            let back = t_to_value(GRAVITY_POINTS, t);
+            assert!((back - v).abs() < 1e-9, "roundtrip {v}: {back}");
+        }
+        // The everyday band owns 60% of the track...
+        assert!((value_to_t(GRAVITY_POINTS, -100.0) - 0.2).abs() < 1e-12);
+        assert!((value_to_t(GRAVITY_POINTS, 100.0) - 0.8).abs() < 1e-12);
+        // ...so 10% steps sit well clear of the detent radius.
+        let step = value_to_t(GRAVITY_POINTS, 10.0) - value_to_t(GRAVITY_POINTS, 0.0);
+        assert!(
+            step > DETENT_FRACTION,
+            "10% gravity must not be swallowed by the 0 detent: {step}"
+        );
+    }
+
+    #[test]
+    fn every_ten_percent_gravity_stop_is_reachable() {
+        // The regression behind the magnified band: dragging across the
+        // track must be able to produce each 10% stop from -100 to 100,
+        // not jump 0 -> 100.
+        let s = state();
+        let track = find_slider_track(&s, SliderId::Gravity);
+        let mut reachable = std::collections::HashSet::new();
+        let mut x = track.x;
+        while x <= track.x + track.w {
+            let raw = slider_value_at(x, &track, GRAVITY_POINTS);
+            let snapped = snap_to_detents(raw, &[0.0, 100.0], GRAVITY_POINTS, false);
+            #[allow(clippy::cast_possible_truncation)]
+            let cmd = ((snapped / 10.0).round() as i64) * 10;
+            if (-100..=100).contains(&cmd) {
+                reachable.insert(cmd);
+            }
+            x += 0.5;
+        }
+        for stop in (-100..=100).step_by(10) {
+            assert!(
+                reachable.contains(&stop),
+                "{stop}% gravity unreachable by drag"
+            );
+        }
     }
 
     #[test]
@@ -1400,10 +1495,10 @@ mod tests {
             w: 100.0,
             h: 5.0,
         };
-        assert!((slider_value_at(100.0, &track, 0.0, 1.5)).abs() < 1e-12);
-        assert!((slider_value_at(200.0, &track, 0.0, 1.5) - 1.5).abs() < 1e-12);
-        assert!((slider_value_at(400.0, &track, 0.0, 1.5) - 1.5).abs() < 1e-12);
-        assert!((slider_value_at(150.0, &track, 0.0, 1.5) - 0.75).abs() < 1e-12);
+        assert!((slider_value_at(100.0, &track, ELASTICITY_POINTS)).abs() < 1e-12);
+        assert!((slider_value_at(200.0, &track, ELASTICITY_POINTS) - 1.5).abs() < 1e-12);
+        assert!((slider_value_at(400.0, &track, ELASTICITY_POINTS) - 1.5).abs() < 1e-12);
+        assert!((slider_value_at(150.0, &track, ELASTICITY_POINTS) - 0.75).abs() < 1e-12);
     }
 
     #[test]
