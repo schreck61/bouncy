@@ -164,8 +164,9 @@ pub enum PanelCommand {
     /// native panel's launch section; the web demo restarts via URL).
     Relaunch {
         preset: Option<String>,
-        particle_size: f64,
-        initial_speed: f64,
+        /// None = untouched; the preset or default decides.
+        particle_size: Option<f64>,
+        initial_speed: Option<f64>,
         min_particles: Option<u32>,
     },
 }
@@ -866,7 +867,9 @@ impl App {
                 initial_speed,
                 min_particles,
             } => {
-                self.relaunch(preset, particle_size, initial_speed, min_particles);
+                if self.relaunch(preset, particle_size, initial_speed, min_particles) {
+                    self.gui.reseed_launch();
+                }
             }
             // The web demo relaunches by navigating to a new URL; the
             // command never arrives from the HTML panel.
@@ -886,19 +889,25 @@ impl App {
     fn relaunch(
         &mut self,
         preset: Option<String>,
-        particle_size: f64,
-        initial_speed: f64,
+        particle_size: Option<f64>,
+        initial_speed: Option<f64>,
         min_particles: Option<u32>,
-    ) {
+    ) -> bool {
         let Some((width, height)) = self.sim.as_ref().map(Simulation::dimensions) else {
-            return;
+            return false;
         };
         // Session deltas: live values the user changed since launch
-        // override the new bundle, the web share-link philosophy —
-        // touched settings travel with you, untouched ones follow the
-        // preset. Captured against the launched config before it is
-        // replaced.
-        let deltas = self.session_deltas();
+        // override the new bundle — touched settings travel, untouched
+        // ones follow the preset. But the most recent deliberate act
+        // wins: when the preset *selection* changes, the new bundle
+        // takes precedence over tweaks made while exploring the old
+        // one (the user cannot know which would conflict), so the
+        // deltas drop and the cycle starts fresh from the new baseline.
+        let deltas = if preset == self.config.preset {
+            self.session_deltas()
+        } else {
+            SessionDeltas::default()
+        };
         let mut args: Vec<std::ffi::OsString> = vec!["bouncy".into()];
         if let Some(ref name) = preset {
             args.push("--preset".into());
@@ -908,10 +917,14 @@ impl App {
             args.push("--presets-file".into());
             args.push(path.into());
         }
-        args.push("--particle-size".into());
-        args.push(format!("{particle_size}").into());
-        args.push("--initial-speed".into());
-        args.push(format!("{initial_speed}").into());
+        if let Some(size) = particle_size {
+            args.push("--particle-size".into());
+            args.push(format!("{size}").into());
+        }
+        if let Some(speed) = initial_speed {
+            args.push("--initial-speed".into());
+            args.push(format!("{speed}").into());
+        }
         if let Some(min) = min_particles {
             args.push("--min-particles".into());
             args.push(format!("{min}").into());
@@ -947,12 +960,16 @@ impl App {
                 // themselves over the new bundle.
                 self.apply_session_deltas(&deltas);
                 println!(
-                    "Relaunched: preset {}, particle size {particle_size}, initial speed {initial_speed}",
-                    self.config.preset.as_deref().unwrap_or("(none)")
+                    "Relaunched: preset {}, particle size {}, initial speed {}",
+                    self.config.preset.as_deref().unwrap_or("(none)"),
+                    self.config.particle_size,
+                    self.config.initial_speed
                 );
+                true
             }
             Err(e) => {
                 eprintln!("Relaunch failed; keeping the running simulation: {e}");
+                false
             }
         }
     }
@@ -1963,8 +1980,8 @@ mod tests {
         let before = app.sim.as_ref().unwrap().dimensions();
         app.apply_panel_command(PanelCommand::Relaunch {
             preset: Some("billiards".to_string()),
-            particle_size: 3.0,
-            initial_speed: 200.0,
+            particle_size: Some(3.0),
+            initial_speed: Some(200.0),
             min_particles: Some(12),
         });
         assert!((app.config.particle_size - 3.0).abs() < 1e-9);
@@ -1990,8 +2007,8 @@ mod tests {
         app.time_scale = 2.0; // touched (no config flag; baseline 1.0)
         app.apply_panel_command(PanelCommand::Relaunch {
             preset: Some("billiards".to_string()),
-            particle_size: 2.0,
-            initial_speed: 300.0,
+            particle_size: Some(2.0),
+            initial_speed: Some(300.0),
             min_particles: None,
         });
         let sim = app.sim.as_ref().unwrap();
@@ -2011,8 +2028,8 @@ mod tests {
         // A bad configuration keeps the running simulation and config.
         app.apply_panel_command(PanelCommand::Relaunch {
             preset: Some("no-such-preset".to_string()),
-            particle_size: 1.0,
-            initial_speed: 600.0,
+            particle_size: Some(1.0),
+            initial_speed: Some(600.0),
             min_particles: None,
         });
         assert!(
@@ -2020,6 +2037,67 @@ mod tests {
             "failed relaunch leaves the old config in place"
         );
         assert!(app.sim.is_some());
+    }
+
+    #[test]
+    fn changing_the_preset_drops_session_deltas_and_the_cycle_restarts() {
+        let mut app = test_app();
+
+        // Phase A: tweak, then relaunch with the same (no) preset —
+        // adjustments travel.
+        app.sim.as_mut().unwrap().gravity_percent = 250;
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: None,
+            particle_size: Some(2.0),
+            initial_speed: None,
+            min_particles: None,
+        });
+        assert_eq!(
+            app.sim.as_ref().unwrap().gravity_percent,
+            250,
+            "same-preset relaunch preserves the touched gravity"
+        );
+
+        // Phase B: change the preset — the new bundle wins over stale
+        // tweaks; untouched launch fields defer to the bundle too.
+        app.sim.as_mut().unwrap().matter = true;
+        app.time_scale = 2.0;
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: Some("peace".to_string()),
+            particle_size: None,
+            initial_speed: None,
+            min_particles: None,
+        });
+        let sim = app.sim.as_ref().unwrap();
+        assert_eq!(sim.gravity_percent, 25, "peace's gravity takes precedence");
+        assert!(!sim.matter, "stale matter tweak dropped");
+        assert!(sim.flow, "peace's flow arrives");
+        assert!(
+            (app.time_scale - 1.0).abs() < 1e-9,
+            "time scale returns to baseline"
+        );
+        assert!(
+            (app.config.initial_speed - 40.0).abs() < 1e-9,
+            "untouched initial speed defers to the bundle"
+        );
+
+        // Phase C: fresh tweaks against the new baseline travel through
+        // a same-preset relaunch.
+        app.sim.as_mut().unwrap().gravity_percent = 77;
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: Some("peace".to_string()),
+            particle_size: None,
+            initial_speed: None,
+            min_particles: Some(30),
+        });
+        let sim = app.sim.as_ref().unwrap();
+        assert_eq!(sim.gravity_percent, 77, "fresh tweak survives");
+        assert_eq!(app.config.min_particles, Some(30));
+        assert!(
+            sim.particle_count() < 90,
+            "explicit min particles overrides peace's 90: {}",
+            sim.particle_count()
+        );
     }
 
     #[test]

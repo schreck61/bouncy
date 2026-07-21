@@ -224,6 +224,12 @@ pub struct LaunchDraft {
     pub initial_speed: f64,
     /// 0 = auto (sized from the window).
     pub min_particles: f64,
+    /// Which fields the user edited this session: untouched fields are
+    /// omitted from the relaunch so the preset (or default) decides,
+    /// matching the web's empty placeholder semantics.
+    pub size_touched: bool,
+    pub speed_touched: bool,
+    pub min_touched: bool,
 }
 
 impl Default for LaunchDraft {
@@ -233,6 +239,9 @@ impl Default for LaunchDraft {
             particle_size: 1.5,
             initial_speed: 600.0,
             min_particles: 0.0,
+            size_touched: false,
+            speed_touched: false,
+            min_touched: false,
         }
     }
 }
@@ -333,17 +342,32 @@ impl Gui {
         self.armed = None;
     }
 
-    /// The relaunch command carrying the current draft.
+    /// The relaunch command carrying the current draft: only fields the
+    /// user touched travel; the rest defer to the preset or default.
     fn relaunch_command(&self) -> PanelCommand {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         PanelCommand::Relaunch {
             preset: (self.launch.preset_idx > 0)
                 .then(|| preset_names()[self.launch.preset_idx].to_string()),
-            particle_size: self.launch.particle_size,
-            initial_speed: self.launch.initial_speed,
-            min_particles: (self.launch.min_particles >= 1.5)
+            particle_size: self
+                .launch
+                .size_touched
+                .then_some(self.launch.particle_size),
+            initial_speed: self
+                .launch
+                .speed_touched
+                .then_some(self.launch.initial_speed),
+            min_particles: (self.launch.min_touched && self.launch.min_particles >= 1.5)
                 .then(|| (self.launch.min_particles.round() as u32).max(2)),
         }
+    }
+
+    /// Forget the draft so the next tick re-seeds it from the (new)
+    /// running config — called after a successful relaunch, so the
+    /// touched/untouched cycle restarts from the fresh baseline.
+    pub fn reseed_launch(&mut self) {
+        self.launch = LaunchDraft::default();
+        self.launch_seeded = false;
     }
 
     /// Consume the armed tool with an arena click at `(x, y)`: returns
@@ -572,12 +596,15 @@ impl Gui {
                     match drag {
                         SliderId::LaunchSize => {
                             self.launch.particle_size = (snapped * 2.0).round() / 2.0;
+                            self.launch.size_touched = true;
                         }
                         SliderId::LaunchSpeed => {
                             self.launch.initial_speed = (snapped / 10.0).round() * 10.0;
+                            self.launch.speed_touched = true;
                         }
                         SliderId::LaunchMinParticles => {
                             self.launch.min_particles = snapped.round();
+                            self.launch.min_touched = true;
                         }
                         _ => {
                             if (snapped - value).abs() > 1e-9 {
@@ -1864,7 +1891,8 @@ mod tests {
                 particle_size,
                 min_particles: None,
                 ..
-            } if p == "fireworks" && (particle_size - 10.0).abs() < 1e-9)),
+            } if p == "fireworks"
+                && matches!(particle_size, Some(v) if (v - 10.0).abs() < 1e-9))),
             "relaunch carries the draft"
         );
     }

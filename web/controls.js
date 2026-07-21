@@ -236,11 +236,17 @@ function bindLaunchOptions(mod) {
   for (const [id, key] of fields) $(id).value = params.get(key) ?? "";
 
   $("lo-apply").onclick = () => {
-    // Start from the share link's parameters — the launch URL plus the
-    // session's touched settings — so applying new launch options
-    // preserves the adjustments made since launch, exactly like the
-    // native panel's relaunch. (shareUrl also strips the cache-buster.)
-    const p = new URLSearchParams(new URL(shareUrl()).search);
+    // The most recent deliberate act wins. Preset unchanged: start from
+    // the share link's parameters (the launch URL plus the session's
+    // touched settings), so adjustments travel — exactly like the
+    // native panel's relaunch. Preset changed: the new bundle should
+    // take precedence over tweaks made while exploring the old one, so
+    // start from a clean slate keeping only the loader's `st`.
+    const current = new URLSearchParams(location.search);
+    const presetChanged = (sel.value || "") !== (current.get("preset") ?? "");
+    const p = presetChanged
+      ? new URLSearchParams(current.has("st") ? "st" : "")
+      : new URLSearchParams(new URL(shareUrl()).search);
     const set = (key, value) => (value ? p.set(key, value) : p.delete(key));
     set("preset", sel.value);
     for (const [id, key] of fields) set(key, $(id).value.trim());

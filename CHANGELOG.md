@@ -34,7 +34,12 @@ Notable changes to Bouncy, by release. Version numbers follow
   can never disagree. A bad configuration keeps the running simulation.
   Live settings you adjusted during the session survive the relaunch —
   touched values override the new bundle, untouched ones follow it —
-  matching the web share link's philosophy.
+  matching the web share link's philosophy. The most recent deliberate
+  act wins: changing the preset selection drops the accumulated
+  adjustments (the new bundle takes precedence; you cannot know which
+  old tweaks would conflict with it), and the cycle restarts from the
+  fresh baseline. Launch fields behave the same way — only the ones
+  you edited override the preset. Both panels implement the same rule.
 - The panel also opens without the keyboard: dwelling at the window's
   right edge reveals a thin handle at mid-height — click it to slide
   the panel in or out, or grab and drag it to any position and let
