@@ -4,6 +4,17 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- The native window has a control panel: Tab slides in a translucent
+  panel with readouts, sliders, toggles, and action buttons matching
+  the web demo's, driving the same command dispatch as the hotkeys.
+  Sliders snap to meaningful detents — gravity 0 and 100, elasticity
+  1.0, time scale 1.0 — with Shift bypassing the snap for fine
+  control. Hand-drawn into the frame buffer like the HUD, so it works
+  on both the GPU and CPU render backends. `--panel` starts with it
+  open.
+
 ## 1.4.4 — 2026-07-15
 
 - Fixed collision spawns materializing across a wall when a fast,

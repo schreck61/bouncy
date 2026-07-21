@@ -103,6 +103,7 @@ cargo run --release -- --spawn-at-collision
 | `,` / `.` | Slow down / speed up time in 0.05 steps (0.1x to 4x) |
 | `-` / `=` | Adjust the explosion threshold by 5 spawns/sec (0 = automatic explosions off) |
 | `T` | Toggle motion trails |
+| `Tab` | Toggle the control panel (sliders, toggles, actions) |
 | `C` | Cycle color mode (solid / velocity) |
 | `B` | Cycle spawn mode (center / collision points / off) |
 | `X` | Toggle matter mechanics (fusion/fission) |

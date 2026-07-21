@@ -85,8 +85,7 @@ impl HudMode {
         }
     }
 
-    /// Short name for the web panel's HUD cycle button.
-    #[cfg(target_arch = "wasm32")]
+    /// Short name for the panels' HUD cycle button (web and native).
     fn label(self) -> &'static str {
         match self {
             HudMode::Hidden => "hidden",
@@ -133,6 +132,34 @@ pub enum Command {
     /// Launch a comet from the far edge toward the cursor (J or middle
     /// click).
     LaunchComet,
+}
+
+/// A control-panel action, shared by every panel surface (the native
+/// edge panel and the web demo's HTML panel). Plain variants wrap the
+/// same [`Command`] enum the keyboard uses; the rest carry data the
+/// keyboard path would take from held-key or cursor state (absolute
+/// values from sliders, coordinates from panel tools). Commands enter at
+/// `apply_panel_command`, inheriting the same clamping and semantics as
+/// every other control surface.
+pub enum PanelCommand {
+    Plain(Command),
+    SetPaused(bool),
+    SetGravity(i32),
+    SetParticleElasticity(f64),
+    SetWallElasticity(f64),
+    SetTimeScale(f64),
+    SetExplosionThreshold(i32),
+    SpawnBurst(f64, f64),
+    LaunchComet(f64, f64),
+    PinWell(f64, f64, Polarity),
+    TriggerExplosion(f64, f64),
+    /// Live-resize the arena to a new logical size (`Simulation::resize`
+    /// plus a frame-buffer reallocation).
+    Resize(u32, u32),
+    /// Absolute mute state (panels send state, not toggles).
+    SetMuted(bool),
+    /// Absolute musical-mode state.
+    SetMusic(bool),
 }
 
 /// Canonical CLI value name of a `ValueEnum` variant — the same string
@@ -317,6 +344,10 @@ pub struct App {
     // Render failure tracking (transient surface loss should not crash)
     consecutive_render_failures: u32,
 
+    /// The native control panel (Tab), drawn into the frame buffer.
+    #[cfg(not(target_arch = "wasm32"))]
+    gui: crate::gui::Gui,
+
     /// Mailbox shared with the JS control panel: commands flow in, a
     /// state snapshot flows out, once per frame (see `web.rs`).
     #[cfg(target_arch = "wasm32")]
@@ -326,6 +357,8 @@ pub struct App {
 impl App {
     /// Create a new App with the given configuration.
     pub fn new(config: Config) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let panel_open = config.panel;
         App {
             trails: config.trails,
             color_mode: config.color_mode,
@@ -353,6 +386,14 @@ impl App {
             cursor: CursorState::new(),
             screenshot_requested: false,
             consecutive_render_failures: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            gui: {
+                let mut gui = crate::gui::Gui::new();
+                if panel_open {
+                    gui.toggle_open();
+                }
+                gui
+            },
             #[cfg(target_arch = "wasm32")]
             web_shared: None,
         }
@@ -533,9 +574,14 @@ impl App {
             Some(self.hud_lines(sim))
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let panel_state = &self.panel_state();
+
         let Some(ref mut render) = self.render else {
             return;
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let gui = &self.gui;
 
         let trails = self.trails;
         let color_mode = self.color_mode;
@@ -576,6 +622,8 @@ impl App {
             if let Some(ref lines) = hud_lines {
                 draw_hud(frame, width, height, lines);
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            gui.draw(frame, panel_state, width, height);
             if capture {
                 shot = Some(frame.to_vec());
             }
@@ -607,10 +655,15 @@ impl App {
     /// transitions.
     fn update_cursor_visibility(&mut self) {
         let idle = self.cursor.last_move.elapsed().as_secs_f64();
+        #[cfg(not(target_arch = "wasm32"))]
+        let interacting =
+            self.held_well.is_some() || self.wall_anchor.is_some() || self.gui.is_open();
+        #[cfg(target_arch = "wasm32")]
+        let interacting = self.held_well.is_some() || self.wall_anchor.is_some();
         let desired = cursor_should_be_visible(
             self.cursor.window_focused,
             self.cursor.inside,
-            self.held_well.is_some() || self.wall_anchor.is_some(),
+            interacting,
             idle,
         );
         if desired != self.cursor.visible {
@@ -647,6 +700,17 @@ impl App {
         let dt = now.duration_since(self.last_time).as_secs_f64().min(0.05);
         self.last_time = now;
 
+        // The panel acts before the step so its commands shape this
+        // frame, exactly like the web panel's drained mailbox.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let state = self.panel_state();
+            let commands = self.gui.tick(dt, &state, width, height, self.shift_down);
+            for command in commands {
+                self.apply_panel_command(command);
+            }
+        }
+
         let time_scale = self.time_scale * self.bullet_time.multiplier(now);
         if !self.paused {
             self.simulate(dt * time_scale, now);
@@ -674,70 +738,69 @@ impl App {
         let commands: Vec<crate::web::WebCommand> =
             shared.borrow_mut().commands.drain(..).collect();
         for cmd in commands {
-            self.apply_web_command(cmd);
+            self.apply_panel_command(cmd);
         }
     }
 
     /// Execute one panel command: plain [`Command`]s go through `apply()`;
     /// pointer-shaped ones (which carry coordinates the cursor state
     /// would otherwise supply) act directly, mirroring `handle_mouse`.
-    /// By-value deliberately: commands are consumed from the mailbox.
-    #[cfg(target_arch = "wasm32")]
+    /// By-value deliberately: commands are consumed from queues.
     #[allow(clippy::needless_pass_by_value)]
-    fn apply_web_command(&mut self, cmd: crate::web::WebCommand) {
-        use crate::web::WebCommand;
+    fn apply_panel_command(&mut self, cmd: PanelCommand) {
         match cmd {
-            WebCommand::Plain(command) => self.apply(command),
-            WebCommand::SetPaused(paused) => {
+            PanelCommand::Plain(command) => self.apply(command),
+            PanelCommand::SetPaused(paused) => {
                 if self.paused != paused {
                     self.apply(Command::TogglePause);
                 }
             }
-            WebCommand::SetGravity(pct) => {
+            PanelCommand::SetGravity(pct) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.gravity_percent = pct.clamp(-GRAVITY_LIMIT, GRAVITY_LIMIT);
                 }
             }
-            WebCommand::SetParticleElasticity(e) => {
+            PanelCommand::SetParticleElasticity(e) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.particle_elasticity = e.clamp(0.0, ELASTICITY_MAX);
                 }
             }
-            WebCommand::SetWallElasticity(e) => {
+            PanelCommand::SetWallElasticity(e) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.wall_elasticity = e.clamp(0.0, ELASTICITY_MAX);
                 }
             }
-            WebCommand::SetTimeScale(scale) => {
+            PanelCommand::SetTimeScale(scale) => {
                 self.time_scale = scale.clamp(TIME_SCALE_MIN, TIME_SCALE_MAX);
             }
-            WebCommand::SetExplosionThreshold(t) => {
+            PanelCommand::SetExplosionThreshold(t) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.explosion_threshold =
                         usize::try_from(t.max(0)).map_or(0, |v| v.min(EXPLOSION_THRESHOLD_MAX));
                 }
             }
-            WebCommand::SpawnBurst(x, y) => {
+            PanelCommand::SpawnBurst(x, y) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.spawn_burst(x, y);
                 }
             }
-            WebCommand::LaunchComet(x, y) => {
+            PanelCommand::LaunchComet(x, y) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.launch_comet(x, y);
                 }
             }
-            WebCommand::PinWell(x, y, polarity) => {
+            PanelCommand::PinWell(x, y, polarity) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.pin_well(x, y, polarity);
                 }
             }
-            WebCommand::TriggerExplosion(x, y) => {
+            PanelCommand::TriggerExplosion(x, y) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.trigger_manual_explosion(x, y);
                 }
             }
-            WebCommand::Resize(width, height) => {
+            #[cfg(target_arch = "wasm32")]
+            PanelCommand::Resize(width, height) => {
                 if let Some(ref mut sim) = self.sim {
                     sim.resize(width, height);
                     let (w, h) = sim.dimensions();
@@ -746,16 +809,52 @@ impl App {
                     }
                 }
             }
-            WebCommand::SetMuted(muted) => {
+            // Native windows resize through the surface path; the panel
+            // command is a web-only concept (the canvas tracks CSS size).
+            #[cfg(not(target_arch = "wasm32"))]
+            PanelCommand::Resize(..) => {}
+            PanelCommand::SetMuted(muted) => {
                 if self.audio.is_muted() != muted {
                     self.audio.toggle_mute();
                 }
             }
-            WebCommand::SetMusic(music) => {
+            PanelCommand::SetMusic(music) => {
                 if self.audio.is_music() != music {
                     self.audio.toggle_music();
                 }
             }
+        }
+    }
+
+    /// Snapshot the state the native panel shows and edits — the native
+    /// analogue of the web snapshot, rebuilt once per frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn panel_state(&self) -> crate::gui::PanelState {
+        let Some(ref sim) = self.sim else {
+            return crate::gui::PanelState::default();
+        };
+        crate::gui::PanelState {
+            fps: self.fps.current,
+            particles: sim.particle_count(),
+            max_particles: sim.max_particles(),
+            wells: sim.pinned_wells().len(),
+            walls: sim.wall_segments().len(),
+            paused: self.paused,
+            gravity: sim.gravity_percent,
+            particle_elasticity: sim.particle_elasticity,
+            wall_elasticity: sim.wall_elasticity,
+            time_scale: self.time_scale,
+            explosion_threshold: i32::try_from(sim.explosion_threshold).unwrap_or(i32::MAX),
+            matter: sim.matter,
+            flow: sim.flow,
+            self_gravity: sim.self_gravity,
+            trails: self.trails,
+            kaleidoscope: self.kaleidoscope,
+            music: self.audio.is_music(),
+            muted: self.audio.is_muted(),
+            spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
+            color_mode: value_name(self.color_mode.to_possible_value()),
+            hud: self.hud_mode.label().to_string(),
         }
     }
 
@@ -843,6 +942,8 @@ impl App {
                     self.wall_anchor = Some((self.cursor.x, self.cursor.y));
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyCode::Tab if !repeat => self.gui.toggle_open(),
             KeyCode::KeyP if !repeat => self.apply(Command::TogglePause),
             KeyCode::KeyN => self.apply(Command::StepFrame),
             KeyCode::KeyR if !repeat => self.apply(if self.shift_down {
@@ -1445,6 +1546,17 @@ impl ApplicationHandler for App {
                         render.window_pos_to_sim(position.x, position.y);
                 }
                 self.cursor.moved();
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.gui.set_cursor(self.cursor.x, self.cursor.y);
+                    // Drawing a wall must stop at the panel's edge: the
+                    // pointer belongs to the panel there.
+                    if let Some((w, _)) = self.dimensions() {
+                        if self.gui.wants_pointer(w) {
+                            return;
+                        }
+                    }
+                }
                 self.extend_wall();
             }
             WindowEvent::CursorEntered { .. } => {
@@ -1465,7 +1577,33 @@ impl ApplicationHandler for App {
                 button,
                 ..
             } => {
+                // The panel owns clicks over it; nothing may fall
+                // through and fire a burst or start a wall.
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some((w, _)) = self.dimensions() {
+                    if button == MouseButton::Left && self.gui.on_press(w) {
+                        return;
+                    }
+                }
                 self.handle_mouse(button);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                self.gui.on_release();
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => -f64::from(y),
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => -pos.y / 24.0,
+                };
+                if let Some((w, _)) = self.dimensions() {
+                    self.gui.on_wheel(lines, w);
+                }
             }
             WindowEvent::Resized(new_size) => {
                 if let Some(ref mut render) = self.render {

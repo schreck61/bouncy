@@ -156,6 +156,11 @@ pub struct Config {
     #[arg(long)]
     pub trails: bool,
 
+    /// Start with the native control panel open (toggle at runtime with
+    /// Tab; the browser demo has its own HTML panel)
+    #[arg(long)]
+    pub panel: bool,
+
     /// Particle radius in pixels
     #[arg(long, default_value_t = crate::physics::DEFAULT_PARTICLE_RADIUS, value_parser = parse_particle_size)]
     pub particle_size: f64,
@@ -398,6 +403,10 @@ pub const CONTROLS: &[(&str, &str)] = &[
     (", / .", "Slow down / speed up time by 0.05 (0.1x-4x)"),
     ("- / =", "Adjust explosion threshold by 5 (0 = off)"),
     ("T", "Toggle motion trails"),
+    (
+        "Tab",
+        "Toggle the control panel (sliders, toggles, actions)",
+    ),
     ("C", "Cycle color mode"),
     ("B", "Cycle spawn mode (center / collision / off)"),
     ("X", "Toggle matter mechanics (fusion/fission)"),

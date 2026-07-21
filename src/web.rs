@@ -17,30 +17,7 @@ use wasm_bindgen::prelude::*;
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::platform::web::EventLoopExtWebSys;
 
-/// A control-panel action. Plain variants wrap the same [`Command`] enum
-/// the keyboard uses; the rest carry data the keyboard path would take
-/// from held-key or cursor state (absolute values from sliders,
-/// coordinates from panel tools).
-pub enum WebCommand {
-    Plain(Command),
-    SetPaused(bool),
-    SetGravity(i32),
-    SetParticleElasticity(f64),
-    SetWallElasticity(f64),
-    SetTimeScale(f64),
-    SetExplosionThreshold(i32),
-    SpawnBurst(f64, f64),
-    LaunchComet(f64, f64),
-    PinWell(f64, f64, Polarity),
-    TriggerExplosion(f64, f64),
-    /// Live-resize the arena to a new logical size (`Simulation::resize`
-    /// plus a frame-buffer reallocation).
-    Resize(u32, u32),
-    /// Absolute mute state (the panel sends state, not toggles).
-    SetMuted(bool),
-    /// Absolute musical-mode state.
-    SetMusic(bool),
-}
+pub use crate::app::PanelCommand as WebCommand;
 
 /// The HUD as data: everything the panel's readouts show, refreshed once
 /// per rendered frame.

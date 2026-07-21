@@ -17,6 +17,8 @@ pub mod render;
 pub mod sim;
 pub mod text;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gui;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
