@@ -1,0 +1,37 @@
+# Third-Party Notices
+
+Bouncy's compiled binaries — the platform release downloads and the
+WebAssembly web demo — statically link the third-party Rust crates
+listed below. Each crate's license text and copyright notice is
+reproduced in this file, grouped by license. The source code of every
+crate is available from [crates.io](https://crates.io) under the
+listed name and version (this also satisfies the source-availability
+notice for the MPL-2.0-licensed crate).
+
+The binaries also embed the Liberation Sans Bold font, © 2010 Google
+Corporation, © 2012 Red Hat, Inc., licensed under the SIL Open Font
+License 1.1 — see `OFL.txt` (in the repository at `assets/OFL.txt`),
+which accompanies every distribution.
+
+This file is generated from the dependency graph with
+[cargo-about](https://github.com/EmbarkStudios/cargo-about):
+`cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md`.
+
+{{#each overview}}
+- {{{name}}}: {{count}} crate{{#if (ne count 1)}}s{{/if}}
+{{/each}}
+
+---
+{{#each licenses}}
+
+## {{{name}}}
+
+Used by:
+{{#each used_by}}
+- [{{crate.name}} {{crate.version}}](https://crates.io/crates/{{crate.name}}/{{crate.version}})
+{{/each}}
+
+```text
+{{{text}}}
+```
+{{/each}}

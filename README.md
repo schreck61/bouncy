@@ -415,6 +415,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+Compiled binaries (the release downloads and the web demo) statically link
+third-party Rust crates under the MIT, Apache-2.0, BSD, ISC, Zlib, MPL-2.0,
+and related permissive licenses. Their license texts and copyright notices
+are collected in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), which
+ships alongside every binary.
+
 ## Version History
 
 See [CHANGELOG.md](CHANGELOG.md) for the release history.
@@ -427,4 +433,4 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for gu
 
 Built with Rust and its excellent ecosystem of graphics and audio crates.
 
-This software includes Liberation Sans Bold font, licensed under the [SIL Open Font License](https://scripts.sil.org/OFL).
+This software embeds the Liberation Sans Bold font (© 2010 Google Corporation, © 2012 Red Hat, Inc.), licensed under the [SIL Open Font License, Version 1.1](https://scripts.sil.org/OFL). The full license text is in [assets/OFL.txt](assets/OFL.txt) and accompanies every binary distribution.

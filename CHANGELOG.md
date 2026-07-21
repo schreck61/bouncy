@@ -4,6 +4,16 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## 1.5.1 — 2026-07-20
+
+- Binary distributions now carry the license notices their contents
+  require: release zips and the web demo include
+  `THIRD-PARTY-NOTICES.md` (license texts and copyright notices for
+  all statically linked crates, generated with cargo-about) and
+  `assets/OFL.txt` (the SIL Open Font License for the embedded
+  Liberation Sans Bold font). The demo page footer links to both.
+  No functional changes.
+
 ## 1.5.0 — 2026-07-20
 
 - The web demo's "Apply & restart" now starts from the share link's

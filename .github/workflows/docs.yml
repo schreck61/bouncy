@@ -84,6 +84,7 @@ jobs:
           rm -f target/doc/.lock
           mkdir -p target/doc/demo
           cp web/index.html web/style.css web/controls.js web/coi.js target/doc/demo/
+          cp LICENSE THIRD-PARTY-NOTICES.md assets/OFL.txt target/doc/demo/
           cp -R web/pkg target/doc/demo/
           if [ -d web/pkg-mt ]; then cp -R web/pkg-mt target/doc/demo/; fi
           rm -f target/doc/demo/pkg/.gitignore

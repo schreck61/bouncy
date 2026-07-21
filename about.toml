@@ -1,0 +1,34 @@
+# cargo-about configuration: regenerate THIRD-PARTY-NOTICES.md with
+#   cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md
+# after any dependency change.
+
+# Every license that may appear in the dependency tree. cargo-about
+# fails the build if a crate's license is not on this list, so a new
+# dependency under a new license is a deliberate decision, not a
+# silent addition.
+accepted = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# Cover every platform we ship binaries for: the six release targets
+# plus the wasm demo.
+targets = [
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "wasm32-unknown-unknown",
+]
