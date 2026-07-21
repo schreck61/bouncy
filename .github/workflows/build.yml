@@ -156,6 +156,42 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # THIRD-PARTY-NOTICES.md must match the dependency tree: regenerate
+  # it and fail if the committed file is stale. This also enforces
+  # about.toml's accepted-license allowlist — a new dependency under an
+  # unvetted license fails generation instead of shipping silently.
+  # cargo-about is pinned to the version that generated the committed
+  # file; formatting can differ between versions.
+  license-notices:
+    name: Check third-party notices
+    runs-on: ubuntu-latest
+    env:
+      CARGO_ABOUT_VERSION: 0.9.1
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-about (prebuilt)
+        run: |
+          curl -sSfL -o /tmp/cargo-about.tar.gz \
+            "https://github.com/EmbarkStudios/cargo-about/releases/download/${CARGO_ABOUT_VERSION}/cargo-about-${CARGO_ABOUT_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          tar xzf /tmp/cargo-about.tar.gz -C /tmp
+          install "/tmp/cargo-about-${CARGO_ABOUT_VERSION}-x86_64-unknown-linux-musl/cargo-about" "$HOME/.cargo/bin/"
+          cargo about --version
+
+      # --ignore-cr-at-eol: some crates' license texts carry CRLF line
+      # endings, which git normalizes in the committed copy.
+      - name: Regenerate and compare notices
+        run: |
+          cargo about generate about.hbs -o /tmp/THIRD-PARTY-NOTICES.md
+          if ! git diff --no-index --ignore-cr-at-eol -- THIRD-PARTY-NOTICES.md /tmp/THIRD-PARTY-NOTICES.md; then
+            echo "::error::THIRD-PARTY-NOTICES.md is stale. Regenerate with: cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md"
+            exit 1
+          fi
+
   # The library must keep compiling for the web demo's target; this
   # tripwire catches native-only code creeping into shared modules.
   wasm-check:

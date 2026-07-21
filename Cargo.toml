@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["James O. Schreckengast"]
 license = "MIT"
+# An application, not a library — and a crates.io release would bundle the
+# OFL-licensed font, so the license expression above would no longer be the
+# whole story. Keeps cargo-about from listing bouncy in its own notices.
+publish = false
 description = "GPU-accelerated particle simulation with elastic collisions, gravity, and explosive chain reactions"
 repository = "https://github.com/schreck61/bouncy"
 keywords = ["simulation", "particles", "physics", "graphics", "game"]

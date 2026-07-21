@@ -6,6 +6,11 @@
 # fails the build if a crate's license is not on this list, so a new
 # dependency under a new license is a deliberate decision, not a
 # silent addition.
+# Notices cover what we redistribute — third-party code. Bouncy itself
+# (publish = false) is first-party and stays out of its own notices;
+# without this, every version bump staled the generated file.
+private = { ignore = true }
+
 accepted = [
     "0BSD",
     "Apache-2.0",
