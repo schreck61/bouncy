@@ -105,6 +105,7 @@ pub enum ToggleId {
     Trails,
     Kaleidoscope,
     Music,
+    WallChimes,
     Mute,
 }
 
@@ -151,6 +152,7 @@ pub struct PanelState {
     pub trails: bool,
     pub kaleidoscope: bool,
     pub music: bool,
+    pub wall_chimes: bool,
     pub muted: bool,
     pub spawn_mode: String,
     pub color_mode: String,
@@ -1099,6 +1101,15 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         state.music,
         &mut y,
     );
+    push_toggle(
+        &mut out,
+        x,
+        w,
+        ToggleId::WallChimes,
+        "Wall chimes",
+        state.wall_chimes,
+        &mut y,
+    );
     push_toggle(&mut out, x, w, ToggleId::Mute, "Mute", state.muted, &mut y);
     y += 4.0;
 
@@ -1414,6 +1425,7 @@ fn toggle_command(id: ToggleId) -> PanelCommand {
         ToggleId::Trails => PanelCommand::Plain(Command::ToggleTrails),
         ToggleId::Kaleidoscope => PanelCommand::Plain(Command::ToggleKaleidoscope),
         ToggleId::Music => PanelCommand::Plain(Command::ToggleMusic),
+        ToggleId::WallChimes => PanelCommand::Plain(Command::ToggleWallChimes),
         ToggleId::Mute => PanelCommand::Plain(Command::ToggleMute),
     }
 }

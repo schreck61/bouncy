@@ -679,6 +679,54 @@ impl Default for CollisionRecorder {
     }
 }
 
+/// A particle striking a wall segment: raw material for wall chimes.
+#[derive(Copy, Clone, Debug)]
+pub struct WallHit {
+    /// Stable id of the striking particle (cooldowns outlive the frame).
+    pub particle: ParticleId,
+    /// Index of the struck segment in the segments slice.
+    pub segment: usize,
+    /// Approach speed |vn| at impact — the same closing-speed units as
+    /// pair-collision energy, so the audibility floor applies unchanged.
+    pub energy: f64,
+    /// Contact point (the pan source).
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Collects wall strikes across a frame's substeps, counting each
+/// (particle, segment) contact at most once — the wall pass runs twice
+/// per substep, and a particle resting on a wall must ring once, not
+/// once per pass. Clear at the start of each frame, like
+/// [`CollisionRecorder`].
+#[derive(Default)]
+pub struct WallHitRecorder {
+    hits: Vec<WallHit>,
+    seen: std::collections::HashSet<(ParticleId, usize)>,
+}
+
+impl WallHitRecorder {
+    /// Forget the current frame's strikes. Call once per frame, not per
+    /// substep.
+    pub fn clear(&mut self) {
+        self.hits.clear();
+        self.seen.clear();
+    }
+
+    /// Record a strike; kept only the first time this (particle, segment)
+    /// pair connects this frame.
+    fn record(&mut self, hit: WallHit) {
+        if self.seen.insert((hit.particle, hit.segment)) {
+            self.hits.push(hit);
+        }
+    }
+
+    /// Strikes recorded this frame, in the serial detection order.
+    pub fn hits(&self) -> &[WallHit] {
+        &self.hits
+    }
+}
+
 /// The largest particle radius in the population (0.0 when empty).
 pub fn max_radius(particles: &[Particle]) -> f64 {
     particles.iter().map(|p| p.radius).fold(0.0f64, f64::max)
@@ -957,9 +1005,23 @@ pub fn collide_with_segments(
     segments: &[Segment],
     wall_elasticity: f64,
 ) {
+    collide_with_segments_recording(particles, prev, segments, wall_elasticity, None);
+}
+
+/// [`collide_with_segments`] that additionally reports each real bounce
+/// (an approaching reflection, not a pushout of a receding particle) to
+/// `recorder` when one is given. The particle-then-segment iteration is
+/// serial, so recorded order is deterministic and thread-count-invariant.
+pub fn collide_with_segments_recording(
+    particles: &mut [Particle],
+    prev: &[(f64, f64)],
+    segments: &[Segment],
+    wall_elasticity: f64,
+    mut recorder: Option<&mut WallHitRecorder>,
+) {
     debug_assert_eq!(particles.len(), prev.len());
     for (p, &(ox, oy)) in particles.iter_mut().zip(prev) {
-        for seg in segments {
+        for (seg_index, seg) in segments.iter().enumerate() {
             // Cheap AABB reject (over the whole motion) before the exact
             // tests.
             let r = p.radius;
@@ -1004,6 +1066,15 @@ pub fn collide_with_segments(
             if vn < 0.0 {
                 p.vx -= (1.0 + wall_elasticity) * vn * nx;
                 p.vy -= (1.0 + wall_elasticity) * vn * ny;
+                if let Some(rec) = recorder.as_deref_mut() {
+                    rec.record(WallHit {
+                        particle: p.id,
+                        segment: seg_index,
+                        energy: -vn,
+                        x: cx,
+                        y: cy,
+                    });
+                }
             }
         }
     }
@@ -1933,6 +2004,80 @@ mod tests {
         assert!((p.y - (100.0 - RADIUS)).abs() < 1e-9, "pushed out: {}", p.y);
         assert!((p.vy - (-200.0)).abs() < 1e-9, "reflected: {}", p.vy);
         assert!((p.vx - 30.0).abs() < 1e-9, "tangential velocity untouched");
+    }
+
+    #[test]
+    fn wall_hits_record_only_real_bounces() {
+        let wall = Segment {
+            x1: 50.0,
+            y1: 100.0,
+            x2: 150.0,
+            y2: 100.0,
+        };
+        let mut recorder = WallHitRecorder::default();
+
+        // Approaching particle: one hit, energy equal to the approach speed.
+        let mut particles = vec![particle(100.0, 99.0, 30.0, 200.0)];
+        collide_with_segments_recording(
+            &mut particles,
+            &[(100.0, 99.0)],
+            &[wall],
+            1.0,
+            Some(&mut recorder),
+        );
+        assert_eq!(recorder.hits().len(), 1);
+        let hit = recorder.hits()[0];
+        assert_eq!(hit.segment, 0);
+        assert!((hit.energy - 200.0).abs() < 1e-9, "energy is |vn|");
+        assert!((hit.x - 100.0).abs() < 1e-9, "contact point x");
+
+        // Receding overlap: position-only correction, no chime material.
+        recorder.clear();
+        let mut particles = vec![particle(100.0, 99.0, 0.0, -50.0)];
+        collide_with_segments_recording(
+            &mut particles,
+            &[(100.0, 99.0)],
+            &[wall],
+            1.0,
+            Some(&mut recorder),
+        );
+        assert!(recorder.hits().is_empty(), "receding is not a strike");
+    }
+
+    #[test]
+    fn wall_hit_recorder_dedups_particle_segment_pairs_per_frame() {
+        let wall = Segment {
+            x1: 50.0,
+            y1: 100.0,
+            x2: 150.0,
+            y2: 100.0,
+        };
+        let mut recorder = WallHitRecorder::default();
+        // The wall pass runs twice per substep; a particle still pressed
+        // into the wall on the second pass must not ring twice.
+        for _ in 0..2 {
+            let mut particles = vec![particle(100.0, 99.0, 0.0, 200.0)];
+            collide_with_segments_recording(
+                &mut particles,
+                &[(100.0, 99.0)],
+                &[wall],
+                0.0, // inelastic: still approaching next pass
+                Some(&mut recorder),
+            );
+        }
+        assert_eq!(recorder.hits().len(), 1, "one strike per pair per frame");
+
+        // A new frame rings again.
+        recorder.clear();
+        let mut particles = vec![particle(100.0, 99.0, 0.0, 200.0)];
+        collide_with_segments_recording(
+            &mut particles,
+            &[(100.0, 99.0)],
+            &[wall],
+            1.0,
+            Some(&mut recorder),
+        );
+        assert_eq!(recorder.hits().len(), 1);
     }
 
     #[test]

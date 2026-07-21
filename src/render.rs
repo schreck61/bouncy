@@ -127,17 +127,42 @@ pub fn render_particles(
 /// Color of drawn wall segments: warm sandstone, distinct from both the
 /// well markers and the random bright particle palette.
 const WALL_COLOR: [u8; 4] = [225, 195, 130, 255];
+/// A chimed wall flares toward this hot white of the same sandstone hue.
+const WALL_FLASH_COLOR: [u8; 4] = [255, 246, 214, 255];
 
 /// Draw the drawn wall segments as 1-pixel lines, clipped to the frame.
-pub fn render_segments(frame: &mut [u8], segments: &[Segment], width: u32, height: u32) {
-    for seg in segments {
+/// `flash` holds per-segment chime-flash intensities (0.0 = resting
+/// color, 1.0 = full flare), index-aligned with `segments`; segments
+/// beyond its length render at rest.
+pub fn render_segments(
+    frame: &mut [u8],
+    segments: &[Segment],
+    flash: &[f32],
+    width: u32,
+    height: u32,
+) {
+    for (i, seg) in segments.iter().enumerate() {
+        let intensity = flash.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+        let color = if intensity > 0.0 {
+            let mut c = WALL_COLOR;
+            for (ch, flare) in c.iter_mut().zip(WALL_FLASH_COLOR) {
+                let base = f32::from(*ch);
+                // Channel math stays within u8 range by construction.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let mixed = (base + (f32::from(flare) - base) * intensity).round() as u8;
+                *ch = mixed;
+            }
+            c
+        } else {
+            WALL_COLOR
+        };
         draw_line(
             frame,
             width,
             height,
             (seg.x1, seg.y1),
             (seg.x2, seg.y2),
-            WALL_COLOR,
+            color,
         );
     }
 }
@@ -815,6 +840,36 @@ mod tests {
     }
 
     #[test]
+    fn flashed_segments_flare_toward_white() {
+        let (width, height) = (50u32, 40u32);
+        let mut frame = vec![0u8; (width * height * 4) as usize];
+        let segments = [
+            Segment {
+                x1: 5.0,
+                y1: 10.0,
+                x2: 15.0,
+                y2: 10.0,
+            },
+            Segment {
+                x1: 5.0,
+                y1: 20.0,
+                x2: 15.0,
+                y2: 20.0,
+            },
+        ];
+        // Segment 0 at full flare, segment 1 resting.
+        render_segments(&mut frame, &segments, &[1.0, 0.0], width, height);
+        let px = |x: u32, y: u32| {
+            let i = ((y * width + x) * 4) as usize;
+            [frame[i], frame[i + 1], frame[i + 2], frame[i + 3]]
+        };
+        assert_eq!(px(10, 10), WALL_FLASH_COLOR, "flashed bar flares");
+        assert_eq!(px(10, 20), WALL_COLOR, "resting bar keeps its color");
+        // A missing flash entry is a resting wall, never a panic.
+        render_segments(&mut frame, &segments, &[0.5], width, height);
+    }
+
+    #[test]
     fn render_segments_draws_lines_and_clips() {
         let (width, height) = (50u32, 40u32);
         let mut frame = vec![0u8; (width * height * 4) as usize];
@@ -833,7 +888,7 @@ mod tests {
                 y2: 60.0,
             },
         ];
-        render_segments(&mut frame, &segments, width, height);
+        render_segments(&mut frame, &segments, &[], width, height);
 
         let px = |x: u32, y: u32| frame[((y * width + x) * 4) as usize];
         assert_eq!(px(5, 10), WALL_COLOR[0], "line start drawn");

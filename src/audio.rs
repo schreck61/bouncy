@@ -36,6 +36,9 @@ const PENTATONIC_SEMITONES: [f32; 11] =
 /// Root note of the scale (C4). Two octaves up lands on C6 (~1046 Hz),
 /// comfortably inside the continuous map's 300-1500 Hz band.
 const MUSIC_ROOT_FREQ: f32 = 261.63;
+/// Number of scale degrees in the notes palette — the shared pitch range
+/// of musical pings and wall chimes (scene files address degrees by index).
+pub const NOTE_COUNT: usize = PENTATONIC_SEMITONES.len();
 
 /// Equal-temperament frequency of the scale degree at `index`.
 fn note_frequency(index: usize) -> f32 {
@@ -132,8 +135,16 @@ fn pan_gains(pan: f32) -> (f32, f32) {
     (pan.cos(), pan.sin())
 }
 
+/// Chime volume for an impact: a 0.3 floor keeps gentle rolls audible
+/// while hard strikes ring out at full gain.
+fn note_gain(energy: f64) -> f32 {
+    0.3 + 0.7 * normalize_energy(energy)
+}
+
 /// Minimum collision energy (closing speed) that makes an audible ping.
-const PING_MIN_ENERGY: f64 = 40.0;
+/// Public so the simulation can pre-filter wall-chime events with the
+/// same floor the backends enforce (pure data, no device dependency).
+pub const PING_MIN_ENERGY: f64 = 40.0;
 
 /// Soft contacts are inaudible.
 fn ping_audible(energy: f64) -> bool {
@@ -143,7 +154,7 @@ fn ping_audible(energy: f64) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::{
-        AUDIO_SAMPLE_RATE, energy_index, normalize_energy, pan_gains, ping_audible,
+        AUDIO_SAMPLE_RATE, energy_index, normalize_energy, note_gain, pan_gains, ping_audible,
         synth_explosion, synth_ping_palettes,
     };
     use rodio::buffer::SamplesBuffer;
@@ -250,6 +261,25 @@ mod native {
                 .add(ChannelVolume::new(ping, vec![left, right]));
         }
 
+        /// Play scale degree `note` from the pentatonic palette directly,
+        /// with volume scaled by impact energy. Ignores the music toggle:
+        /// wall-chime pitch is geometry, not energy, and chimes stay on
+        /// the scale so random walls sound musical.
+        pub fn play_note(&self, note: usize, energy: f64, pan: f32) {
+            if !ping_audible(energy) {
+                return;
+            }
+            let Some(stream) = self.stream.as_ref().filter(|_| !self.muted) else {
+                return;
+            };
+            let buffer = self.notes[note.min(self.notes.len() - 1)].clone();
+            let gain = note_gain(energy);
+            let (left, right) = pan_gains(pan);
+            stream
+                .mixer()
+                .add(ChannelVolume::new(buffer, vec![left * gain, right * gain]));
+        }
+
         /// Play the explosion rumble sound.
         pub fn play_explosion(&self) {
             let Some(stream) = self.stream.as_ref().filter(|_| !self.muted) else {
@@ -289,8 +319,8 @@ pub use native::Audio;
 #[cfg(target_arch = "wasm32")]
 mod web {
     use super::{
-        AUDIO_SAMPLE_RATE, energy_index, normalize_energy, ping_audible, synth_explosion,
-        synth_ping_palettes,
+        AUDIO_SAMPLE_RATE, energy_index, normalize_energy, note_gain, ping_audible,
+        synth_explosion, synth_ping_palettes,
     };
     use std::cell::RefCell;
     use web_sys::{AudioBuffer, AudioContext, AudioContextOptions};
@@ -370,8 +400,9 @@ mod web {
     }
 
     /// Play the selected buffer panned to `pan` (0 = left, 1 = right;
-    /// `WebAudio`'s `StereoPannerNode` applies the equal-power law itself).
-    fn play(select: impl Fn(&Engine) -> &AudioBuffer, pan: f32) {
+    /// `WebAudio`'s `StereoPannerNode` applies the equal-power law itself)
+    /// at `gain` (1.0 = full volume).
+    fn play(select: impl Fn(&Engine) -> &AudioBuffer, pan: f32, gain: f32) {
         ENGINE.with(|slot| {
             let slot = slot.borrow();
             let Some(engine) = slot.as_ref() else { return };
@@ -379,11 +410,16 @@ mod web {
                 return;
             };
             source.set_buffer(Some(select(engine)));
+            let Ok(volume) = engine.ctx.create_gain() else {
+                return;
+            };
+            volume.gain().set_value(gain);
             let Ok(panner) = engine.ctx.create_stereo_panner() else {
                 return;
             };
             panner.pan().set_value((pan.clamp(0.0, 1.0) * 2.0) - 1.0);
-            let _ = source.connect_with_audio_node(&panner);
+            let _ = source.connect_with_audio_node(&volume);
+            let _ = volume.connect_with_audio_node(&panner);
             let _ = panner.connect_with_audio_node(&engine.ctx.destination());
             let _ = source.start();
         });
@@ -439,6 +475,20 @@ mod web {
                     &buffers[energy_index(energy_normalized, buffers.len())]
                 },
                 pan,
+                1.0,
+            );
+        }
+
+        /// Play scale degree `note` from the pentatonic palette directly,
+        /// with volume scaled by impact energy (see the native backend).
+        pub fn play_note(&self, note: usize, energy: f64, pan: f32) {
+            if self.muted || !ping_audible(energy) {
+                return;
+            }
+            play(
+                move |engine| &engine.notes[note.min(engine.notes.len() - 1)],
+                pan,
+                note_gain(energy),
             );
         }
 
@@ -448,7 +498,7 @@ mod web {
             if self.muted {
                 return;
             }
-            play(|engine| &engine.explosion, 0.5);
+            play(|engine| &engine.explosion, 0.5, 1.0);
         }
     }
 }
@@ -519,6 +569,26 @@ mod tests {
         assert!(
             (last - MUSIC_ROOT_FREQ * 4.0).abs() < 1e-2,
             "ends two octaves up"
+        );
+        // Scene files and the sim address degrees through this constant.
+        assert_eq!(NOTE_COUNT, PENTATONIC_SEMITONES.len());
+        assert_eq!(NOTE_COUNT, 11);
+    }
+
+    #[test]
+    fn note_gain_is_monotonic_and_bounded() {
+        let mut prev = 0.0f32;
+        for step in 0..=20 {
+            let energy = f64::from(step) * (COLLISION_ENERGY_NORMALIZER / 10.0);
+            let gain = note_gain(energy);
+            assert!((0.3..=1.0).contains(&gain), "gain {gain} out of range");
+            assert!(gain >= prev, "gain must not decrease with energy");
+            prev = gain;
+        }
+        assert!((note_gain(0.0) - 0.3).abs() < 1e-6, "floor at zero energy");
+        assert!(
+            (note_gain(COLLISION_ENERGY_NORMALIZER * 2.0) - 1.0).abs() < 1e-6,
+            "full gain past the normalizer"
         );
     }
 }

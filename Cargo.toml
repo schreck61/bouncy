@@ -59,7 +59,7 @@ web-sys = { version = "0.3", features = [
     # WebAudio backend
     "AudioContext", "AudioContextOptions", "AudioBuffer",
     "AudioBufferSourceNode", "AudioDestinationNode", "AudioNode",
-    "AudioParam", "StereoPannerNode",
+    "AudioParam", "GainNode", "StereoPannerNode",
 ] }
 
 [lints.clippy]

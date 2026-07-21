@@ -76,6 +76,7 @@ cargo run --release -- --spawn-at-collision
 | `--cpu` | Force CPU rendering (softbuffer) instead of GPU | Off |
 | `--mute` | Start with audio muted | Off |
 | `--music` | Quantize collision pings to a pentatonic scale (energy picks the note) | Off |
+| `--wall-chimes` | Walls play pentatonic notes when particles strike them — longer wall, lower note | Off |
 | `--kaleidoscope` | Mirror the frame 4-fold around the screen center | Off |
 | `--trails` | Leave motion trails behind particles | Off |
 | `--panel` | Start with the native control panel open (Tab toggles; the right-edge handle also reveals it) | Off |
@@ -112,6 +113,7 @@ cargo run --release -- --spawn-at-collision
 | `F` | Toggle the flow field |
 | `A` | Toggle self-gravity (mass attracts mass) |
 | `S` | Toggle musical pings (pentatonic scale) |
+| `I` | Toggle wall chimes (walls play notes on impact) |
 | `K` | Toggle kaleidoscope rendering |
 | `G` (hold) | Gravity well: attract particles toward the cursor; `Shift+G` repels |
 | `W` | Pin a persistent gravity well at the cursor; `Shift+W` pins a repeller |

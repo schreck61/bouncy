@@ -233,6 +233,9 @@ pub struct SceneWall {
     pub y1: f64,
     pub x2: f64,
     pub y2: f64,
+    /// Explicit chime scale degree (0 = lowest). `None` derives pitch
+    /// from the wall's length when chimes are on.
+    pub note: Option<u8>,
 }
 
 /// One user preset: an optional built-in to inherit from, an optional
@@ -433,36 +436,82 @@ fn parse_fraction(preset: &str, key: &str, value: &toml::Value) -> Result<f64, S
     Ok(f)
 }
 
-/// Parse `walls = [[x1, y1, x2, y2], ...]` (window fractions).
+/// Parse scene walls (window fractions). Two forms per entry: the legacy
+/// bare array `[x1, y1, x2, y2]`, or a table
+/// `{ x1 = .., y1 = .., x2 = .., y2 = .., note = 4 }` whose optional
+/// `note` pins a chime scale degree instead of deriving pitch from length.
 fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>, String> {
     let toml::Value::Array(entries) = value else {
         return Err(format!(
-            "preset '{preset}': walls must be an array of [x1, y1, x2, y2] arrays"
+            "preset '{preset}': walls must be an array of [x1, y1, x2, y2] \
+             arrays or {{ x1, y1, x2, y2, note }} tables"
         ));
     };
     let mut walls = Vec::with_capacity(entries.len());
     for entry in entries {
-        let toml::Value::Array(coords) = entry else {
-            return Err(format!(
-                "preset '{preset}': each wall must be an [x1, y1, x2, y2] array"
-            ));
-        };
-        if coords.len() != 4 {
-            return Err(format!(
-                "preset '{preset}': each wall needs exactly 4 coordinates, got {}",
-                coords.len()
-            ));
+        match entry {
+            toml::Value::Array(coords) => {
+                if coords.len() != 4 {
+                    return Err(format!(
+                        "preset '{preset}': each wall needs exactly 4 coordinates, got {}",
+                        coords.len()
+                    ));
+                }
+                let mut c = [0.0; 4];
+                for (slot, coord) in c.iter_mut().zip(coords) {
+                    *slot = parse_fraction(preset, "walls", coord)?;
+                }
+                walls.push(SceneWall {
+                    x1: c[0],
+                    y1: c[1],
+                    x2: c[2],
+                    y2: c[3],
+                    note: None,
+                });
+            }
+            toml::Value::Table(table) => {
+                let coord = |key: &str| -> Result<f64, String> {
+                    table.get(key).map_or_else(
+                        || {
+                            Err(format!(
+                                "preset '{preset}': a wall table is missing '{key}'"
+                            ))
+                        },
+                        |v| parse_fraction(preset, "walls", v),
+                    )
+                };
+                let note = match table.get("note") {
+                    None => None,
+                    Some(v) => {
+                        let max = crate::audio::NOTE_COUNT - 1;
+                        let range = 0..=i64::try_from(max).unwrap_or(i64::MAX);
+                        let degree = v.as_integer().filter(|d| range.contains(d));
+                        let Some(degree) = degree else {
+                            return Err(format!(
+                                "preset '{preset}': wall note must be an integer \
+                                 scale degree 0-{max} (got {v})"
+                            ));
+                        };
+                        // Bounds-checked against NOTE_COUNT - 1 (10) above.
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        Some(degree as u8)
+                    }
+                };
+                walls.push(SceneWall {
+                    x1: coord("x1")?,
+                    y1: coord("y1")?,
+                    x2: coord("x2")?,
+                    y2: coord("y2")?,
+                    note,
+                });
+            }
+            _ => {
+                return Err(format!(
+                    "preset '{preset}': each wall must be an [x1, y1, x2, y2] \
+                     array or a {{ x1, y1, x2, y2, note }} table"
+                ));
+            }
         }
-        let mut c = [0.0; 4];
-        for (slot, coord) in c.iter_mut().zip(coords) {
-            *slot = parse_fraction(preset, "walls", coord)?;
-        }
-        walls.push(SceneWall {
-            x1: c[0],
-            y1: c[1],
-            x2: c[2],
-            y2: c[3],
-        });
     }
     Ok(walls)
 }
@@ -541,7 +590,22 @@ pub fn scene_to_toml(
     if !walls.is_empty() {
         let walls = walls
             .iter()
-            .map(|w| toml::Value::Array(vec![w.x1.into(), w.y1.into(), w.x2.into(), w.y2.into()]))
+            .map(|w| match w.note {
+                // Note-free walls keep the legacy array form so exports
+                // stay readable by older binaries and diff-identical.
+                None => {
+                    toml::Value::Array(vec![w.x1.into(), w.y1.into(), w.x2.into(), w.y2.into()])
+                }
+                Some(note) => {
+                    let mut t = toml::Table::new();
+                    t.insert("x1".into(), w.x1.into());
+                    t.insert("y1".into(), w.y1.into());
+                    t.insert("x2".into(), w.x2.into());
+                    t.insert("y2".into(), w.y2.into());
+                    t.insert("note".into(), i64::from(note).into());
+                    toml::Value::Table(t)
+                }
+            })
             .collect();
         table.insert("walls".into(), toml::Value::Array(walls));
     }
@@ -731,7 +795,8 @@ mod tests {
                 x1: 0.6,
                 y1: 0.5,
                 x2: 0.9,
-                y2: 0.5
+                y2: 0.5,
+                note: None
             }
         );
 
@@ -762,12 +827,22 @@ mod tests {
             y: 0.25,
             polarity: Polarity::Repel,
         }];
-        let walls = [SceneWall {
-            x1: 0.1,
-            y1: 0.2,
-            x2: 0.3,
-            y2: 0.4,
-        }];
+        let walls = [
+            SceneWall {
+                x1: 0.1,
+                y1: 0.2,
+                x2: 0.3,
+                y2: 0.4,
+                note: None,
+            },
+            SceneWall {
+                x1: 0.5,
+                y1: 0.6,
+                x2: 0.7,
+                y2: 0.6,
+                note: Some(4),
+            },
+        ];
         let text = scene_to_toml(
             "saved",
             &[
@@ -787,6 +862,37 @@ mod tests {
         assert!(preset.args.contains(&"--trails".to_string()));
         assert_eq!(preset.scene.wells, wells);
         assert_eq!(preset.scene.walls, walls);
+        // Note-free walls keep the legacy bare-array form on disk.
+        assert!(text.contains("[0.1, 0.2, 0.3, 0.4]"), "{text}");
+    }
+
+    #[test]
+    fn wall_tables_with_notes_parse_alongside_legacy_arrays() {
+        let user = parse_str(
+            "[chimes]\ngravity = 10\nwalls = [\n  [0.1, 0.2, 0.3, 0.2],\n  { x1 = 0.4, y1 = 0.5, x2 = 0.6, y2 = 0.5, note = 7 },\n  { x1 = 0.7, y1 = 0.8, x2 = 0.9, y2 = 0.8 },\n]\n",
+        )
+        .unwrap();
+        let walls = &user.presets["chimes"].scene.walls;
+        assert_eq!(walls.len(), 3);
+        assert_eq!(walls[0].note, None, "legacy array form");
+        assert_eq!(walls[1].note, Some(7), "table form with note");
+        assert_eq!(walls[2].note, None, "table form without note");
+        assert!((walls[1].x1 - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn wall_note_out_of_range_is_rejected_loudly() {
+        let err =
+            parse_str("[bad]\nwalls = [{ x1 = 0.1, y1 = 0.2, x2 = 0.3, y2 = 0.2, note = 11 }]\n")
+                .unwrap_err();
+        assert!(err.contains("scale degree 0-10"), "{err}");
+        let err =
+            parse_str("[bad]\nwalls = [{ x1 = 0.1, y1 = 0.2, x2 = 0.3, y2 = 0.2, note = -1 }]\n")
+                .unwrap_err();
+        assert!(err.contains("scale degree 0-10"), "{err}");
+        let err =
+            parse_str("[bad]\nwalls = [{ x1 = 0.1, y1 = 0.2, x2 = 0.3, note = 2 }]\n").unwrap_err();
+        assert!(err.contains("missing 'y2'"), "{err}");
     }
 
     #[test]

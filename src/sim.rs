@@ -5,18 +5,19 @@
 //! orchestration. No windowing, rendering, or audio — the `App` layer owns
 //! those and drives this struct, which keeps every gameplay rule testable.
 
+use crate::audio::{NOTE_COUNT, PING_MIN_ENERGY};
 use crate::config::{Config, SpawnMode};
 use crate::explosion::{EXPLOSION_KILL_RATIO, Explosion, SPAWN_RATE_WINDOW, max_radius_from};
 use crate::physics::{
     COLLISION_ENERGY_NORMALIZER, CollisionRecorder, MOTION_STOPPED_FRAMES, Particle, ParticleId,
-    Segment, SpatialGrid, SpawnSite, WELL_STRENGTH, apply_attractor, apply_flow,
-    apply_self_gravity, collide_with_segments, handle_collisions, has_motion, max_radius,
+    Segment, SpatialGrid, SpawnSite, WELL_STRENGTH, WallHitRecorder, apply_attractor, apply_flow,
+    apply_self_gravity, collide_with_segments_recording, handle_collisions, has_motion, max_radius,
     motion_crosses_segment, pair_mut, substep_count, update_physics,
 };
 use crate::presets::Scene;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 // std::time::Instant on native; performance.now() on wasm.
 use web_time::Instant;
 
@@ -82,6 +83,22 @@ pub const MAX_PINNED_WELLS: usize = 16;
 /// Maximum number of drawn wall segments (held V). Enough for elaborate
 /// marble runs while keeping the per-substep segment sweep cheap.
 pub const MAX_WALL_SEGMENTS: usize = 200;
+
+// Wall chimes: a stroke (one V-drag gesture, or one scene wall) is the
+// sounding unit. Pitch comes from the stroke's total length as a fraction
+// of the window diagonal, log-mapped so equal length *ratios* step equal
+// intervals — instrument physics, and resolution/resize independent.
+/// Stroke length fraction at or below which a wall sounds the highest degree.
+const WALL_PITCH_MIN_FRAC: f64 = 0.015;
+/// Stroke length fraction at or beyond which a wall sounds the root.
+const WALL_PITCH_MAX_FRAC: f64 = 0.6;
+/// Seconds before the same particle can ring the same stroke again — a
+/// particle chattering on one wall rolls at ~8 Hz instead of every substep;
+/// crossing to a different stroke is never throttled.
+const WALL_CHIME_COOLDOWN_SECS: f64 = 0.12;
+/// Most chime voices in one step, loudest first: eight reads as a chord,
+/// a clump impact's hundreds would read as clipping noise.
+const MAX_WALL_HITS_PER_STEP: usize = 8;
 /// Comet size as a multiple of the base particle radius; mass scales with
 /// the square, so a comet outweighs a default particle 9:1.
 const COMET_RADIUS_FACTOR: f64 = 3.0;
@@ -117,6 +134,32 @@ pub struct StepEvents {
     /// The simulation declared all motion stopped this step (fires once
     /// per transition into the stopped state).
     pub motion_stopped: bool,
+    /// Wall-chime strikes this step, loudest first (empty unless wall
+    /// chimes are enabled). Capped at [`MAX_WALL_HITS_PER_STEP`].
+    pub wall_hits: Vec<WallChime>,
+}
+
+/// One audible wall strike: which stroke to flash, which pentatonic
+/// degree to play, and how hard/where it landed.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct WallChime {
+    /// Stroke id of the struck wall (the flash target).
+    pub stroke: u32,
+    /// Pentatonic scale degree, 0 (root) .. `NOTE_COUNT`.
+    pub note: usize,
+    /// Impact approach speed (the volume source).
+    pub energy: f64,
+    /// Stereo pan of the contact point (0.0 = left, 1.0 = right).
+    pub pan: f64,
+}
+
+/// Per-segment chime metadata, index-aligned with the segments list.
+#[derive(Copy, Clone, Debug)]
+pub struct WallMeta {
+    /// Segments sharing a stroke id sound (and flash) as one bar.
+    pub stroke: u32,
+    /// Explicit scale degree from scene TOML; overrides length mapping.
+    pub note: Option<u8>,
 }
 
 pub use crate::physics::Polarity;
@@ -161,6 +204,18 @@ pub struct Simulation {
     pinned_wells: Vec<Well>,
     /// Static wall segments drawn with the V key.
     segments: Vec<Segment>,
+    /// Walls play notes on impact (--wall-chimes / I key).
+    pub wall_chimes: bool,
+    /// Chime metadata, index-aligned with `segments` at all times.
+    wall_meta: Vec<WallMeta>,
+    /// Next stroke id to stamp (monotonic; a V-drag gesture or a scene
+    /// wall is one stroke).
+    next_stroke_id: u32,
+    /// Wall strikes collected across this frame's substeps.
+    wall_hits: WallHitRecorder,
+    /// Last time each (particle, stroke) pair rang, for the chime
+    /// cooldown; pruned each step, cleared with the walls.
+    chime_cooldowns: HashMap<(ParticleId, u32), Instant>,
     /// Next stable particle id to stamp (monotonic, never reused).
     next_particle_id: ParticleId,
     /// Attractors pinned at startup (--wells); reset restores this layout.
@@ -223,6 +278,11 @@ impl Simulation {
             particles: Vec::new(),
             pinned_wells: Vec::new(),
             segments: Vec::new(),
+            wall_chimes: config.wall_chimes,
+            wall_meta: Vec::new(),
+            next_stroke_id: 1,
+            wall_hits: WallHitRecorder::default(),
+            chime_cooldowns: HashMap::new(),
             next_particle_id: 1,
             initial_wells: config.wells as usize,
             scene: config.scene.clone(),
@@ -287,7 +347,7 @@ impl Simulation {
                 polarity: well.polarity,
             });
         }
-        for wall in &self.scene.walls {
+        for wall in self.scene.walls.clone() {
             if self.segments.len() >= MAX_WALL_SEGMENTS {
                 break;
             }
@@ -297,6 +357,13 @@ impl Simulation {
                 x2: wall.x2 * w,
                 y2: wall.y2 * h,
             });
+            // Each scene wall is its own stroke: a marimba stair's bars
+            // sound individually.
+            self.wall_meta.push(WallMeta {
+                stroke: self.next_stroke_id,
+                note: wall.note,
+            });
+            self.next_stroke_id += 1;
         }
     }
 
@@ -343,6 +410,8 @@ impl Simulation {
         self.pinned_wells.clear();
         self.place_initial_wells();
         self.segments.clear();
+        self.wall_meta.clear();
+        self.chime_cooldowns.clear();
         self.place_scene();
         self.explosion = None;
         self.spawn_times.clear();
@@ -458,6 +527,121 @@ impl Simulation {
     /// The drawn wall segments particles bounce off (V draws them).
     pub fn wall_segments(&self) -> &[Segment] {
         &self.segments
+    }
+
+    /// Chime metadata for each wall segment, index-aligned with
+    /// [`wall_segments`](Self::wall_segments).
+    pub fn wall_meta(&self) -> &[WallMeta] {
+        &self.wall_meta
+    }
+
+    /// The pentatonic degree a stroke sounds: its explicit scene note if
+    /// pinned, else its cumulative length as a fraction of the window
+    /// diagonal, log-mapped so equal length ratios step equal intervals —
+    /// longest sounds the root, a flick sounds the top degree.
+    fn stroke_note(&self, stroke: u32, note_override: Option<u8>) -> usize {
+        if let Some(degree) = note_override {
+            return usize::from(degree).min(NOTE_COUNT - 1);
+        }
+        let len: f64 = self
+            .segments
+            .iter()
+            .zip(&self.wall_meta)
+            .filter(|(_, m)| m.stroke == stroke)
+            .map(|(s, _)| (s.x2 - s.x1).hypot(s.y2 - s.y1))
+            .sum();
+        let diag = f64::from(self.width).hypot(f64::from(self.height));
+        let frac = (len / diag).clamp(WALL_PITCH_MIN_FRAC, WALL_PITCH_MAX_FRAC);
+        let t =
+            (frac / WALL_PITCH_MIN_FRAC).ln() / (WALL_PITCH_MAX_FRAC / WALL_PITCH_MIN_FRAC).ln();
+        // t is 0..=1 by the clamp; NOTE_COUNT is a small constant.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(clippy::cast_precision_loss)]
+        let degree = ((1.0 - t) * (NOTE_COUNT - 1) as f64).round() as usize;
+        degree.min(NOTE_COUNT - 1)
+    }
+
+    /// Per-segment notes for scene export. A stroke's pitch is frozen
+    /// into the file when geometry alone would not reproduce it on
+    /// re-import: multi-segment drag strokes (whose short pieces would
+    /// come back as separate high-pitched bars) and scene-pinned notes.
+    /// Lone segments stay `None` — their length round-trips the pitch.
+    pub fn wall_export_notes(&self) -> Vec<Option<u8>> {
+        let mut per_stroke: HashMap<u32, usize> = HashMap::new();
+        for m in &self.wall_meta {
+            *per_stroke.entry(m.stroke).or_insert(0) += 1;
+        }
+        self.wall_meta
+            .iter()
+            .map(|m| {
+                if m.note.is_some() || per_stroke[&m.stroke] > 1 {
+                    u8::try_from(self.stroke_note(m.stroke, m.note)).ok()
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Filter this frame's raw wall strikes into audible chimes: drop
+    /// sub-audible grazes, ring each (particle, stroke) at most once per
+    /// frame and per cooldown window, keep each pair's hardest contact,
+    /// and cap the result at the loudest [`MAX_WALL_HITS_PER_STEP`].
+    /// Iterates in the recorder's serial order, so the result is
+    /// deterministic and thread-count-invariant.
+    fn resolve_chimes(&mut self, now: Instant) -> Vec<WallChime> {
+        let width = f64::from(self.width);
+        let mut order: Vec<((ParticleId, u32), WallChime)> = Vec::new();
+        let mut index_of: HashMap<(ParticleId, u32), usize> = HashMap::new();
+        for hit in self.wall_hits.hits() {
+            if hit.energy < PING_MIN_ENERGY {
+                continue;
+            }
+            let Some(meta) = self.wall_meta.get(hit.segment).copied() else {
+                continue;
+            };
+            let key = (hit.particle, meta.stroke);
+            if let Some(&i) = index_of.get(&key) {
+                // A polyline corner touches two segments of one stroke in
+                // the same frame: one note, at the harder contact.
+                if hit.energy > order[i].1.energy {
+                    order[i].1.energy = hit.energy;
+                    order[i].1.pan = (hit.x / width).clamp(0.0, 1.0);
+                }
+                continue;
+            }
+            if let Some(last) = self.chime_cooldowns.get(&key)
+                && now.duration_since(*last).as_secs_f64() < WALL_CHIME_COOLDOWN_SECS
+            {
+                continue;
+            }
+            index_of.insert(key, order.len());
+            order.push((
+                key,
+                WallChime {
+                    stroke: meta.stroke,
+                    note: self.stroke_note(meta.stroke, meta.note),
+                    energy: hit.energy,
+                    pan: (hit.x / width).clamp(0.0, 1.0),
+                },
+            ));
+        }
+        // Prune stale entries so the map tracks only live throttles, not
+        // every pair that ever touched.
+        self.chime_cooldowns
+            .retain(|_, last| now.duration_since(*last).as_secs_f64() < WALL_CHIME_COOLDOWN_SECS);
+        // Stable sort: ties keep first-seen (serial) order. Only the
+        // voices that survive the cap start a cooldown — a chord that
+        // crowds a note out must not also silence its next strike.
+        order.sort_by(|a, b| b.1.energy.total_cmp(&a.1.energy));
+        order.truncate(MAX_WALL_HITS_PER_STEP);
+        order
+            .into_iter()
+            .map(|(key, chime)| {
+                self.chime_cooldowns.insert(key, now);
+                chime
+            })
+            .collect()
     }
 
     /// The initial and minimum particle count (screen-derived, or the
@@ -632,13 +816,36 @@ impl Simulation {
         cleared
     }
 
-    /// Add a drawn wall segment (held V). Returns false once the segment
-    /// limit is reached.
+    /// Add a drawn wall segment (held V) as a new stroke. Returns false
+    /// once the segment limit is reached.
     pub fn add_wall_segment(&mut self, x1: f64, y1: f64, x2: f64, y2: f64) -> bool {
         if self.segments.len() >= MAX_WALL_SEGMENTS {
             return false;
         }
         self.segments.push(Segment { x1, y1, x2, y2 });
+        self.wall_meta.push(WallMeta {
+            stroke: self.next_stroke_id,
+            note: None,
+        });
+        self.next_stroke_id += 1;
+        true
+    }
+
+    /// Append a segment continuing the most recent stroke — the V-drag
+    /// polyline, whose short segments must sound (and flash) as one bar.
+    /// Starts a fresh stroke when no walls exist.
+    pub fn extend_last_wall_stroke(&mut self, x1: f64, y1: f64, x2: f64, y2: f64) -> bool {
+        let Some(last) = self.wall_meta.last().copied() else {
+            return self.add_wall_segment(x1, y1, x2, y2);
+        };
+        if self.segments.len() >= MAX_WALL_SEGMENTS {
+            return false;
+        }
+        self.segments.push(Segment { x1, y1, x2, y2 });
+        self.wall_meta.push(WallMeta {
+            stroke: last.stroke,
+            note: last.note,
+        });
         true
     }
 
@@ -646,6 +853,8 @@ impl Simulation {
     pub fn clear_wall_segments(&mut self) -> usize {
         let cleared = self.segments.len();
         self.segments.clear();
+        self.wall_meta.clear();
+        self.chime_cooldowns.clear();
         cleared
     }
 
@@ -713,6 +922,7 @@ impl Simulation {
 
         let gravity_multiplier = f64::from(self.gravity_percent) / 100.0;
         self.collisions.clear();
+        self.wall_hits.clear();
 
         // Self-gravity integrates once per frame, not per substep: the
         // collective field changes on screen-crossing timescales, far
@@ -774,11 +984,12 @@ impl Simulation {
             // legitimate same-side contact — recording a far-side spawn
             // site that outlives every later correction.
             if !self.segments.is_empty() {
-                collide_with_segments(
+                collide_with_segments_recording(
                     &mut self.particles,
                     &self.prev_positions,
                     &self.segments,
                     self.wall_elasticity,
+                    self.wall_chimes.then_some(&mut self.wall_hits),
                 );
             }
             let energy = handle_collisions(
@@ -798,11 +1009,12 @@ impl Simulation {
             // may reintroduce is the softer failure — the next substep's
             // pair pass re-detects and resolves it.
             if !self.segments.is_empty() {
-                collide_with_segments(
+                collide_with_segments_recording(
                     &mut self.particles,
                     &self.prev_positions,
                     &self.segments,
                     self.wall_elasticity,
+                    self.wall_chimes.then_some(&mut self.wall_hits),
                 );
             }
         }
@@ -811,6 +1023,9 @@ impl Simulation {
         events.collision_pan = self
             .collision_centroid()
             .map_or(0.5, |(x, _)| x / f64::from(self.width));
+        if self.wall_chimes {
+            events.wall_hits = self.resolve_chimes(now);
+        }
 
         if self.matter && self.explosion.is_none() && self.process_matter(now) {
             // Matter ops reorder the particle list; rebuild the grid so the
@@ -3303,5 +3518,252 @@ mod tests {
              physics={flips_physics}",
             births[0], births[1]
         );
+    }
+
+    // ---- Wall chimes -------------------------------------------------
+
+    /// A chime-armed sim with two parked particles and no gravity.
+    fn chime_sim() -> Simulation {
+        let mut s = sim(&["--wall-chimes", "--min-particles", "2"]);
+        freeze(&mut s);
+        s.particles[0].x = 100.0;
+        s.particles[0].y = 100.0;
+        s.particles[1].x = 700.0;
+        s.particles[1].y = 500.0;
+        s
+    }
+
+    #[test]
+    fn wall_impact_emits_a_chime_event() {
+        let mut s = chime_sim();
+        s.particles[0].x = 300.0;
+        s.particles[0].y = 300.0;
+        s.particles[0].vx = 200.0;
+        assert!(s.add_wall_segment(400.0, 250.0, 400.0, 350.0));
+
+        let now = Instant::now();
+        let mut chimes = Vec::new();
+        for _ in 0..100 {
+            chimes.extend(s.step(0.01, now, None).wall_hits);
+            if !chimes.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(chimes.len(), 1, "one strike, one chime");
+        let chime = chimes[0];
+        assert!((chime.pan - 0.5).abs() < 0.01, "contact at x=400 of 800");
+        assert!(chime.note < NOTE_COUNT);
+        assert!(chime.energy >= PING_MIN_ENERGY);
+        assert_eq!(chime.stroke, s.wall_meta()[0].stroke);
+    }
+
+    #[test]
+    fn longer_strokes_play_lower_notes() {
+        let mut s = chime_sim();
+        assert!(s.add_wall_segment(100.0, 100.0, 120.0, 100.0)); // 20 px
+        assert!(s.add_wall_segment(200.0, 200.0, 600.0, 200.0)); // 400 px
+        let short = s.wall_meta()[0];
+        let long = s.wall_meta()[1];
+        assert_ne!(short.stroke, long.stroke, "separate adds, separate bars");
+        let short_note = s.stroke_note(short.stroke, short.note);
+        let long_note = s.stroke_note(long.stroke, long.note);
+        assert!(
+            short_note > long_note,
+            "shorter bar rings higher: {short_note} vs {long_note}"
+        );
+    }
+
+    #[test]
+    fn drawn_polyline_sounds_as_one_long_bar() {
+        let mut s = chime_sim();
+        // A lone 12 px tick: the top of the range.
+        assert!(s.add_wall_segment(700.0, 100.0, 712.0, 100.0));
+        // A five-quantum V-drag, extended the way App::extend_wall does.
+        assert!(s.add_wall_segment(200.0, 400.0, 212.0, 400.0));
+        for i in 1..5 {
+            let x = 200.0 + 12.0 * f64::from(i);
+            assert!(s.extend_last_wall_stroke(x, 400.0, x + 12.0, 400.0));
+        }
+        let meta = s.wall_meta();
+        assert_eq!(meta.len(), 6);
+        let stroke = meta[1].stroke;
+        assert!(
+            meta[1..].iter().all(|m| m.stroke == stroke),
+            "the drag is one stroke"
+        );
+        let tick_note = s.stroke_note(meta[0].stroke, None);
+        let drag_note = s.stroke_note(stroke, None);
+        assert!(
+            drag_note < tick_note,
+            "accumulated drag rings lower: {drag_note} vs {tick_note}"
+        );
+    }
+
+    #[test]
+    fn corner_touch_rings_a_stroke_once() {
+        let mut s = chime_sim();
+        // Two colinear stroke segments sharing the endpoint (400, 300);
+        // a particle striking the joint contacts both segments.
+        assert!(s.add_wall_segment(400.0, 250.0, 400.0, 300.0));
+        assert!(s.extend_last_wall_stroke(400.0, 300.0, 400.0, 350.0));
+        s.particles[0].x = 380.0;
+        s.particles[0].y = 300.0;
+        s.particles[0].vx = 300.0;
+
+        let now = Instant::now();
+        let mut chimes = Vec::new();
+        for _ in 0..100 {
+            chimes.extend(s.step(0.01, now, None).wall_hits);
+            if !chimes.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(chimes.len(), 1, "one stroke, one note: {chimes:?}");
+    }
+
+    #[test]
+    fn chimes_default_off_and_events_stay_empty() {
+        let mut s = sim(&["--min-particles", "2"]);
+        assert!(!s.wall_chimes);
+        freeze(&mut s);
+        s.particles[1].x = 700.0;
+        s.particles[1].y = 500.0;
+        s.particles[0].x = 300.0;
+        s.particles[0].y = 300.0;
+        s.particles[0].vx = 200.0;
+        assert!(s.add_wall_segment(400.0, 250.0, 400.0, 350.0));
+        let now = Instant::now();
+        for _ in 0..100 {
+            assert!(s.step(0.01, now, None).wall_hits.is_empty());
+        }
+    }
+
+    #[test]
+    fn chime_cooldown_suppresses_machine_gunning() {
+        let mut s = chime_sim();
+        assert!(s.add_wall_segment(400.0, 250.0, 400.0, 350.0));
+        let mut now = Instant::now();
+        let mut rings = 0;
+        // Re-arm the same particle against the wall every 10 ms of
+        // advancing clock; the 120 ms cooldown must throttle the rattle.
+        for _ in 0..25 {
+            s.particles[0].x = 399.0;
+            s.particles[0].y = 300.0;
+            s.particles[0].vx = 300.0;
+            s.particles[0].vy = 0.0;
+            rings += s.step(0.01, now, None).wall_hits.len();
+            now += Duration::from_millis(10);
+        }
+        assert!(rings >= 2, "cooldown expiry re-rings: {rings}");
+        assert!(
+            rings <= 4,
+            "0.25 s of contact rings at most ~1/120ms: {rings}"
+        );
+    }
+
+    #[test]
+    fn chime_voices_cap_at_eight_loudest() {
+        let mut s = sim(&["--wall-chimes", "--min-particles", "12"]);
+        freeze(&mut s);
+        // A floor wall; twelve particles dropped onto it at distinct
+        // speeds, hardest hitters at the highest index.
+        assert!(s.add_wall_segment(100.0, 400.0, 700.0, 400.0));
+        for (i, p) in s.particles.iter_mut().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let i_f = i as f64;
+            p.x = 150.0 + i_f * 40.0;
+            p.y = 399.0;
+            p.vx = 0.0;
+            p.vy = 100.0 + i_f * 20.0;
+        }
+        let events = s.step(0.01, Instant::now(), None);
+        assert_eq!(events.wall_hits.len(), 8, "cap at eight voices");
+        assert!(
+            events
+                .wall_hits
+                .iter()
+                .all(|c| c.energy >= 100.0 + 4.0 * 20.0 - 1e-6),
+            "the loudest survive: {:?}",
+            events.wall_hits
+        );
+    }
+
+    #[test]
+    fn scene_note_override_beats_length() {
+        let mut s = chime_sim();
+        // A screen-spanning wall would sound the root by length...
+        assert!(s.add_wall_segment(0.0, 300.0, 800.0, 300.0));
+        let meta = s.wall_meta()[0];
+        assert_eq!(s.stroke_note(meta.stroke, None), 0, "length says root");
+        // ...but an explicit scene note wins.
+        assert_eq!(s.stroke_note(meta.stroke, Some(9)), 9);
+        // And place_scene carries the note into the metadata.
+        let mut cfg = config(&["--wall-chimes", "--min-particles", "2"]);
+        cfg.scene.walls.push(crate::presets::SceneWall {
+            x1: 0.1,
+            y1: 0.5,
+            x2: 0.9,
+            y2: 0.5,
+            note: Some(7),
+        });
+        let s2 = Simulation::new(&cfg, 800, 600);
+        assert_eq!(s2.wall_meta()[0].note, Some(7));
+    }
+
+    #[test]
+    fn clearing_walls_resets_stroke_metadata() {
+        let mut s = chime_sim();
+        assert!(s.add_wall_segment(400.0, 250.0, 400.0, 350.0));
+        assert!(s.extend_last_wall_stroke(400.0, 350.0, 450.0, 350.0));
+        assert_eq!(s.wall_meta().len(), s.wall_segments().len());
+        s.chime_cooldowns.insert((1, 1), Instant::now());
+        assert_eq!(s.clear_wall_segments(), 2);
+        assert!(s.wall_meta().is_empty());
+        assert!(s.chime_cooldowns.is_empty(), "stale throttles cleared");
+        assert!(s.add_wall_segment(100.0, 100.0, 200.0, 100.0));
+        assert_eq!(s.wall_meta().len(), s.wall_segments().len());
+        // Reset keeps the alignment invariant too.
+        s.reset();
+        assert_eq!(s.wall_meta().len(), s.wall_segments().len());
+    }
+
+    #[test]
+    fn export_notes_freeze_multi_segment_strokes_only() {
+        let mut s = chime_sim();
+        assert!(s.add_wall_segment(100.0, 100.0, 300.0, 100.0));
+        assert!(s.add_wall_segment(200.0, 400.0, 212.0, 400.0));
+        assert!(s.extend_last_wall_stroke(212.0, 400.0, 224.0, 400.0));
+        let notes = s.wall_export_notes();
+        assert_eq!(notes.len(), 3);
+        assert_eq!(notes[0], None, "a lone segment round-trips by length");
+        assert!(notes[1].is_some(), "a drag stroke freezes its note");
+        assert_eq!(notes[1], notes[2], "both pieces carry the stroke note");
+        let meta = s.wall_meta()[1];
+        assert_eq!(
+            usize::from(notes[1].unwrap()),
+            s.stroke_note(meta.stroke, None),
+            "the frozen note is the stroke's effective pitch"
+        );
+    }
+
+    #[test]
+    fn chime_events_are_deterministic() {
+        let base = Instant::now();
+        let run = || {
+            let mut s = sim(&["--wall-chimes", "--seed", "42", "--min-particles", "8"]);
+            assert!(s.add_wall_segment(400.0, 100.0, 400.0, 500.0));
+            assert!(s.add_wall_segment(100.0, 450.0, 700.0, 450.0));
+            let mut now = base;
+            let mut all = Vec::new();
+            for _ in 0..120 {
+                all.extend(s.step(0.01, now, None).wall_hits);
+                now += Duration::from_millis(10);
+            }
+            all
+        };
+        let a = run();
+        let b = run();
+        assert!(!a.is_empty(), "the seeded field must actually chime");
+        assert_eq!(a, b, "identical runs, identical chimes");
     }
 }

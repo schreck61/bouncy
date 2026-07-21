@@ -147,6 +147,11 @@ pub struct Config {
     #[arg(long)]
     pub music: bool,
 
+    /// Walls play pentatonic notes when particles strike them — longer
+    /// wall, lower note, like a marimba bar (toggle at runtime with I)
+    #[arg(long)]
+    pub wall_chimes: bool,
+
     /// Mirror the frame 4-fold around the screen center (toggle at runtime
     /// with K)
     #[arg(long)]
@@ -231,6 +236,9 @@ impl Config {
         }
         if self.music {
             println!("Musical pings: pentatonic scale");
+        }
+        if self.wall_chimes {
+            println!("Wall chimes: length picks the note");
         }
         if self.kaleidoscope {
             println!("Kaleidoscope: enabled");
@@ -413,6 +421,7 @@ pub const CONTROLS: &[(&str, &str)] = &[
     ("F", "Toggle the flow field"),
     ("A", "Toggle self-gravity (mass attracts mass)"),
     ("S", "Toggle musical pings (pentatonic scale)"),
+    ("I", "Toggle wall chimes (walls play notes on impact)"),
     ("K", "Toggle kaleidoscope rendering"),
     ("G (hold)", "Gravity well at the cursor; Shift+G repels"),
     ("W", "Pin a persistent well at the cursor; Shift+W repels"),
@@ -590,6 +599,12 @@ mod tests {
     fn music_and_kaleidoscope_flags_parse() {
         assert!(parse(&["--music"]).unwrap().music);
         assert!(parse(&["--kaleidoscope"]).unwrap().kaleidoscope);
+    }
+
+    #[test]
+    fn wall_chimes_flag_parses() {
+        assert!(parse(&["--wall-chimes"]).unwrap().wall_chimes);
+        assert!(!parse(&[]).unwrap().wall_chimes, "default off");
     }
 
     #[test]

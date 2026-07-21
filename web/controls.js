@@ -165,6 +165,7 @@ function bind(handle) {
   $("tg-trails").onchange = () => handle.toggle_trails();
   $("tg-kaleido").onchange = () => handle.toggle_kaleidoscope();
   $("tg-music").onchange = (e) => handle.set_music(e.target.checked);
+  $("tg-chimes").onchange = () => handle.toggle_wall_chimes();
 
   // First click creates the WebAudio engine (must happen synchronously
   // inside the gesture, per autoplay policy) and unmutes; afterwards the
@@ -300,6 +301,7 @@ function shareUrl() {
     ["trails", s.trails, init.trails],
     ["kaleidoscope", s.kaleidoscope, init.kaleidoscope],
     ["music", s.music, init.music],
+    ["wall-chimes", s.wall_chimes, init.wall_chimes],
     ["mute", s.muted, init.muted],
   ];
   for (const [key, now, was] of flags) {
@@ -360,6 +362,7 @@ function reflect(s) {
   $("tg-trails").checked = s.trails;
   $("tg-kaleido").checked = s.kaleidoscope;
   $("tg-music").checked = s.music;
+  $("tg-chimes").checked = s.wall_chimes;
   $("btn-sound").textContent = !s.audio_ready
     ? "Enable sound"
     : s.muted ? "Muted — unmute" : "Sound on — mute";

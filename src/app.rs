@@ -15,6 +15,7 @@ use crate::render::{
 use crate::sim::{MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, Simulation, Well};
 use crate::text::{draw_text, draw_text_centered, measure_text};
 use clap::ValueEnum;
+use std::collections::HashMap;
 use std::rc::Rc;
 // std::time::Instant on native; performance.now() on wasm.
 use web_time::Instant;
@@ -117,6 +118,7 @@ pub enum Command {
     ToggleFlow,
     ToggleSelfGravity,
     ToggleKaleidoscope,
+    ToggleWallChimes,
     /// Step gravity by a signed percentage amount.
     AdjustGravity(i32),
     AdjustParticleElasticity(f64),
@@ -189,6 +191,7 @@ struct SessionDeltas {
     matter: Option<bool>,
     flow: Option<bool>,
     self_gravity: Option<bool>,
+    wall_chimes: Option<bool>,
     trails: Option<bool>,
     kaleidoscope: Option<bool>,
     music: Option<bool>,
@@ -367,6 +370,12 @@ pub struct App {
     held_well: Option<Polarity>,
     /// Wall drawing (V held): where the next segment starts, if active.
     wall_anchor: Option<(f64, f64)>,
+    /// Whether the current V-drag has landed its first segment; later
+    /// segments extend the same stroke so the polyline chimes as one bar.
+    wall_stroke_open: bool,
+    /// Chime flash intensity per stroke id, decayed each frame;
+    /// presentational state, so it lives here and not in the sim.
+    wall_flash: HashMap<u32, f32>,
     shift_down: bool,
     time_scale: f64,
     bullet_time: BulletTime,
@@ -415,6 +424,8 @@ impl App {
             hud_mode: HudMode::Hidden,
             held_well: None,
             wall_anchor: None,
+            wall_stroke_open: false,
+            wall_flash: HashMap::new(),
             shift_down: false,
             time_scale: 1.0,
             cursor: CursorState::new(),
@@ -499,6 +510,20 @@ impl App {
             self.audio
                 .play_ping(events.max_collision_energy, events.collision_pan as f32);
         }
+        for chime in &events.wall_hits {
+            #[allow(clippy::cast_possible_truncation)]
+            self.audio
+                .play_note(chime.note, chime.energy, chime.pan as f32);
+            self.wall_flash.insert(chime.stroke, 1.0);
+        }
+        // Decay hit flashes over ~250 ms of simulated time (paused frames
+        // take no steps, so flashes hold — the frame is frozen anyway).
+        #[allow(clippy::cast_possible_truncation)]
+        let decay = (-dt * 12.0).exp() as f32;
+        self.wall_flash.retain(|_, v| {
+            *v *= decay;
+            *v > 0.02
+        });
         if events.explosion_started {
             self.audio.play_explosion();
             self.bullet_time.trigger(now);
@@ -545,8 +570,9 @@ impl App {
                 sim.wall_segments().len()
             ),
             format!(
-                "Music: {}  (S)   Kaleidoscope: {}  (K)",
+                "Music: {}  (S)   Chimes: {}  (I)   Kaleidoscope: {}  (K)",
                 if self.audio.is_music() { "on" } else { "off" },
+                if sim.wall_chimes { "on" } else { "off" },
                 if self.kaleidoscope { "on" } else { "off" },
             ),
         ]);
@@ -620,6 +646,13 @@ impl App {
         let trails = self.trails;
         let color_mode = self.color_mode;
         let kaleidoscope = self.kaleidoscope;
+        // Per-segment chime-flash intensities: each segment glows with its
+        // stroke's current flash level.
+        let wall_flash: Vec<f32> = sim
+            .wall_meta()
+            .iter()
+            .map(|m| self.wall_flash.get(&m.stroke).copied().unwrap_or(0.0))
+            .collect();
         let stopped = sim.stopped();
         let paused = self.paused;
         let capture = self.screenshot_requested;
@@ -636,7 +669,7 @@ impl App {
                 render_explosion(frame, exp, width, height);
             }
             render_wells(frame, sim.pinned_wells(), width, height);
-            render_segments(frame, sim.wall_segments(), width, height);
+            render_segments(frame, sim.wall_segments(), &wall_flash, width, height);
             render_particles(
                 frame,
                 sim.particles(),
@@ -997,6 +1030,7 @@ impl App {
             matter: (sim.matter != cfg.matter).then_some(sim.matter),
             flow: (sim.flow != cfg.flow).then_some(sim.flow),
             self_gravity: (sim.self_gravity != cfg.self_gravity).then_some(sim.self_gravity),
+            wall_chimes: (sim.wall_chimes != cfg.wall_chimes).then_some(sim.wall_chimes),
             trails: (self.trails != cfg.trails).then_some(self.trails),
             kaleidoscope: (self.kaleidoscope != cfg.kaleidoscope).then_some(self.kaleidoscope),
             music: (self.audio.is_music() != cfg.music).then_some(self.audio.is_music()),
@@ -1032,6 +1066,9 @@ impl App {
             }
             if let Some(v) = deltas.self_gravity {
                 sim.self_gravity = v;
+            }
+            if let Some(v) = deltas.wall_chimes {
+                sim.wall_chimes = v;
             }
         }
         if let Some(v) = deltas.color_mode {
@@ -1081,6 +1118,7 @@ impl App {
             trails: self.trails,
             kaleidoscope: self.kaleidoscope,
             music: self.audio.is_music(),
+            wall_chimes: sim.wall_chimes,
             muted: self.audio.is_muted(),
             spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
             color_mode: value_name(self.color_mode.to_possible_value()),
@@ -1121,6 +1159,7 @@ impl App {
             self_gravity: sim.self_gravity,
             trails: self.trails,
             kaleidoscope: self.kaleidoscope,
+            wall_chimes: sim.wall_chimes,
             wells: sim.pinned_wells().len(),
             walls: sim.wall_segments().len(),
             width: sim.dimensions().0,
@@ -1178,6 +1217,7 @@ impl App {
                 } else {
                     // Start drawing: segments are added as the cursor moves.
                     self.wall_anchor = Some((self.cursor.x, self.cursor.y));
+                    self.wall_stroke_open = false;
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -1201,6 +1241,7 @@ impl App {
             KeyCode::KeyE if !repeat => self.apply(Command::ExportScene),
             KeyCode::KeyJ if !repeat => self.apply(Command::LaunchComet),
             KeyCode::KeyS if !repeat => self.apply(Command::ToggleMusic),
+            KeyCode::KeyI if !repeat => self.apply(Command::ToggleWallChimes),
             KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
             KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
             KeyCode::ArrowUp => self.apply(Command::AdjustGravity(GRAVITY_STEP)),
@@ -1289,6 +1330,10 @@ impl App {
             Command::CycleSpawnMode => self.with_sim(|sim| {
                 sim.spawn_mode = sim.spawn_mode.next();
                 println!("Spawn mode: {}", sim.spawn_mode.label());
+            }),
+            Command::ToggleWallChimes => self.with_sim(|sim| {
+                sim.wall_chimes = !sim.wall_chimes;
+                println!("Wall chimes {}", if sim.wall_chimes { "on" } else { "off" });
             }),
             Command::ToggleMatter => self.with_sim(|sim| {
                 sim.matter = !sim.matter;
@@ -1393,8 +1438,16 @@ impl App {
         let Some(ref mut sim) = self.sim else {
             return;
         };
-        if sim.add_wall_segment(ax, ay, self.cursor.x, self.cursor.y) {
+        // The drag's first segment opens a stroke; the rest extend it, so
+        // the whole polyline sounds (and flashes) as one instrument bar.
+        let added = if self.wall_stroke_open {
+            sim.extend_last_wall_stroke(ax, ay, self.cursor.x, self.cursor.y)
+        } else {
+            sim.add_wall_segment(ax, ay, self.cursor.x, self.cursor.y)
+        };
+        if added {
             self.wall_anchor = Some((self.cursor.x, self.cursor.y));
+            self.wall_stroke_open = true;
         } else {
             // Stop the stroke at the cap instead of retrying every motion.
             println!("Wall segment limit reached ({MAX_WALL_SEGMENTS})");
@@ -1435,11 +1488,13 @@ impl App {
         let walls: Vec<SceneWall> = sim
             .wall_segments()
             .iter()
-            .map(|seg| SceneWall {
+            .zip(sim.wall_export_notes())
+            .map(|(seg, note)| SceneWall {
                 x1: frac(seg.x1, wf),
                 y1: frac(seg.y1, hf),
                 x2: frac(seg.x2, wf),
                 y2: frac(seg.y2, hf),
+                note,
             })
             .collect();
 
@@ -1473,6 +1528,7 @@ impl App {
             ("trails", self.trails),
             ("kaleidoscope", self.kaleidoscope),
             ("music", self.audio.is_music()),
+            ("wall-chimes", sim.wall_chimes),
             ("mute", self.audio.is_muted()),
             ("bullet-time", self.bullet_time.enabled),
         ] {
@@ -2169,6 +2225,12 @@ mod tests {
 
         app.apply(Command::ToggleFlow);
         assert!(app.sim.as_ref().unwrap().flow);
+
+        assert!(!app.sim.as_ref().unwrap().wall_chimes, "default off");
+        app.apply(Command::ToggleWallChimes);
+        assert!(app.sim.as_ref().unwrap().wall_chimes, "I arms the chimes");
+        app.apply(Command::ToggleWallChimes);
+        assert!(!app.sim.as_ref().unwrap().wall_chimes);
 
         let before = app.sim.as_ref().unwrap().particle_count();
         app.apply(Command::LaunchComet);

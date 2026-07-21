@@ -42,6 +42,7 @@ pub struct Snapshot {
     pub self_gravity: bool,
     pub trails: bool,
     pub kaleidoscope: bool,
+    pub wall_chimes: bool,
     pub wells: usize,
     pub walls: usize,
     pub width: u32,
@@ -181,6 +182,11 @@ impl WebHandle {
     /// Toggle the 4-fold kaleidoscope mirror (the K key).
     pub fn toggle_kaleidoscope(&self) {
         self.push(WebCommand::Plain(Command::ToggleKaleidoscope));
+    }
+
+    /// Toggle wall chimes — walls play notes on impact (the I key).
+    pub fn toggle_wall_chimes(&self) {
+        self.push(WebCommand::Plain(Command::ToggleWallChimes));
     }
 
     /// Cycle solid/velocity coloring (the C key).
