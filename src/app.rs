@@ -170,6 +170,31 @@ pub enum PanelCommand {
     },
 }
 
+/// Live settings that differed from the launched config when a panel
+/// relaunch was requested. None = the user never touched it, so the new
+/// launch's bundle decides; Some = the session's deliberate adjustment,
+/// re-asserted over the fresh simulation (the web share-link
+/// philosophy).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
+struct SessionDeltas {
+    gravity: Option<i32>,
+    particle_elasticity: Option<f64>,
+    wall_elasticity: Option<f64>,
+    explosion_threshold: Option<usize>,
+    spawn_mode: Option<crate::config::SpawnMode>,
+    color_mode: Option<ColorMode>,
+    matter: Option<bool>,
+    flow: Option<bool>,
+    self_gravity: Option<bool>,
+    trails: Option<bool>,
+    kaleidoscope: Option<bool>,
+    music: Option<bool>,
+    muted: Option<bool>,
+    time_scale: Option<f64>,
+}
+
 /// Canonical CLI value name of a `ValueEnum` variant — the same string
 /// the parser accepts, shared by scene export and the web snapshot.
 fn value_name(pv: Option<clap::builder::PossibleValue>) -> String {
@@ -868,6 +893,12 @@ impl App {
         let Some((width, height)) = self.sim.as_ref().map(Simulation::dimensions) else {
             return;
         };
+        // Session deltas: live values the user changed since launch
+        // override the new bundle, the web share-link philosophy —
+        // touched settings travel with you, untouched ones follow the
+        // preset. Captured against the launched config before it is
+        // replaced.
+        let deltas = self.session_deltas();
         let mut args: Vec<std::ffi::OsString> = vec!["bouncy".into()];
         if let Some(ref name) = preset {
             args.push("--preset".into());
@@ -896,9 +927,6 @@ impl App {
         if self.config.cpu {
             args.push("--cpu".into());
         }
-        if self.audio.is_muted() {
-            args.push("--mute".into());
-        }
         if self.config.verbose {
             args.push("--verbose".into());
         }
@@ -907,17 +935,17 @@ impl App {
             Ok(config) => {
                 self.config = config;
                 // Presentation state follows the new launch, exactly as a
-                // fresh process would set it.
+                // fresh process would set it...
                 self.trails = self.config.trails;
                 self.color_mode = self.config.color_mode;
                 self.kaleidoscope = self.config.kaleidoscope;
                 self.bullet_time.enabled = self.config.bullet_time;
-                if self.audio.is_music() != self.config.music {
-                    self.audio.toggle_music();
-                }
                 self.time_scale = 1.0;
                 self.paused = false;
                 self.sim = Some(Simulation::new(&self.config, width, height));
+                // ...and then the session's touched settings reassert
+                // themselves over the new bundle.
+                self.apply_session_deltas(&deltas);
                 println!(
                     "Relaunched: preset {}, particle size {particle_size}, initial speed {initial_speed}",
                     self.config.preset.as_deref().unwrap_or("(none)")
@@ -926,6 +954,88 @@ impl App {
             Err(e) => {
                 eprintln!("Relaunch failed; keeping the running simulation: {e}");
             }
+        }
+    }
+
+    /// Live settings that differ from the launched config: the session's
+    /// deliberate adjustments (None = untouched, follows the next launch).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::struct_excessive_bools)]
+    fn session_deltas(&self) -> SessionDeltas {
+        let Some(ref sim) = self.sim else {
+            return SessionDeltas::default();
+        };
+        let cfg = &self.config;
+        SessionDeltas {
+            gravity: (sim.gravity_percent != cfg.gravity).then_some(sim.gravity_percent),
+            particle_elasticity: ((sim.particle_elasticity - cfg.particle_elasticity).abs()
+                > f64::EPSILON)
+                .then_some(sim.particle_elasticity),
+            wall_elasticity: ((sim.wall_elasticity - cfg.wall_elasticity).abs() > f64::EPSILON)
+                .then_some(sim.wall_elasticity),
+            explosion_threshold: (sim.explosion_threshold != cfg.explosion_threshold)
+                .then_some(sim.explosion_threshold),
+            spawn_mode: (sim.spawn_mode != cfg.effective_spawn_mode()).then_some(sim.spawn_mode),
+            color_mode: (self.color_mode != cfg.color_mode).then_some(self.color_mode),
+            matter: (sim.matter != cfg.matter).then_some(sim.matter),
+            flow: (sim.flow != cfg.flow).then_some(sim.flow),
+            self_gravity: (sim.self_gravity != cfg.self_gravity).then_some(sim.self_gravity),
+            trails: (self.trails != cfg.trails).then_some(self.trails),
+            kaleidoscope: (self.kaleidoscope != cfg.kaleidoscope).then_some(self.kaleidoscope),
+            music: (self.audio.is_music() != cfg.music).then_some(self.audio.is_music()),
+            muted: (self.audio.is_muted() != cfg.mute).then_some(self.audio.is_muted()),
+            time_scale: ((self.time_scale - 1.0).abs() > f64::EPSILON).then_some(self.time_scale),
+        }
+    }
+
+    /// Re-assert the session's touched settings over a fresh launch.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_session_deltas(&mut self, deltas: &SessionDeltas) {
+        if let Some(ref mut sim) = self.sim {
+            if let Some(v) = deltas.gravity {
+                sim.gravity_percent = v;
+            }
+            if let Some(v) = deltas.particle_elasticity {
+                sim.particle_elasticity = v;
+            }
+            if let Some(v) = deltas.wall_elasticity {
+                sim.wall_elasticity = v;
+            }
+            if let Some(v) = deltas.explosion_threshold {
+                sim.explosion_threshold = v;
+            }
+            if let Some(v) = deltas.spawn_mode {
+                sim.spawn_mode = v;
+            }
+            if let Some(v) = deltas.matter {
+                sim.matter = v;
+            }
+            if let Some(v) = deltas.flow {
+                sim.flow = v;
+            }
+            if let Some(v) = deltas.self_gravity {
+                sim.self_gravity = v;
+            }
+        }
+        if let Some(v) = deltas.color_mode {
+            self.color_mode = v;
+        }
+        if let Some(v) = deltas.trails {
+            self.trails = v;
+        }
+        if let Some(v) = deltas.kaleidoscope {
+            self.kaleidoscope = v;
+        }
+        if let Some(v) = deltas.time_scale {
+            self.time_scale = v;
+        }
+        let music = deltas.music.unwrap_or(self.config.music);
+        if self.audio.is_music() != music {
+            self.audio.toggle_music();
+        }
+        let muted = deltas.muted.unwrap_or(self.config.mute);
+        if self.audio.is_muted() != muted {
+            self.audio.toggle_mute();
         }
     }
 
@@ -1870,6 +1980,34 @@ mod tests {
         );
         assert!(sim.particle_count() >= 12);
 
+        // Session-delta preservation: touched live settings survive a
+        // relaunch, untouched ones follow the new bundle.
+        {
+            let sim = app.sim.as_mut().unwrap();
+            sim.gravity_percent = 250; // touched (config says 0 now)
+            sim.matter = true; // touched
+        }
+        app.time_scale = 2.0; // touched (no config flag; baseline 1.0)
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: Some("billiards".to_string()),
+            particle_size: 2.0,
+            initial_speed: 300.0,
+            min_particles: None,
+        });
+        let sim = app.sim.as_ref().unwrap();
+        assert_eq!(sim.gravity_percent, 250, "touched gravity survives");
+        assert!(sim.matter, "touched matter survives");
+        assert!((app.time_scale - 2.0).abs() < 1e-9, "time scale survives");
+        assert_eq!(
+            sim.spawn_mode,
+            crate::config::SpawnMode::Off,
+            "untouched spawn mode follows the billiards bundle"
+        );
+        assert_eq!(
+            sim.explosion_threshold, 0,
+            "untouched threshold follows the bundle"
+        );
+
         // A bad configuration keeps the running simulation and config.
         app.apply_panel_command(PanelCommand::Relaunch {
             preset: Some("no-such-preset".to_string()),
@@ -1878,7 +2016,7 @@ mod tests {
             min_particles: None,
         });
         assert!(
-            (app.config.particle_size - 3.0).abs() < 1e-9,
+            (app.config.particle_size - 2.0).abs() < 1e-9,
             "failed relaunch leaves the old config in place"
         );
         assert!(app.sim.is_some());

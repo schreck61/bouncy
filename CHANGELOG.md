@@ -27,6 +27,9 @@ Notable changes to Bouncy, by release. Version numbers follow
   the simulation in place at the current window size — with full
   command-line preset resolution, so a panel relaunch and a CLI launch
   can never disagree. A bad configuration keeps the running simulation.
+  Live settings you adjusted during the session survive the relaunch —
+  touched values override the new bundle, untouched ones follow it —
+  matching the web share link's philosophy.
 - The panel also opens without the keyboard: dwelling at the window's
   right edge reveals a thin handle at mid-height — click it to slide
   the panel in or out, or grab and drag it to any position and let
