@@ -4,6 +4,20 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## 1.5.2 — 2026-07-21
+
+- Starting muted (`--mute`) no longer opens the audio output device at
+  all; unmuting opens it on first use, retrying if it was unavailable
+  earlier. Besides being the right behavior, this fixes an intermittent
+  test-process crash on the Windows CI runner, where parallel test
+  suites each grabbed a real output stream.
+- CI now verifies that `THIRD-PARTY-NOTICES.md` matches the dependency
+  tree on every push and pull request, and fails if a new dependency
+  arrives under a license outside the vetted allowlist.
+- The package is marked `publish = false`: Bouncy is an application,
+  and a crates.io package would bundle the OFL-licensed font beyond
+  the declared MIT license.
+
 ## 1.5.1 — 2026-07-20
 
 - Binary distributions now carry the license notices their contents
