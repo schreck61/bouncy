@@ -60,6 +60,24 @@ const TIME_POINTS: &[(f64, f64)] = &[(0.1, 0.0), (4.0, 1.0)];
 /// Same treatment as gravity: thresholds people actually set (0-100
 /// births/s) get most of the track.
 const THRESHOLD_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 0.6), (1000.0, 1.0)];
+/// Launch-option sliders (draft values; applied by Apply & relaunch).
+const SIZE_POINTS: &[(f64, f64)] = &[(0.5, 0.0), (10.0, 1.0)];
+/// Everyday speeds (up to 1000) get most of the track.
+const SPEED_POINTS: &[(f64, f64)] = &[(10.0, 0.0), (1000.0, 0.75), (2000.0, 1.0)];
+/// 0 means "auto" (sized from the window), drawn as such.
+const MIN_PARTICLES_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 1.0)];
+/// Built-in presets the launch section cycles through; index 0 is none.
+/// A test pins every non-none name to a real built-in.
+const PRESET_NAMES: &[&str] = &[
+    "none",
+    "fireworks",
+    "blob",
+    "billiards",
+    "peace",
+    "orbits",
+    "mandala",
+    "accretion",
+];
 
 /// Identity of a value slider.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -69,6 +87,9 @@ pub enum SliderId {
     WallElasticity,
     TimeScale,
     ExplosionThreshold,
+    LaunchSize,
+    LaunchSpeed,
+    LaunchMinParticles,
 }
 
 /// Identity of an on/off row.
@@ -100,6 +121,8 @@ pub enum ButtonId {
     ClearWells,
     ClearWalls,
     ExportScene,
+    CyclePreset,
+    Relaunch,
 }
 
 /// Everything the panel shows or edits, snapshotted once per frame by
@@ -127,6 +150,12 @@ pub struct PanelState {
     pub spawn_mode: String,
     pub color_mode: String,
     pub hud: String,
+    /// Construction-time values from the current config, used once to
+    /// seed the launch draft.
+    pub launch_particle_size: f64,
+    pub launch_initial_speed: f64,
+    pub launch_min_particles: Option<u32>,
+    pub launch_preset: String,
 }
 
 /// An axis-aligned rectangle in frame coordinates.
@@ -180,6 +209,29 @@ struct Laid {
     row: Rect,
 }
 
+/// Pending launch options: edited by the launch sliders, applied only
+/// by the Apply & relaunch button (they are construction-time values,
+/// not live ones).
+#[derive(Clone, Debug)]
+pub struct LaunchDraft {
+    pub preset_idx: usize,
+    pub particle_size: f64,
+    pub initial_speed: f64,
+    /// 0 = auto (sized from the window).
+    pub min_particles: f64,
+}
+
+impl Default for LaunchDraft {
+    fn default() -> Self {
+        LaunchDraft {
+            preset_idx: 0,
+            particle_size: 1.5,
+            initial_speed: 600.0,
+            min_particles: 0.0,
+        }
+    }
+}
+
 /// Pointer and wheel input accumulated from window events since the
 /// last tick. Edges (pressed/released) are consumed by the tick.
 #[derive(Default)]
@@ -218,6 +270,9 @@ pub struct Gui {
     /// arena click places it (web-panel semantics; a second press or
     /// Esc cancels).
     armed: Option<ButtonId>,
+    /// Pending launch options; seeded from the config on first tick.
+    launch: LaunchDraft,
+    launch_seeded: bool,
 }
 
 impl Default for Gui {
@@ -238,6 +293,8 @@ impl Default for Gui {
             handle_grab_x: 0.0,
             handle_moved: false,
             armed: None,
+            launch: LaunchDraft::default(),
+            launch_seeded: false,
         }
     }
 }
@@ -269,6 +326,19 @@ impl Gui {
     /// Cancel the armed placement tool (Esc, or the app's discretion).
     pub fn disarm(&mut self) {
         self.armed = None;
+    }
+
+    /// The relaunch command carrying the current draft.
+    fn relaunch_command(&self) -> PanelCommand {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        PanelCommand::Relaunch {
+            preset: (self.launch.preset_idx > 0)
+                .then(|| PRESET_NAMES[self.launch.preset_idx].to_string()),
+            particle_size: self.launch.particle_size,
+            initial_speed: self.launch.initial_speed,
+            min_particles: (self.launch.min_particles >= 1.5)
+                .then(|| (self.launch.min_particles.round() as u32).max(2)),
+        }
     }
 
     /// Consume the armed tool with an arena click at `(x, y)`: returns
@@ -429,7 +499,19 @@ impl Gui {
             return commands;
         }
 
-        let (layout, content_height) = layout(state, self.panel_x(width), self.scroll);
+        if !self.launch_seeded {
+            self.launch_seeded = true;
+            self.launch.particle_size = state.launch_particle_size;
+            self.launch.initial_speed = state.launch_initial_speed;
+            self.launch.min_particles = state.launch_min_particles.map_or(0.0, f64::from);
+            self.launch.preset_idx = PRESET_NAMES
+                .iter()
+                .position(|n| *n == state.launch_preset)
+                .unwrap_or(0);
+        }
+
+        let (layout, content_height) =
+            layout(state, &self.launch, self.panel_x(width), self.scroll);
         self.content_height = content_height;
         let (cx, cy) = self.cursor;
 
@@ -482,8 +564,21 @@ impl Gui {
                     }
                     let raw = slider_value_at(cx, track, points);
                     let snapped = snap_to_detents(raw, detents, points, shift);
-                    if (snapped - value).abs() > 1e-9 {
-                        commands.push(slider_command(drag, snapped));
+                    match drag {
+                        SliderId::LaunchSize => {
+                            self.launch.particle_size = (snapped * 2.0).round() / 2.0;
+                        }
+                        SliderId::LaunchSpeed => {
+                            self.launch.initial_speed = (snapped / 10.0).round() * 10.0;
+                        }
+                        SliderId::LaunchMinParticles => {
+                            self.launch.min_particles = snapped.round();
+                        }
+                        _ => {
+                            if (snapped - value).abs() > 1e-9 {
+                                commands.push(slider_command(drag, snapped));
+                            }
+                        }
                     }
                 }
             }
@@ -506,6 +601,10 @@ impl Gui {
                         } else {
                             Some(pressed)
                         };
+                    } else if pressed == ButtonId::CyclePreset {
+                        self.launch.preset_idx = (self.launch.preset_idx + 1) % PRESET_NAMES.len();
+                    } else if pressed == ButtonId::Relaunch {
+                        commands.push(self.relaunch_command());
                     } else {
                         commands.push(button_command(pressed, state));
                     }
@@ -579,7 +678,7 @@ impl Gui {
             [70, 80, 95, 255],
         );
 
-        let (layout, _) = layout(state, x0, self.scroll);
+        let (layout, _) = layout(state, &self.launch, x0, self.scroll);
         for laid in &layout {
             let hovered = self
                 .hover
@@ -798,7 +897,7 @@ impl Rect {
 /// rectangle, plus the total content height (for scroll clamping). A free
 /// function of (state, panel edge, scroll) so interaction and drawing can
 /// never disagree about where things are.
-fn layout(state: &PanelState, panel_x: f64, scroll: f64) -> (Vec<Laid>, f64) {
+fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) -> (Vec<Laid>, f64) {
     let x = panel_x + PAD;
     let w = PANEL_WIDTH - 2.0 * PAD;
     let mut y = PAD - scroll;
@@ -1043,6 +1142,65 @@ fn layout(state: &PanelState, panel_x: f64, scroll: f64) -> (Vec<Laid>, f64) {
         &mut y,
     );
 
+    push_item(&mut out, x, w, Item::Header("launch"), 24.0, &mut y);
+    button_row(
+        &mut out,
+        &[(
+            ButtonId::CyclePreset,
+            &format!("Preset: {}", PRESET_NAMES[draft.preset_idx]),
+        )],
+        x,
+        w,
+        &mut y,
+    );
+    push_slider(
+        &mut out,
+        x,
+        w,
+        SliderId::LaunchSize,
+        "Particle size",
+        SIZE_POINTS,
+        draft.particle_size,
+        &[1.5],
+        format!("{:.1}", draft.particle_size),
+        &mut y,
+    );
+    push_slider(
+        &mut out,
+        x,
+        w,
+        SliderId::LaunchSpeed,
+        "Initial speed",
+        SPEED_POINTS,
+        draft.initial_speed,
+        &[600.0],
+        format!("{:.0}", draft.initial_speed),
+        &mut y,
+    );
+    push_slider(
+        &mut out,
+        x,
+        w,
+        SliderId::LaunchMinParticles,
+        "Min particles",
+        MIN_PARTICLES_POINTS,
+        draft.min_particles,
+        &[0.0],
+        if draft.min_particles < 1.5 {
+            "auto".to_string()
+        } else {
+            format!("{:.0}", draft.min_particles)
+        },
+        &mut y,
+    );
+    button_row(
+        &mut out,
+        &[(ButtonId::Relaunch, "Apply & relaunch")],
+        x,
+        w,
+        &mut y,
+    );
+
     let content_height = y + scroll + PAD;
     (out, content_height)
 }
@@ -1241,6 +1399,9 @@ fn slider_command(id: SliderId, value: f64) -> PanelCommand {
         SliderId::ExplosionThreshold => {
             PanelCommand::SetExplosionThreshold((value / 5.0).round() as i32 * 5)
         }
+        SliderId::LaunchSize | SliderId::LaunchSpeed | SliderId::LaunchMinParticles => {
+            unreachable!("launch sliders edit the draft; Apply & relaunch emits")
+        }
     }
 }
 
@@ -1284,8 +1445,10 @@ fn button_command(id: ButtonId, state: &PanelState) -> PanelCommand {
         | ButtonId::Comet
         | ButtonId::Explode
         | ButtonId::PinWell
-        | ButtonId::PinRepeller => {
-            unreachable!("placement buttons arm a tool; the arena click emits")
+        | ButtonId::PinRepeller
+        | ButtonId::CyclePreset
+        | ButtonId::Relaunch => {
+            unreachable!("handled draft-side before dispatch")
         }
     }
 }
@@ -1460,13 +1623,15 @@ mod tests {
             spawn_mode: "center".into(),
             color_mode: "solid".into(),
             hud: "hidden".into(),
+            launch_particle_size: 1.5,
+            launch_initial_speed: 600.0,
             ..PanelState::default()
         }
     }
 
     /// The rect of a control, straight from the layout.
     fn find_slider_track(s: &PanelState, id: SliderId) -> Rect {
-        layout(s, 800.0 - PANEL_WIDTH, 0.0)
+        layout(s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0)
             .0
             .iter()
             .find_map(|laid| match &laid.item {
@@ -1508,7 +1673,7 @@ mod tests {
         s.self_gravity = true;
         s.explosion_threshold = 30;
         // Hover the reset button so the hover style shows.
-        let (layout, _) = layout(&s, 800.0 - PANEL_WIDTH, 0.0);
+        let (layout, _) = layout(&s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0);
         let reset = layout
             .iter()
             .find_map(|laid| match &laid.item {
@@ -1519,6 +1684,10 @@ mod tests {
         gui.set_cursor(reset.x + 4.0, reset.y + 4.0);
         gui.handle_alpha = 1.0;
         let _ = gui.tick(0.016, &s, w, h, false, 0.0);
+        // Show the bottom of the panel (the launch section) when asked.
+        if std::env::var("PANEL_PREVIEW_BOTTOM").is_ok() {
+            gui.scroll = (gui.content_height - f64::from(h)).max(0.0);
+        }
         gui.draw(&mut frame, &s, w, h);
 
         let path = std::path::Path::new("target/panel-preview.png");
@@ -1588,7 +1757,7 @@ mod tests {
     fn placement_buttons_arm_place_and_cancel() {
         let mut gui = open_gui();
         let s = state();
-        let hit = layout(&s, 800.0 - PANEL_WIDTH, 0.0)
+        let hit = layout(&s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0)
             .0
             .iter()
             .find_map(|laid| match &laid.item {
@@ -1641,6 +1810,66 @@ mod tests {
             "placed on ground the panel had covered"
         );
         assert!(!gui.is_armed());
+    }
+
+    #[test]
+    fn launch_sliders_edit_the_draft_and_relaunch_emits_it() {
+        let mut gui = open_gui();
+        let s = state();
+        gui.tick(0.016, &s, 800, 600, false, 0.0);
+        assert!((gui.launch.particle_size - 1.5).abs() < 1e-9, "seeded");
+
+        // Drag the size slider to its right end: the draft changes,
+        // nothing is emitted.
+        let track = find_slider_track(&s, SliderId::LaunchSize);
+        gui.set_cursor(track.x + track.w - 1.0, track.y + 2.0);
+        gui.input.pressed = true;
+        let cmds = gui.tick(0.016, &s, 800, 600, false, 0.0);
+        assert!(cmds.is_empty(), "draft sliders emit nothing");
+        assert!((gui.launch.particle_size - 10.0).abs() < 1e-9);
+        gui.input.released = true;
+        gui.tick(0.016, &s, 800, 600, false, 0.0);
+
+        // Cycle the preset once, then apply: the command carries the
+        // draft.
+        let click_button = |gui: &mut Gui, s: &PanelState, id: ButtonId| {
+            let hit = layout(s, &gui.launch, 800.0 - PANEL_WIDTH, 0.0)
+                .0
+                .iter()
+                .find_map(|laid| match &laid.item {
+                    Item::Button { id: bid, hit, .. } if *bid == id => Some(*hit),
+                    _ => None,
+                })
+                .expect("button in layout");
+            gui.set_cursor(hit.x + 2.0, hit.y + 2.0);
+            gui.input.pressed = true;
+            gui.tick(0.016, s, 800, 600, false, 0.0);
+            gui.input.released = true;
+            gui.tick(0.016, s, 800, 600, false, 0.0)
+        };
+        click_button(&mut gui, &s, ButtonId::CyclePreset);
+        assert_eq!(PRESET_NAMES[gui.launch.preset_idx], "fireworks");
+        let cmds = click_button(&mut gui, &s, ButtonId::Relaunch);
+        assert!(
+            cmds.iter().any(|c| matches!(c, PanelCommand::Relaunch {
+                preset: Some(p),
+                particle_size,
+                min_particles: None,
+                ..
+            } if p == "fireworks" && (particle_size - 10.0).abs() < 1e-9)),
+            "relaunch carries the draft"
+        );
+    }
+
+    #[test]
+    fn preset_cycle_names_are_real_builtins() {
+        use clap::ValueEnum;
+        for name in &PRESET_NAMES[1..] {
+            assert!(
+                crate::presets::Preset::from_str(name, true).is_ok(),
+                "panel preset '{name}' is not a built-in"
+            );
+        }
     }
 
     #[test]
@@ -1739,7 +1968,7 @@ mod tests {
     fn toggle_press_emits_its_command() {
         let mut gui = open_gui();
         let s = state();
-        let row = layout(&s, 800.0 - PANEL_WIDTH, 0.0)
+        let row = layout(&s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0)
             .0
             .iter()
             .find_map(|laid| match &laid.item {
@@ -1761,7 +1990,7 @@ mod tests {
     fn buttons_fire_on_release_over_the_button() {
         let mut gui = open_gui();
         let s = state();
-        let row = layout(&s, 800.0 - PANEL_WIDTH, 0.0)
+        let row = layout(&s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0)
             .0
             .iter()
             .find_map(|laid| match &laid.item {

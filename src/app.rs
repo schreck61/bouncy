@@ -160,6 +160,14 @@ pub enum PanelCommand {
     SetMuted(bool),
     /// Absolute musical-mode state.
     SetMusic(bool),
+    /// Rebuild the simulation with new construction-time options (the
+    /// native panel's launch section; the web demo restarts via URL).
+    Relaunch {
+        preset: Option<String>,
+        particle_size: f64,
+        initial_speed: f64,
+        min_particles: Option<u32>,
+    },
 }
 
 /// Canonical CLI value name of a `ValueEnum` variant — the same string
@@ -826,6 +834,98 @@ impl App {
                     self.audio.toggle_music();
                 }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            PanelCommand::Relaunch {
+                preset,
+                particle_size,
+                initial_speed,
+                min_particles,
+            } => {
+                self.relaunch(preset, particle_size, initial_speed, min_particles);
+            }
+            // The web demo relaunches by navigating to a new URL; the
+            // command never arrives from the HTML panel.
+            #[cfg(target_arch = "wasm32")]
+            PanelCommand::Relaunch { .. } => {}
+        }
+    }
+
+    /// Rebuild the simulation with new construction-time options, at the
+    /// current arena size. Runs the same preset resolution as the command
+    /// line (explicit values override the preset bundle, user presets
+    /// load from the configured file), so a panel relaunch and a CLI
+    /// launch can never disagree. On a bad configuration the old
+    /// simulation keeps running.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::needless_pass_by_value)]
+    fn relaunch(
+        &mut self,
+        preset: Option<String>,
+        particle_size: f64,
+        initial_speed: f64,
+        min_particles: Option<u32>,
+    ) {
+        let Some((width, height)) = self.sim.as_ref().map(Simulation::dimensions) else {
+            return;
+        };
+        let mut args: Vec<std::ffi::OsString> = vec!["bouncy".into()];
+        if let Some(ref name) = preset {
+            args.push("--preset".into());
+            args.push(name.into());
+        }
+        if let Some(ref path) = self.config.presets_file {
+            args.push("--presets-file".into());
+            args.push(path.into());
+        }
+        args.push("--particle-size".into());
+        args.push(format!("{particle_size}").into());
+        args.push("--initial-speed".into());
+        args.push(format!("{initial_speed}").into());
+        if let Some(min) = min_particles {
+            args.push("--min-particles".into());
+            args.push(format!("{min}").into());
+        }
+        // Carry the launch context that describes this process, not the
+        // scene: window geometry, backend, audio, verbosity.
+        if let (Some(w), Some(h)) = (self.config.width, self.config.height) {
+            args.push("--width".into());
+            args.push(format!("{w}").into());
+            args.push("--height".into());
+            args.push(format!("{h}").into());
+        }
+        if self.config.cpu {
+            args.push("--cpu".into());
+        }
+        if self.audio.is_muted() {
+            args.push("--mute".into());
+        }
+        if self.config.verbose {
+            args.push("--verbose".into());
+        }
+
+        match Config::try_resolve_from(args) {
+            Ok(config) => {
+                self.config = config;
+                // Presentation state follows the new launch, exactly as a
+                // fresh process would set it.
+                self.trails = self.config.trails;
+                self.color_mode = self.config.color_mode;
+                self.kaleidoscope = self.config.kaleidoscope;
+                self.bullet_time.enabled = self.config.bullet_time;
+                if self.audio.is_music() != self.config.music {
+                    self.audio.toggle_music();
+                }
+                self.time_scale = 1.0;
+                self.paused = false;
+                self.sim = Some(Simulation::new(&self.config, width, height));
+                println!(
+                    "Relaunched: preset {}, particle size {particle_size}, initial speed {initial_speed}",
+                    self.config.preset.as_deref().unwrap_or("(none)")
+                );
+            }
+            Err(e) => {
+                eprintln!("Relaunch failed; keeping the running simulation: {e}");
+            }
         }
     }
 
@@ -858,6 +958,10 @@ impl App {
             spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
             color_mode: value_name(self.color_mode.to_possible_value()),
             hud: self.hud_mode.label().to_string(),
+            launch_particle_size: self.config.particle_size,
+            launch_initial_speed: self.config.initial_speed,
+            launch_min_particles: self.config.min_particles,
+            launch_preset: self.config.preset.clone().unwrap_or_default(),
         }
     }
 
@@ -1741,6 +1845,43 @@ mod tests {
         let mut app = App::new(config.clone());
         app.sim = Some(Simulation::new(&config, 800, 600));
         app
+    }
+
+    #[test]
+    fn relaunch_rebuilds_the_simulation_with_new_options() {
+        let mut app = test_app();
+        let before = app.sim.as_ref().unwrap().dimensions();
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: Some("billiards".to_string()),
+            particle_size: 3.0,
+            initial_speed: 200.0,
+            min_particles: Some(12),
+        });
+        assert!((app.config.particle_size - 3.0).abs() < 1e-9);
+        assert!((app.config.initial_speed - 200.0).abs() < 1e-9);
+        assert_eq!(app.config.preset.as_deref(), Some("billiards"));
+        let sim = app.sim.as_ref().unwrap();
+        assert_eq!(sim.dimensions(), before, "arena size preserved");
+        assert!(
+            sim.particles()
+                .iter()
+                .all(|p| (p.radius - 3.0).abs() < 1e-9),
+            "explicit particle size overrides the preset bundle"
+        );
+        assert!(sim.particle_count() >= 12);
+
+        // A bad configuration keeps the running simulation and config.
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: Some("no-such-preset".to_string()),
+            particle_size: 1.0,
+            initial_speed: 600.0,
+            min_particles: None,
+        });
+        assert!(
+            (app.config.particle_size - 3.0).abs() < 1e-9,
+            "failed relaunch leaves the old config in place"
+        );
+        assert!(app.sim.is_some());
     }
 
     #[test]

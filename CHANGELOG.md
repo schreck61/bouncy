@@ -21,6 +21,12 @@ Notable changes to Bouncy, by release. Version numbers follow
   survives hiding the panel, so you can arm it and then clear the
   panel away to place beneath where it sat. Toggles are
   capsule switches matching the web panel's look.
+- The panel has a launch section mirroring the web demo's launch
+  options: preset, particle size, initial speed, and min particles as
+  draft values, applied by an "Apply & relaunch" button that rebuilds
+  the simulation in place at the current window size — with full
+  command-line preset resolution, so a panel relaunch and a CLI launch
+  can never disagree. A bad configuration keeps the running simulation.
 - The panel also opens without the keyboard: dwelling at the window's
   right edge reveals a thin handle at mid-height — click it to slide
   the panel in or out, or grab and drag it to any position and let
