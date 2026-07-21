@@ -6,6 +6,11 @@ Notable changes to Bouncy, by release. Version numbers follow
 
 ## Unreleased
 
+- The web demo's "Apply & restart" now starts from the share link's
+  parameters rather than the page URL, so settings adjusted during the
+  session survive a relaunch even when the session did not begin from
+  a parameterized link — the same touched-settings-travel behavior as
+  the native panel's relaunch.
 - The native window has a control panel: Tab slides in a translucent
   panel with readouts, sliders, toggles, and action buttons matching
   the web demo's, driving the same command dispatch as the hotkeys.

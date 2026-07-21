@@ -236,8 +236,11 @@ function bindLaunchOptions(mod) {
   for (const [id, key] of fields) $(id).value = params.get(key) ?? "";
 
   $("lo-apply").onclick = () => {
-    const p = new URLSearchParams(location.search);
-    p.delete("cb");
+    // Start from the share link's parameters — the launch URL plus the
+    // session's touched settings — so applying new launch options
+    // preserves the adjustments made since launch, exactly like the
+    // native panel's relaunch. (shareUrl also strips the cache-buster.)
+    const p = new URLSearchParams(new URL(shareUrl()).search);
     const set = (key, value) => (value ? p.set(key, value) : p.delete(key));
     set("preset", sel.value);
     for (const [id, key] of fields) set(key, $(id).value.trim());
