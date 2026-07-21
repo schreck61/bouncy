@@ -4,6 +4,27 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## 1.6.0 — 2026-07-21
+
+- The web demo cache-busts its WebAssembly module chain: script tags
+  carry `?v=<crate version>`, controls.js forwards the tag to the
+  `pkg/bouncy.js` imports and the `.wasm` fetches, and a drift test
+  fails any release that forgets to move the tag. Previously browsers
+  heuristically cached the unversioned wasm for months, so returning
+  visitors kept running a stale simulation after a deploy.
+- Wall chimes (`--wall-chimes` / `I`, panel toggle on both native and
+  web): walls play pentatonic notes when particles strike them, turning
+  drawn geometry into an instrument. Pitch follows the wall's length
+  like a marimba bar — longer is lower, log-mapped across two octaves,
+  resolution- and resize-independent — and a hand-drawn stroke sounds
+  as one bar, not one note per polyline piece. Struck walls flash
+  briefly, so the rhythm is legible with sound off. Chime volume tracks
+  impact speed; a per-wall cooldown and an eight-voice cap keep dense
+  scenes musical instead of noisy. Scene files can pin a wall's note
+  explicitly (`{ x1, y1, x2, y2, note = 4 }`, old files unchanged), and
+  exports freeze drawn strokes' notes so instruments survive the
+  round trip. First rung of the emergent-instrument roadmap.
+
 ## 1.5.2 — 2026-07-21
 
 - Starting muted (`--mute`) no longer opens the audio output device at
