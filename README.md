@@ -9,6 +9,7 @@ A GPU-accelerated particle simulation written in Rust featuring elastic collisio
 - **GPU-Accelerated Rendering**: Uses the `pixels` crate with wgpu backend for smooth, hardware-accelerated 2D rendering, with automatic CPU fallback via `softbuffer` when GPU is unavailable
 - **Realistic Physics**: Particle-particle collisions with a configurable coefficient of restitution, wall bounces, configurable gravity, adaptive substepping so fast particles never tunnel through each other, and swept wall contact so they never tunnel through drawn walls
 - **Fast Collision Detection**: A uniform spatial grid keeps collision detection near-linear, comfortably handling thousands of particles
+- **Control Panel**: `Tab` (or a dwell at the window's right edge) slides in a translucent panel — readouts, detented sliders, toggles, one-shot placement tools, and launch options with in-place relaunch — matching the browser demo's controls and driving the same command dispatch as the hotkeys
 - **Dynamic Spawning**: New particles spawn on collision, creating organic growth patterns
 - **Explosion Mechanics**: When spawn rate exceeds threshold, a dramatic explosion kills 99% of particles
 - **Interactive**: Pause, reset, spawn particle bursts with the mouse, trigger explosions with right click, and adjust gravity and elasticity live with the arrow keys

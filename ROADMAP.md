@@ -19,6 +19,13 @@ file only tracks what's ahead.
   contact detection (thread-count-invariant results), a terminal
   velocity, and the spawn-pressure explosion trigger with a non-linear
   population cap.
+- **1.5** put the control panel in the native window: a hand-rolled
+  frame-buffer GUI (no toolkit — the egui version matrix vetoed itself)
+  with web-panel parity, detented magnified sliders, one-shot placement
+  tools, an edge-reveal handle, a launch section with in-place
+  relaunch, and the touched-settings relaunch semantics shared with
+  the web demo (a changed preset takes precedence; adjustments travel
+  otherwise). Works on both render backends.
 - **1.3** shipped the browser demo: the same simulation compiled to
   WebAssembly with an HTML control panel over the `Command` dispatch,
   WebAudio, live resize, share links, launch options, and an optional
@@ -36,44 +43,6 @@ file only tracks what's ahead.
   once; raise the parallel thresholds on wasm (the 1024 break-even was
   measured natively); cap the web thread pool below
   `hardwareConcurrency`; longer-term, a WebGL/WebGPU present path.
-- **Native GUI: the edge-reveal panel (built; ships next release).**
-  Previously demoted because permanent chrome would spoil the
-  full-bleed screensaver aesthetic; the edge-reveal design removed
-  that objection — zero chrome until the mouse asks for it. Built
-  hand-rolled rather than egui: the version matrix vetoed egui
-  outright (pixels 0.15 pins wgpu 0.19; no egui release pairs that
-  with winit 0.30), and drawing into the frame buffer like the HUD
-  turned out strictly better — no new dependencies, works on the CPU
-  backend too, and the detents/translucency/handle feel are owned
-  outright. All five rungs below are implemented (src/gui.rs), plus
-  the web panel's one-shot placement tools (click a button, then
-  click the arena; second press or Esc cancels) so the two panels
-  cannot diverge. Original staging, for the record:
-  1. *egui plumbing.* Render integration, strict input routing (a
-     click on the panel must never fall through and fire a burst or
-     draw a wall), and a plain Tab-toggled panel as the accessible
-     baseline that ships first and stays forever as the keyboard path.
-  2. *Panel parity with the web demo.* Same sections, same controls,
-     scrollable, all driving the existing `Command` dispatch — one
-     mental model across native and browser.
-  3. *The edge-reveal interaction.* Mouse reaching the right edge
-     reveals a thin vertical handle at mid-height; click or drag slides
-     the panel in, click again or push it home slides it out, and the
-     handle fades with the idle cursor (matching the existing
-     pointer-idle behavior). The reveal strip stays a few pixels wide
-     and dwell-gated so it never steals wall-drawing or well-holding
-     near the edge. Panel motion is a short critically-damped ease —
-     settle, not bounce.
-  4. *Slider detents.* Snap-to stops where behavior qualitatively
-     changes: gravity 0 (weightlessness is where flow and self-gravity
-     become legible) and 100, particle/wall elasticity 1.0 (the
-     energy-neutral point), time scale 1.0. A held modifier bypasses
-     the snap for fine control.
-  5. *Translucent panel.* Simple alpha fill so the show never stops
-     behind the controls — readability sets the opacity floor, and a
-     frosted blur is deliberately out of scope (an extra render pass
-     for a garnish). The CPU/softbuffer backend stays hotkeys-only
-     (documented limitation).
 - **The emergent instrument (staged).** From user feedback: walls that
   play notes turn the sim into an Otomata-style generative sequencer,
   and the primitives already exist (collision-driven synth, pentatonic
