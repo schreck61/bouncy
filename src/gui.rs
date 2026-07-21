@@ -419,10 +419,12 @@ impl Gui {
         let mut commands = Vec::new();
         if self.slide <= 0.0 {
             // Hidden: drop stale interaction state and swallow edges.
+            // The armed placement tool deliberately survives — hiding
+            // the panel to place under where it sat is a legitimate
+            // gesture (Esc or a second button press still cancels).
             self.dragging = None;
             self.pressed_button = None;
             self.hover = None;
-            self.armed = None;
             self.input = PanelInput::default();
             return commands;
         }
@@ -538,6 +540,23 @@ impl Gui {
                 );
             }
         }
+        // An armed placement tool follows the cursor with its hint —
+        // panel open or hidden (arming and then hiding the panel to
+        // place beneath where it sat is a supported gesture).
+        if let Some(tool) = self.armed {
+            let (cx, cy) = self.cursor;
+            if cx >= 0.0 && cy >= 0.0 {
+                draw_text(
+                    frame,
+                    width,
+                    height,
+                    placement_label(tool),
+                    11.0,
+                    to_f32(cx + 12.0, cy + 12.0),
+                    [200, 215, 240],
+                );
+            }
+        }
         if self.slide <= 0.0 {
             return;
         }
@@ -566,22 +585,6 @@ impl Gui {
                 .hover
                 .is_some_and(|h| (h.y - laid.row.y).abs() < 0.5 && laid.row.contains_rect(&h));
             self.draw_item(frame, width, height, laid, hovered);
-        }
-
-        // An armed placement tool follows the cursor with its hint.
-        if let Some(tool) = self.armed {
-            let (cx, cy) = self.cursor;
-            if cx >= 0.0 && cy >= 0.0 {
-                draw_text(
-                    frame,
-                    width,
-                    height,
-                    placement_label(tool),
-                    11.0,
-                    to_f32(cx + 12.0, cy + 12.0),
-                    [200, 215, 240],
-                );
-            }
         }
 
         // Scrollbar sliver when the content overflows.
@@ -1360,13 +1363,16 @@ fn fill_circle(
         (cy - r).max(0.0) as u32,
         (cy + r + 1.0).min(f64::from(height)) as u32,
     );
-    let a = u16::from(alpha);
     for py in y0..y1 {
         for px in x0..x1 {
             let (dx, dy) = (f64::from(px) + 0.5 - cx, f64::from(py) + 0.5 - cy);
-            if dx * dx + dy * dy > r * r {
+            // Coverage fades over the outermost pixel so the rim is
+            // smooth instead of stair-stepped.
+            let coverage = (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
                 continue;
             }
+            let a = (f64::from(alpha) * coverage) as u16;
             let idx = ((py * width + px) * 4) as usize;
             for (channel, &c) in rgb.iter().enumerate() {
                 let dst = u16::from(frame[idx + channel]);
@@ -1622,12 +1628,19 @@ mod tests {
         click(&mut gui, &s);
         gui.disarm();
         assert!(!gui.is_armed());
+        // Hiding the panel keeps the tool: arm, hide, place under
+        // where the panel sat.
         click(&mut gui, &s);
         gui.open = false;
         gui.slide = 0.0;
         gui.tick(0.016, &s, 800, 600, false, 0.0);
-        assert!(!gui.is_armed(), "hidden panel drops the tool");
-        assert!(gui.place_armed(10.0, 10.0).is_none());
+        assert!(gui.is_armed(), "armed tool survives hiding the panel");
+        let placed = gui.place_armed(760.0, 300.0);
+        assert!(
+            matches!(placed, Some(PanelCommand::SpawnBurst(x, _)) if (x - 760.0).abs() < 1e-9),
+            "placed on ground the panel had covered"
+        );
+        assert!(!gui.is_armed());
     }
 
     #[test]
