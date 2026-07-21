@@ -135,7 +135,7 @@ pub struct StepEvents {
     /// per transition into the stopped state).
     pub motion_stopped: bool,
     /// Wall-chime strikes this step, loudest first (empty unless wall
-    /// chimes are enabled). Capped at [`MAX_WALL_HITS_PER_STEP`].
+    /// chimes are enabled). Capped at `MAX_WALL_HITS_PER_STEP` voices.
     pub wall_hits: Vec<WallChime>,
 }
 
