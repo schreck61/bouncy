@@ -108,6 +108,7 @@ pub enum ToggleId {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ButtonId {
     PauseResume,
+    StepFrame,
     Reset,
     CycleSpawn,
     CycleColor,
@@ -937,6 +938,7 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         &mut out,
         &[
             (ButtonId::PauseResume, pause_label),
+            (ButtonId::StepFrame, "Step"),
             (ButtonId::Reset, "Reset"),
         ],
         x,
@@ -1433,6 +1435,7 @@ fn placement_label(id: ButtonId) -> &'static str {
 fn button_command(id: ButtonId, state: &PanelState) -> PanelCommand {
     match id {
         ButtonId::PauseResume => PanelCommand::SetPaused(!state.paused),
+        ButtonId::StepFrame => PanelCommand::Plain(Command::StepFrame),
         ButtonId::Reset => PanelCommand::Plain(Command::Reset),
         ButtonId::CycleSpawn => PanelCommand::Plain(Command::CycleSpawnMode),
         ButtonId::CycleColor => PanelCommand::Plain(Command::CycleColorMode),
