@@ -15,6 +15,8 @@ pub const GRAVITY_LIMIT: i32 = 1000;
 pub const ELASTICITY_MAX: f64 = 1.5;
 /// Explosion-threshold ceiling (births per second).
 pub const EXPLOSION_THRESHOLD_MAX: usize = 1000;
+/// Particle-ping volume ceiling (percent).
+pub const PING_VOLUME_MAX: i32 = 100;
 
 /// How particles are colored.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -170,6 +172,13 @@ pub struct Config {
     #[arg(long)]
     pub wall_chimes: bool,
 
+    /// Particle collision ping volume as a percentage (0 silences pings;
+    /// wall chimes and the explosion rumble are unaffected; adjust at
+    /// runtime with ; and ')
+    #[arg(long, default_value_t = PING_VOLUME_MAX,
+          value_parser = clap::value_parser!(i32).range(0..=PING_VOLUME_MAX as i64))]
+    pub ping_volume: i32,
+
     /// The voice wall chimes play with (set at launch, like the
     /// instrument presets do; particle pings keep their own voice)
     #[arg(long, value_enum, default_value_t = ChimeTimbre::Chime)]
@@ -259,6 +268,9 @@ impl Config {
         }
         if self.music {
             println!("Musical pings: pentatonic scale");
+        }
+        if self.ping_volume != PING_VOLUME_MAX {
+            println!("Ping volume: {}%", self.ping_volume);
         }
         if self.wall_chimes {
             match self.chime_timbre {
@@ -460,6 +472,7 @@ pub const CONTROLS: &[(&str, &str)] = &[
     ("F", "Toggle the flow field"),
     ("A", "Toggle self-gravity (mass attracts mass)"),
     ("S", "Toggle musical pings (pentatonic scale)"),
+    ("; / '", "Adjust particle-ping volume by 10%"),
     ("I", "Toggle wall chimes (walls play notes on impact)"),
     ("K", "Toggle kaleidoscope rendering"),
     ("G (hold)", "Gravity well at the cursor; Shift+G repels"),
@@ -644,6 +657,15 @@ mod tests {
     fn wall_chimes_flag_parses() {
         assert!(parse(&["--wall-chimes"]).unwrap().wall_chimes);
         assert!(!parse(&[]).unwrap().wall_chimes, "default off");
+    }
+
+    #[test]
+    fn ping_volume_parses_clamps_and_defaults() {
+        assert_eq!(parse(&[]).unwrap().ping_volume, 100);
+        assert_eq!(parse(&["--ping-volume", "0"]).unwrap().ping_volume, 0);
+        assert_eq!(parse(&["--ping-volume", "100"]).unwrap().ping_volume, 100);
+        assert!(parse(&["--ping-volume", "101"]).is_err());
+        assert!(parse(&["--ping-volume", "-1"]).is_err());
     }
 
     #[test]

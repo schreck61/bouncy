@@ -60,6 +60,8 @@ const TIME_POINTS: &[(f64, f64)] = &[(0.1, 0.0), (4.0, 1.0)];
 /// Same treatment as gravity: thresholds people actually set (0-100
 /// births/s) get most of the track.
 const THRESHOLD_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 0.6), (1000.0, 1.0)];
+/// Ping volume is a plain linear percent.
+const PING_VOLUME_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 1.0)];
 /// Launch-option sliders (draft values; applied by Apply & relaunch).
 const SIZE_POINTS: &[(f64, f64)] = &[(0.5, 0.0), (10.0, 1.0)];
 /// Everyday speeds (up to 1000) get most of the track.
@@ -91,6 +93,7 @@ pub enum SliderId {
     WallElasticity,
     TimeScale,
     ExplosionThreshold,
+    PingVolume,
     LaunchSize,
     LaunchSpeed,
     LaunchMinParticles,
@@ -154,6 +157,7 @@ pub struct PanelState {
     pub music: bool,
     pub wall_chimes: bool,
     pub muted: bool,
+    pub ping_volume: i32,
     pub spawn_mode: String,
     pub color_mode: String,
     pub hud: String,
@@ -1045,6 +1049,22 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         },
         &mut y,
     );
+    push_slider(
+        &mut out,
+        x,
+        w,
+        SliderId::PingVolume,
+        "Ping volume",
+        PING_VOLUME_POINTS,
+        f64::from(state.ping_volume),
+        &[0.0, 100.0],
+        if state.ping_volume == 0 {
+            "silent".to_string()
+        } else {
+            format!("{}%", state.ping_volume)
+        },
+        &mut y,
+    );
 
     push_item(&mut out, x, w, Item::Header("mechanics"), 24.0, &mut y);
     push_toggle(
@@ -1445,6 +1465,7 @@ fn slider_command(id: SliderId, value: f64) -> PanelCommand {
         SliderId::ExplosionThreshold => {
             PanelCommand::SetExplosionThreshold((value / 5.0).round() as i32 * 5)
         }
+        SliderId::PingVolume => PanelCommand::SetPingVolume((value / 5.0).round() as i32 * 5),
         SliderId::LaunchSize | SliderId::LaunchSpeed | SliderId::LaunchMinParticles => {
             unreachable!("launch sliders edit the draft; Apply & relaunch emits")
         }

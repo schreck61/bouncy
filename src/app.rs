@@ -33,6 +33,8 @@ use winit::{dpi::LogicalSize, window::Fullscreen};
 const WARMUP_FRAMES: u32 = 3;
 /// Runtime gravity adjustment step (percent) for Up/Down arrows.
 const GRAVITY_STEP: i32 = 10;
+/// Percent step for the ; and ' ping-volume hotkeys.
+const PING_VOLUME_STEP: i32 = 10;
 /// Runtime elasticity adjustment step for arrow and bracket keys.
 const ELASTICITY_STEP: f64 = 0.05;
 /// Runtime explosion-threshold adjustment step for the -/= keys.
@@ -121,6 +123,8 @@ pub enum Command {
     ToggleWallChimes,
     /// Step gravity by a signed percentage amount.
     AdjustGravity(i32),
+    /// Step the particle-ping volume by a signed percentage amount.
+    AdjustPingVolume(i32),
     AdjustParticleElasticity(f64),
     AdjustWallElasticity(f64),
     AdjustTimeScale(f64),
@@ -162,6 +166,8 @@ pub enum PanelCommand {
     SetMuted(bool),
     /// Absolute musical-mode state.
     SetMusic(bool),
+    /// Absolute particle-ping volume from the panel slider (percent).
+    SetPingVolume(i32),
     /// Rebuild the simulation with new construction-time options (the
     /// native panel's launch section; the web demo restarts via URL).
     Relaunch {
@@ -196,6 +202,7 @@ struct SessionDeltas {
     kaleidoscope: Option<bool>,
     music: Option<bool>,
     muted: Option<bool>,
+    ping_volume: Option<i32>,
     time_scale: Option<f64>,
 }
 
@@ -411,7 +418,12 @@ impl App {
                 enabled: config.bullet_time,
                 start: None,
             },
-            audio: Audio::new(config.mute, config.music, config.chime_timbre),
+            audio: Audio::new(
+                config.mute,
+                config.music,
+                config.chime_timbre,
+                config.ping_volume,
+            ),
             sim: None,
             config,
             render: None,
@@ -570,8 +582,9 @@ impl App {
                 sim.wall_segments().len()
             ),
             format!(
-                "Music: {}  (S)   Chimes: {}  (I)   Kaleidoscope: {}  (K)",
+                "Music: {}  (S)   Pings: {}%  (;/')   Chimes: {}  (I)   Kaleidoscope: {}  (K)",
                 if self.audio.is_music() { "on" } else { "off" },
+                self.audio.ping_volume_percent(),
                 if sim.wall_chimes { "on" } else { "off" },
                 if self.kaleidoscope { "on" } else { "off" },
             ),
@@ -893,6 +906,10 @@ impl App {
                     self.audio.toggle_music();
                 }
             }
+            PanelCommand::SetPingVolume(percent) => {
+                self.audio
+                    .set_ping_volume(percent.clamp(0, crate::config::PING_VOLUME_MAX));
+            }
             #[cfg(not(target_arch = "wasm32"))]
             PanelCommand::Relaunch {
                 preset,
@@ -1035,6 +1052,8 @@ impl App {
             kaleidoscope: (self.kaleidoscope != cfg.kaleidoscope).then_some(self.kaleidoscope),
             music: (self.audio.is_music() != cfg.music).then_some(self.audio.is_music()),
             muted: (self.audio.is_muted() != cfg.mute).then_some(self.audio.is_muted()),
+            ping_volume: (self.audio.ping_volume_percent() != cfg.ping_volume)
+                .then_some(self.audio.ping_volume_percent()),
             time_scale: ((self.time_scale - 1.0).abs() > f64::EPSILON).then_some(self.time_scale),
         }
     }
@@ -1087,6 +1106,8 @@ impl App {
         if self.audio.is_music() != music {
             self.audio.toggle_music();
         }
+        self.audio
+            .set_ping_volume(deltas.ping_volume.unwrap_or(self.config.ping_volume));
         let muted = deltas.muted.unwrap_or(self.config.mute);
         if self.audio.is_muted() != muted {
             self.audio.toggle_mute();
@@ -1120,6 +1141,7 @@ impl App {
             music: self.audio.is_music(),
             wall_chimes: sim.wall_chimes,
             muted: self.audio.is_muted(),
+            ping_volume: self.audio.ping_volume_percent(),
             spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
             color_mode: value_name(self.color_mode.to_possible_value()),
             hud: self.hud_mode.label().to_string(),
@@ -1166,6 +1188,7 @@ impl App {
             height: sim.dimensions().1,
             muted: self.audio.is_muted(),
             music: self.audio.is_music(),
+            ping_volume: self.audio.ping_volume_percent(),
             audio_ready: crate::audio::web_ready(),
             spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
             color_mode: value_name(self.color_mode.to_possible_value()),
@@ -1241,6 +1264,8 @@ impl App {
             KeyCode::KeyE if !repeat => self.apply(Command::ExportScene),
             KeyCode::KeyJ if !repeat => self.apply(Command::LaunchComet),
             KeyCode::KeyS if !repeat => self.apply(Command::ToggleMusic),
+            KeyCode::Semicolon => self.apply(Command::AdjustPingVolume(-PING_VOLUME_STEP)),
+            KeyCode::Quote => self.apply(Command::AdjustPingVolume(PING_VOLUME_STEP)),
             KeyCode::KeyI if !repeat => self.apply(Command::ToggleWallChimes),
             KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
             KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
@@ -1335,6 +1360,12 @@ impl App {
                 sim.wall_chimes = !sim.wall_chimes;
                 println!("Wall chimes {}", if sim.wall_chimes { "on" } else { "off" });
             }),
+            Command::AdjustPingVolume(step) => {
+                let volume = (self.audio.ping_volume_percent() + step)
+                    .clamp(0, crate::config::PING_VOLUME_MAX);
+                self.audio.set_ping_volume(volume);
+                println!("Ping volume: {volume}%");
+            }
             Command::ToggleMatter => self.with_sim(|sim| {
                 sim.matter = !sim.matter;
                 println!("Matter mechanics {}", if sim.matter { "on" } else { "off" });
@@ -2225,6 +2256,14 @@ mod tests {
 
         app.apply(Command::ToggleFlow);
         assert!(app.sim.as_ref().unwrap().flow);
+
+        assert_eq!(app.audio.ping_volume_percent(), 100, "default full");
+        app.apply(Command::AdjustPingVolume(-30));
+        assert_eq!(app.audio.ping_volume_percent(), 70);
+        app.apply(Command::AdjustPingVolume(-100));
+        assert_eq!(app.audio.ping_volume_percent(), 0, "clamps at silent");
+        app.apply(Command::AdjustPingVolume(500));
+        assert_eq!(app.audio.ping_volume_percent(), 100, "clamps at full");
 
         assert!(!app.sim.as_ref().unwrap().wall_chimes, "default off");
         app.apply(Command::ToggleWallChimes);

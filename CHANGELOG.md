@@ -4,6 +4,14 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Particle collision pings have their own volume: `--ping-volume 0-100`
+  (default 100), the `;` / `'` hotkeys, and a panel slider on both
+  shells. At 0 the pings are silent while wall chimes and the explosion
+  rumble play on — so an instrument scene can be all instrument. The
+  master mute (`M`) still silences everything.
+
 ## 1.7.0 — 2026-07-21
 
 - Wall chimes gained voices: `--chime-timbre` selects `chime` (the

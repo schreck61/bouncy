@@ -249,6 +249,20 @@ fn note_gain(energy: f64) -> f32 {
     0.3 + 0.7 * normalize_energy(energy)
 }
 
+/// Particle-ping gain for a 0-100 percent volume setting.
+fn ping_gain(percent: i32) -> f32 {
+    #[allow(clippy::cast_precision_loss)]
+    let gain = percent.clamp(0, 100) as f32 / 100.0;
+    gain
+}
+
+/// The 0-100 percent value a stored ping gain corresponds to.
+fn ping_percent(gain: f32) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let percent = (gain * 100.0).round() as i32;
+    percent.clamp(0, 100)
+}
+
 /// Minimum collision energy (closing speed) that makes an audible ping.
 /// Public so the simulation can pre-filter wall-chime events with the
 /// same floor the backends enforce (pure data, no device dependency).
@@ -263,7 +277,8 @@ fn ping_audible(energy: f64) -> bool {
 mod native {
     use super::{
         AUDIO_SAMPLE_RATE, ChimeTimbre, energy_index, normalize_energy, note_gain, pan_gains,
-        ping_audible, synth_chime_palette, synth_explosion, synth_ping_palettes,
+        ping_audible, ping_gain, ping_percent, synth_chime_palette, synth_explosion,
+        synth_ping_palettes,
     };
     use rodio::buffer::SamplesBuffer;
     use rodio::source::ChannelVolume;
@@ -281,6 +296,8 @@ mod native {
         stream: Option<OutputStream>,
         muted: bool,
         music: bool,
+        /// Particle-ping gain (0.0-1.0); chimes and rumbles ignore it.
+        ping_volume: f32,
         pings: Vec<SamplesBuffer>,
         notes: Vec<SamplesBuffer>,
         /// Wall-chime notes in the launch-selected timbre; pings keep
@@ -294,7 +311,7 @@ mod native {
         /// A muted start never touches the device at all — the stream is
         /// opened lazily on first unmute, so `--mute` runs (and unit tests)
         /// stay off the audio hardware entirely.
-        pub fn new(muted: bool, music: bool, timbre: ChimeTimbre) -> Self {
+        pub fn new(muted: bool, music: bool, timbre: ChimeTimbre, ping_volume: i32) -> Self {
             let stream = if muted { None } else { Self::open_stream() };
 
             let (pings, notes) = synth_ping_palettes();
@@ -302,6 +319,7 @@ mod native {
                 stream,
                 muted,
                 music,
+                ping_volume: ping_gain(ping_volume),
                 pings: pings.into_iter().map(buffer).collect(),
                 notes: notes.into_iter().map(buffer).collect(),
                 chimes: synth_chime_palette(timbre)
@@ -354,6 +372,16 @@ mod native {
             self.music
         }
 
+        /// Set the particle-ping volume from a 0-100 percent value.
+        pub fn set_ping_volume(&mut self, percent: i32) {
+            self.ping_volume = ping_gain(percent);
+        }
+
+        /// The particle-ping volume as a 0-100 percent value.
+        pub fn ping_volume_percent(&self) -> i32 {
+            ping_percent(self.ping_volume)
+        }
+
         /// Play a collision ping. Pitch follows collision energy — continuously
         /// in the default mode, snapped to a pentatonic scale degree in musical
         /// mode — and the sound is panned by `pan` (0.0 = left edge of screen,
@@ -367,13 +395,17 @@ mod native {
             let Some(stream) = self.stream.as_ref().filter(|_| !self.muted) else {
                 return;
             };
+            if self.ping_volume <= 0.0 {
+                return;
+            }
             let energy_normalized = normalize_energy(energy);
             let buffers = if self.music { &self.notes } else { &self.pings };
             let ping = buffers[energy_index(energy_normalized, buffers.len())].clone();
             let (left, right) = pan_gains(pan);
-            stream
-                .mixer()
-                .add(ChannelVolume::new(ping, vec![left, right]));
+            stream.mixer().add(ChannelVolume::new(
+                ping,
+                vec![left * self.ping_volume, right * self.ping_volume],
+            ));
         }
 
         /// Play scale degree `note` from the chime palette directly,
@@ -412,8 +444,20 @@ mod native {
         /// Parallel test-suite Apps grabbing real WASAPI streams crashed
         /// the Windows CI runner with `STATUS_ACCESS_VIOLATION`.
         #[test]
+        fn ping_volume_round_trips_and_clamps() {
+            let mut audio = Audio::new(true, false, super::ChimeTimbre::Chime, 50);
+            assert_eq!(audio.ping_volume_percent(), 50);
+            audio.set_ping_volume(0);
+            assert_eq!(audio.ping_volume_percent(), 0);
+            audio.set_ping_volume(250);
+            assert_eq!(audio.ping_volume_percent(), 100, "clamped high");
+            audio.set_ping_volume(-5);
+            assert_eq!(audio.ping_volume_percent(), 0, "clamped low");
+        }
+
+        #[test]
         fn muted_construction_stays_off_the_audio_device() {
-            let audio = Audio::new(true, false, super::ChimeTimbre::Chime);
+            let audio = Audio::new(true, false, super::ChimeTimbre::Chime, 100);
             assert!(audio.muted);
             assert!(
                 audio.stream.is_none(),
@@ -435,7 +479,7 @@ pub use native::Audio;
 mod web {
     use super::{
         AUDIO_SAMPLE_RATE, ChimeTimbre, energy_index, normalize_energy, note_gain, ping_audible,
-        synth_chime_palette, synth_explosion, synth_ping_palettes,
+        ping_gain, ping_percent, synth_chime_palette, synth_explosion, synth_ping_palettes,
     };
     use std::cell::{Cell, RefCell};
     use web_sys::{AudioBuffer, AudioContext, AudioContextOptions};
@@ -554,15 +598,21 @@ mod web {
     pub struct Audio {
         muted: bool,
         music: bool,
+        /// Particle-ping gain (0.0-1.0); chimes and rumbles ignore it.
+        ping_volume: f32,
     }
 
     impl Audio {
         /// State-only construction; the `WebAudio` engine itself is
         /// created later by [`super::web_enable`] inside a user gesture,
         /// picking up the timbre parked here.
-        pub fn new(muted: bool, music: bool, timbre: ChimeTimbre) -> Self {
+        pub fn new(muted: bool, music: bool, timbre: ChimeTimbre, ping_volume: i32) -> Self {
             TIMBRE.set(timbre);
-            Audio { muted, music }
+            Audio {
+                muted,
+                music,
+                ping_volume: ping_gain(ping_volume),
+            }
         }
 
         /// Toggle mute; returns the new muted state.
@@ -587,10 +637,20 @@ mod web {
             self.music
         }
 
+        /// Set the particle-ping volume from a 0-100 percent value.
+        pub fn set_ping_volume(&mut self, percent: i32) {
+            self.ping_volume = ping_gain(percent);
+        }
+
+        /// The particle-ping volume as a 0-100 percent value.
+        pub fn ping_volume_percent(&self) -> i32 {
+            ping_percent(self.ping_volume)
+        }
+
         /// Play a collision ping (see the native backend for the pitch and
         /// pan semantics); dropped silently until the engine exists.
         pub fn play_ping(&self, energy: f64, pan: f32) {
-            if self.muted || !ping_audible(energy) {
+            if self.muted || self.ping_volume <= 0.0 || !ping_audible(energy) {
                 return;
             }
             let music = self.music;
@@ -601,7 +661,7 @@ mod web {
                     &buffers[energy_index(energy_normalized, buffers.len())]
                 },
                 pan,
-                1.0,
+                self.ping_volume,
             );
         }
 

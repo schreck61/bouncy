@@ -49,6 +49,7 @@ pub struct Snapshot {
     pub height: u32,
     pub muted: bool,
     pub music: bool,
+    pub ping_volume: i32,
     /// Whether the `WebAudio` engine has been created (needs a user
     /// gesture; see [`WebHandle::enable_audio`]).
     pub audio_ready: bool,
@@ -187,6 +188,11 @@ impl WebHandle {
     /// Toggle wall chimes — walls play notes on impact (the I key).
     pub fn toggle_wall_chimes(&self) {
         self.push(WebCommand::Plain(Command::ToggleWallChimes));
+    }
+
+    /// Set the particle-ping volume (0-100 percent).
+    pub fn set_ping_volume(&self, percent: i32) {
+        self.push(WebCommand::SetPingVolume(percent));
     }
 
     /// Cycle solid/velocity coloring (the C key).

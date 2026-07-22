@@ -170,6 +170,7 @@ function bind(handle) {
   $("in-time").oninput = (e) => handle.set_time_scale(Number(e.target.value));
   $("in-threshold").oninput = (e) =>
     handle.set_explosion_threshold(Number(e.target.value));
+  $("in-pings").oninput = (e) => handle.set_ping_volume(Number(e.target.value));
 
   $("tg-matter").onchange = () => handle.toggle_matter();
   $("tg-flow").onchange = () => handle.toggle_flow();
@@ -293,6 +294,7 @@ function shareUrl() {
   const init = initialState ?? s;
 
   const numeric = [
+    ["ping-volume", s.ping_volume, init.ping_volume],
     ["gravity", s.gravity, init.gravity, String],
     ["particle-elasticity", s.particle_elasticity, init.particle_elasticity,
      (v) => v.toFixed(2)],
@@ -367,6 +369,8 @@ function reflect(s) {
   follow("time", s.time_scale, `${s.time_scale.toFixed(2)}x`);
   follow("threshold", s.explosion_threshold,
          s.explosion_threshold === 0 ? "off" : `${s.explosion_threshold}/s`);
+  follow("pings", s.ping_volume,
+         s.ping_volume === 0 ? "silent" : `${s.ping_volume}%`);
 
   $("tg-matter").checked = s.matter;
   $("tg-flow").checked = s.flow;
