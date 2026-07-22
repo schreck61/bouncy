@@ -108,6 +108,13 @@
       <label class="slider">Time scale <output id="out-time">1.00x</output>
         <input id="in-time" type="range" min="0.1" max="4" step="0.05" value="1">
       </label>
+      <label class="slider">Quantize <output id="out-bpm">off</output>
+        <input id="in-bpm" type="range" min="0" max="300" step="1" value="0"
+               title="emitters snap to a beat grid at this tempo; 0 = off">
+      </label>
+      <div class="row">
+        <button id="btn-beat-div" class="cycle" title="beat-grid resolution"><small>beat grid</small><span id="val-beat-div">1/4</span></button>
+      </div>
       <label class="slider">Explosion threshold <output id="out-threshold">30/s</output>
         <input id="in-threshold" type="range" min="0" max="1000" step="5" value="30">
       </label>

@@ -149,6 +149,8 @@ pub enum Command {
     /// Launch a comet from the far edge toward the cursor (J or middle
     /// click).
     LaunchComet,
+    /// Toggle emitter quantize between off and the last tempo (L).
+    ToggleQuantize,
 }
 
 /// A control-panel action, shared by every panel surface (the native
@@ -194,6 +196,10 @@ pub enum PanelCommand {
     AimEmitterAt(u32, f64, f64),
     /// Step the stroke's chime note: Auto → degrees → Silent → Auto.
     CycleStrokeNote(u32),
+    /// Absolute quantize tempo from the panel slider (0 = off).
+    SetBpm(f64),
+    /// Beat-grid resolution in ticks per beat (only 1/2/4/8 are real).
+    SetBeatDiv(u32),
     /// Delete one emitter by id.
     DeleteEmitter(u32),
     /// Delete one wall stroke (all its segments) by id.
@@ -224,6 +230,8 @@ struct SessionDeltas {
     explosion_threshold: Option<usize>,
     spawn_mode: Option<crate::config::SpawnMode>,
     color_mode: Option<ColorMode>,
+    bpm: Option<f64>,
+    beat_div: Option<u32>,
     matter: Option<bool>,
     flow: Option<bool>,
     self_gravity: Option<bool>,
@@ -421,6 +429,9 @@ pub struct App {
     selection: Option<Selection>,
     /// D is held: the next left click selects instead of bursting.
     d_down: bool,
+    /// The tempo the L toggle restores when quantize is off — the last
+    /// nonzero bpm this session saw (mute-keeps-its-stream spirit).
+    last_bpm: f64,
     shift_down: bool,
     time_scale: f64,
     bullet_time: BulletTime,
@@ -447,6 +458,9 @@ impl App {
     pub fn new(config: Config) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let panel_open = config.panel;
+        // A session launched with a tempo keeps it as the L-toggle
+        // restore point; otherwise the toggle starts at a sane default.
+        let launch_bpm = if config.bpm > 0.0 { config.bpm } else { 120.0 };
         App {
             trails: config.trails,
             color_mode: config.color_mode,
@@ -479,6 +493,7 @@ impl App {
             wall_flash: HashMap::new(),
             selection: None,
             d_down: false,
+            last_bpm: launch_bpm,
             shift_down: false,
             time_scale: 1.0,
             cursor: CursorState::new(),
@@ -637,6 +652,14 @@ impl App {
                 "Emitters: {}  (U aims, Shift+U clears)",
                 sim.emitters().len()
             ),
+            if sim.bpm == 0.0 {
+                "Quantize: off  (L)".to_string()
+            } else {
+                format!(
+                    "Quantize: {:.0} bpm / {} per beat  (L)",
+                    sim.bpm, sim.beat_div
+                )
+            },
             format!(
                 "Music: {}  (S)   Pings: {}%  (;/')   Chimes: {}  (I)   Kaleidoscope: {}  (K)",
                 if self.audio.is_music() { "on" } else { "off" },
@@ -677,7 +700,7 @@ impl App {
                 "P pause   N step   R reset   M mute",
                 "T trails   C colors   B spawn mode",
                 "X matter (fusion/fission)   F flow   A self-gravity",
-                "S musical pings   K kaleidoscope",
+                "S musical pings   K kaleidoscope   L quantize",
                 "G hold: gravity well (Shift+G repels)",
                 "W pin well (Shift+W repel, Shift+R clear)",
                 "V hold+drag: draw walls (Shift+V clears)",
@@ -1025,6 +1048,29 @@ impl App {
                     sim.set_stroke_note(id, note.cycled());
                 }
             }
+            PanelCommand::SetBpm(bpm) => {
+                if let Some(ref mut sim) = self.sim {
+                    // Snap the slider's dead zone up into the playable
+                    // band so a panel value always round-trips the CLI
+                    // validator (scene export re-parses it).
+                    let bpm = bpm.round();
+                    sim.bpm = if bpm <= 0.0 {
+                        0.0
+                    } else {
+                        bpm.clamp(crate::config::BPM_MIN, crate::config::BPM_MAX)
+                    };
+                    if sim.bpm > 0.0 {
+                        self.last_bpm = sim.bpm;
+                    }
+                }
+            }
+            PanelCommand::SetBeatDiv(div) => {
+                if let Some(ref mut sim) = self.sim
+                    && matches!(div, 1 | 2 | 4 | 8)
+                {
+                    sim.beat_div = div;
+                }
+            }
             PanelCommand::DeleteEmitter(id) => {
                 if let Some(ref mut sim) = self.sim
                     && sim.remove_emitter(id)
@@ -1193,6 +1239,8 @@ impl App {
                 .then_some(sim.explosion_threshold),
             spawn_mode: (sim.spawn_mode != cfg.effective_spawn_mode()).then_some(sim.spawn_mode),
             color_mode: (self.color_mode != cfg.color_mode).then_some(self.color_mode),
+            bpm: ((sim.bpm - cfg.bpm).abs() > f64::EPSILON).then_some(sim.bpm),
+            beat_div: (sim.beat_div != cfg.beat_div).then_some(sim.beat_div),
             matter: (sim.matter != cfg.matter).then_some(sim.matter),
             flow: (sim.flow != cfg.flow).then_some(sim.flow),
             self_gravity: (sim.self_gravity != cfg.self_gravity).then_some(sim.self_gravity),
@@ -1225,6 +1273,12 @@ impl App {
             }
             if let Some(v) = deltas.spawn_mode {
                 sim.spawn_mode = v;
+            }
+            if let Some(v) = deltas.bpm {
+                sim.bpm = v;
+            }
+            if let Some(v) = deltas.beat_div {
+                sim.beat_div = v;
             }
             if let Some(v) = deltas.matter {
                 sim.matter = v;
@@ -1292,6 +1346,8 @@ impl App {
             wall_chimes: sim.wall_chimes,
             muted: self.audio.is_muted(),
             ping_volume: self.audio.ping_volume_percent(),
+            bpm: sim.bpm,
+            beat_div: sim.beat_div,
             spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
             color_mode: value_name(self.color_mode.to_possible_value()),
             hud: self.hud_mode.label().to_string(),
@@ -1394,6 +1450,8 @@ impl App {
             muted: self.audio.is_muted(),
             music: self.audio.is_music(),
             ping_volume: self.audio.ping_volume_percent(),
+            bpm: sim.bpm,
+            beat_div: sim.beat_div,
             audio_ready: crate::audio::web_ready(),
             spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
             color_mode: value_name(self.color_mode.to_possible_value()),
@@ -1501,6 +1559,7 @@ impl App {
             KeyCode::Semicolon => self.apply(Command::AdjustPingVolume(-PING_VOLUME_STEP)),
             KeyCode::Quote => self.apply(Command::AdjustPingVolume(PING_VOLUME_STEP)),
             KeyCode::KeyI if !repeat => self.apply(Command::ToggleWallChimes),
+            KeyCode::KeyL if !repeat => self.apply(Command::ToggleQuantize),
             KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
             KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
             KeyCode::ArrowUp => self.apply(Command::AdjustGravity(GRAVITY_STEP)),
@@ -1663,6 +1722,18 @@ impl App {
                     println!("Comet inbound");
                 });
             }
+            Command::ToggleQuantize => {
+                if let Some(ref mut sim) = self.sim {
+                    if sim.bpm > 0.0 {
+                        self.last_bpm = sim.bpm;
+                        sim.bpm = 0.0;
+                        println!("Quantize off (emitters free-run)");
+                    } else {
+                        sim.bpm = self.last_bpm;
+                        println!("Quantize: {} bpm / {} per beat", sim.bpm, sim.beat_div);
+                    }
+                }
+            }
             Command::PinWell(polarity) => {
                 let (x, y) = (self.cursor.x, self.cursor.y);
                 self.with_sim(|sim| {
@@ -1813,6 +1884,15 @@ impl App {
                 value_name(self.color_mode.to_possible_value()).into(),
             ),
         ];
+        // Tempo travels only when it means something: bpm when the grid
+        // is on, the division whenever it differs from the default (it
+        // matters the moment quantize turns on).
+        if sim.bpm > 0.0 {
+            settings.push(("bpm", sim.bpm.into()));
+        }
+        if sim.bpm > 0.0 || sim.beat_div != 4 {
+            settings.push(("beat-div", i64::from(sim.beat_div).into()));
+        }
         for (flag, on) in [
             ("matter", sim.matter),
             ("flow", sim.flow),
@@ -2736,6 +2816,101 @@ mod tests {
         );
         // A dead id is a no-op, never a panic.
         app.apply_panel_command(PanelCommand::AimEmitterAt(id + 1, 0.0, 0.0));
+    }
+
+    #[test]
+    fn toggle_quantize_remembers_the_last_tempo() {
+        let mut app = test_app(); // launches with bpm 0 (off)
+        app.apply(Command::ToggleQuantize);
+        assert!(
+            (app.sim.as_ref().unwrap().bpm - 120.0).abs() < 1e-9,
+            "first toggle lands on the default tempo"
+        );
+        app.apply_panel_command(PanelCommand::SetBpm(90.0));
+        app.apply(Command::ToggleQuantize);
+        assert_eq!(app.sim.as_ref().unwrap().bpm, 0.0, "toggled off");
+        app.apply(Command::ToggleQuantize);
+        assert!(
+            (app.sim.as_ref().unwrap().bpm - 90.0).abs() < 1e-9,
+            "restores the session's tempo, not the default"
+        );
+    }
+
+    #[test]
+    fn set_bpm_snaps_the_dead_zone_and_clamps() {
+        let mut app = test_app();
+        app.apply_panel_command(PanelCommand::SetBpm(10.0));
+        assert!(
+            (app.sim.as_ref().unwrap().bpm - 30.0).abs() < 1e-9,
+            "1..=29 snaps up into the playable band"
+        );
+        app.apply_panel_command(PanelCommand::SetBpm(500.0));
+        assert!((app.sim.as_ref().unwrap().bpm - 300.0).abs() < 1e-9);
+        app.apply_panel_command(PanelCommand::SetBpm(0.0));
+        assert_eq!(app.sim.as_ref().unwrap().bpm, 0.0, "zero means off");
+
+        app.apply_panel_command(PanelCommand::SetBeatDiv(3));
+        assert_eq!(app.sim.as_ref().unwrap().beat_div, 4, "invalid div ignored");
+        app.apply_panel_command(PanelCommand::SetBeatDiv(8));
+        assert_eq!(app.sim.as_ref().unwrap().beat_div, 8);
+    }
+
+    #[test]
+    fn hud_shows_the_quantize_state() {
+        let mut app = test_app();
+        let lines = app.hud_lines(app.sim.as_ref().unwrap());
+        assert!(lines.iter().any(|l| l == "Quantize: off  (L)"), "{lines:?}");
+        app.apply_panel_command(PanelCommand::SetBpm(90.0));
+        app.apply_panel_command(PanelCommand::SetBeatDiv(2));
+        let lines = app.hud_lines(app.sim.as_ref().unwrap());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "Quantize: 90 bpm / 2 per beat  (L)"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn session_deltas_carry_the_tempo_through_relaunch() {
+        let mut app = test_app();
+        app.apply_panel_command(PanelCommand::SetBpm(90.0));
+        app.apply_panel_command(PanelCommand::SetBeatDiv(2));
+        // Same preset selection: touched settings travel.
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: None,
+            particle_size: None,
+            initial_speed: None,
+            min_particles: None,
+        });
+        let sim = app.sim.as_ref().unwrap();
+        assert!((sim.bpm - 90.0).abs() < 1e-9, "tempo survives the relaunch");
+        assert_eq!(sim.beat_div, 2, "division survives the relaunch");
+    }
+
+    #[test]
+    fn scene_export_carries_the_tempo_only_when_it_matters() {
+        let mut app = test_app();
+        let (settings, ..) = app.scene_export_parts().unwrap();
+        assert!(
+            settings
+                .iter()
+                .all(|(k, _)| *k != "bpm" && *k != "beat-div"),
+            "quantize off on the default grid exports no tempo keys"
+        );
+        app.apply_panel_command(PanelCommand::SetBpm(90.0));
+        app.apply_panel_command(PanelCommand::SetBeatDiv(2));
+        let (settings, ..) = app.scene_export_parts().unwrap();
+        assert!(
+            settings
+                .iter()
+                .any(|(k, v)| *k == "bpm" && v.as_float() == Some(90.0))
+        );
+        assert!(
+            settings
+                .iter()
+                .any(|(k, v)| *k == "beat-div" && v.as_integer() == Some(2))
+        );
     }
 
     #[test]

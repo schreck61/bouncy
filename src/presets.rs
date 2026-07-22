@@ -1497,6 +1497,31 @@ mod tests {
     }
 
     #[test]
+    fn exported_tempo_keys_map_to_flags_and_reparse() {
+        let text = scene_to_toml(
+            "saved",
+            &[("bpm", 90.0.into()), ("beat-div", 2i64.into())],
+            &[],
+            &[],
+            &[],
+        );
+        let user = parse(&text, Path::new("/test/export.toml")).unwrap();
+        let preset = &user.presets["saved"];
+        assert!(
+            preset.args.contains(&"--bpm".to_string()),
+            "{:?}",
+            preset.args
+        );
+        assert!(preset.args.contains(&"--beat-div".to_string()));
+        // The args round-trip through the CLI parser into a Config.
+        let mut argv = vec!["bouncy".to_string()];
+        argv.extend(preset.args.iter().cloned());
+        let config = crate::config::Config::try_resolve_from(&argv).unwrap();
+        assert!((config.bpm - 90.0).abs() < 1e-9);
+        assert_eq!(config.beat_div, 2);
+    }
+
+    #[test]
     fn wall_note_cycle_walks_every_degree_and_wraps() {
         let mut note = WallNote::Auto;
         let mut seen = vec![note];

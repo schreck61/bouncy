@@ -214,6 +214,13 @@ function bind(handle) {
   $("in-threshold").oninput = (e) =>
     handle.set_explosion_threshold(Number(e.target.value));
   $("in-pings").oninput = (e) => handle.set_ping_volume(Number(e.target.value));
+  // Optional-chained like the inspector controls: a stale cached wasm
+  // bundle without the setters degrades to a no-op.
+  $("in-bpm").oninput = (e) => handle.set_bpm?.(Number(e.target.value));
+  $("btn-beat-div").onclick = () => {
+    const next = { 1: 2, 2: 4, 4: 8, 8: 1 }[latest.beat_div ?? 4] ?? 4;
+    handle.set_beat_div?.(next);
+  };
 
   $("tg-matter").onchange = () => handle.toggle_matter();
   $("tg-flow").onchange = () => handle.toggle_flow();
@@ -337,7 +344,9 @@ function shareUrl() {
   const init = initialState ?? s;
 
   const numeric = [
-    ["ping-volume", s.ping_volume, init.ping_volume],
+    ["bpm", s.bpm ?? 0, init.bpm ?? 0, String],
+    ["beat-div", s.beat_div ?? 4, init.beat_div ?? 4, String],
+    ["ping-volume", s.ping_volume, init.ping_volume, String],
     ["gravity", s.gravity, init.gravity, String],
     ["particle-elasticity", s.particle_elasticity, init.particle_elasticity,
      (v) => v.toFixed(2)],
@@ -444,6 +453,11 @@ function reflect(s) {
          s.explosion_threshold === 0 ? "off" : `${s.explosion_threshold}/s`);
   follow("pings", s.ping_volume,
          s.ping_volume === 0 ? "silent" : `${s.ping_volume}%`);
+  // `??` guards: a stale wasm bundle without the fields reads as
+  // quantize off on the default grid, never NaN.
+  const bpm = s.bpm ?? 0;
+  follow("bpm", bpm, bpm === 0 ? "off" : `${bpm.toFixed(0)} bpm`);
+  $("val-beat-div").textContent = `1/${s.beat_div ?? 4}`;
 
   $("tg-matter").checked = s.matter;
   $("tg-flow").checked = s.flow;

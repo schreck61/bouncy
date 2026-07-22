@@ -63,6 +63,9 @@ const TIME_POINTS: &[(f64, f64)] = &[(0.1, 0.0), (4.0, 1.0)];
 const THRESHOLD_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 0.6), (1000.0, 1.0)];
 /// Ping volume is a plain linear percent.
 const PING_VOLUME_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 1.0)];
+/// Quantize tempo: linear 0-300; 0 is off, the app snaps the CLI's
+/// 1-29 dead zone up to 30.
+const BPM_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (300.0, 1.0)];
 /// Launch-option sliders (draft values; applied by Apply & relaunch).
 const SIZE_POINTS: &[(f64, f64)] = &[(0.5, 0.0), (10.0, 1.0)];
 /// Everyday speeds (up to 1000) get most of the track.
@@ -99,6 +102,7 @@ pub enum SliderId {
     ParticleElasticity,
     WallElasticity,
     TimeScale,
+    Bpm,
     ExplosionThreshold,
     PingVolume,
     LaunchSize,
@@ -151,6 +155,8 @@ pub enum ButtonId {
     ReAim,
     /// Steps the selected stroke's note: Auto → degrees → Silent.
     CycleStrokeNote,
+    /// Steps the beat-grid resolution: 1 → 2 → 4 → 8 ticks per beat.
+    CycleBeatDiv,
     /// Deletes the selected entity (either kind).
     DeleteSelected,
 }
@@ -198,6 +204,9 @@ pub struct PanelState {
     pub wall_chimes: bool,
     pub muted: bool,
     pub ping_volume: i32,
+    /// Quantize tempo (0 = off) and beat-grid ticks per beat.
+    pub bpm: f64,
+    pub beat_div: u32,
     pub spawn_mode: String,
     pub color_mode: String,
     pub hud: String,
@@ -1132,6 +1141,32 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         &mut out,
         x,
         w,
+        SliderId::Bpm,
+        "Quantize",
+        BPM_POINTS,
+        state.bpm,
+        &[0.0, 120.0],
+        if state.bpm == 0.0 {
+            "off".to_string()
+        } else {
+            format!("{:.0} bpm", state.bpm)
+        },
+        &mut y,
+    );
+    button_row(
+        &mut out,
+        &[(
+            ButtonId::CycleBeatDiv,
+            &format!("Beat grid: 1/{}", state.beat_div),
+        )],
+        x,
+        w,
+        &mut y,
+    );
+    push_slider(
+        &mut out,
+        x,
+        w,
         SliderId::ExplosionThreshold,
         "Explosions at",
         THRESHOLD_POINTS,
@@ -1656,6 +1691,7 @@ fn slider_command(id: SliderId, value: f64) -> PanelCommand {
             PanelCommand::SetExplosionThreshold((value / 5.0).round() as i32 * 5)
         }
         SliderId::PingVolume => PanelCommand::SetPingVolume((value / 5.0).round() as i32 * 5),
+        SliderId::Bpm => PanelCommand::SetBpm(value.round()),
         SliderId::LaunchSize | SliderId::LaunchSpeed | SliderId::LaunchMinParticles => {
             unreachable!("launch sliders edit the draft; Apply & relaunch emits")
         }
@@ -1715,6 +1751,12 @@ fn button_command(id: ButtonId, state: &PanelState) -> PanelCommand {
         ButtonId::CycleHud => PanelCommand::Plain(Command::CycleHud),
         ButtonId::Screenshot => PanelCommand::Plain(Command::Screenshot),
         ButtonId::ClearWells => PanelCommand::Plain(Command::ClearWells),
+        ButtonId::CycleBeatDiv => PanelCommand::SetBeatDiv(match state.beat_div {
+            1 => 2,
+            2 => 4,
+            4 => 8,
+            _ => 1,
+        }),
         ButtonId::ClearWalls => PanelCommand::Plain(Command::ClearWalls),
         ButtonId::ClearEmitters => PanelCommand::Plain(Command::ClearEmitters),
         ButtonId::ExportScene => PanelCommand::Plain(Command::ExportScene),
@@ -2317,6 +2359,52 @@ mod tests {
         assert_eq!(gui.reaim_target, Some(3));
         gui.disarm();
         assert_eq!(gui.reaim_target, None);
+    }
+
+    #[test]
+    fn bpm_slider_emits_rounded_set_bpm() {
+        let mut gui = open_gui();
+        let mut s = state();
+        s.beat_div = 4;
+        let track = find_slider_track(&s, SliderId::Bpm);
+        gui.set_cursor(track.x + track.w / 2.0, track.y + 2.0);
+        gui.input.pressed = true;
+        let cmds = gui.tick(0.016, &s, 800, 600, false, 0.0);
+        assert!(
+            cmds.iter().any(|c| matches!(c, PanelCommand::SetBpm(v)
+                if (v - 150.0).abs() < 1e-9)),
+            "mid-track on a 0-300 linear slider is 150: {}",
+            cmds.len()
+        );
+        // The 0 detent renders as "off" in the layout text.
+        let (items, _) = layout(&s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0);
+        let text = items
+            .iter()
+            .find_map(|laid| match &laid.item {
+                Item::Slider {
+                    id: SliderId::Bpm,
+                    text,
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .expect("bpm slider in layout");
+        assert_eq!(text, "off", "bpm 0 reads as off");
+    }
+
+    #[test]
+    fn beat_div_button_cycles_the_grid() {
+        let mut gui = open_gui();
+        let mut s = state();
+        for (now, next) in [(1u32, 2u32), (2, 4), (4, 8), (8, 1)] {
+            s.beat_div = now;
+            let cmds = click_button(&mut gui, &s, ButtonId::CycleBeatDiv);
+            assert!(
+                cmds.iter()
+                    .any(|c| matches!(c, PanelCommand::SetBeatDiv(d) if *d == next)),
+                "{now} steps to {next}"
+            );
+        }
     }
 
     #[test]

@@ -17,6 +17,9 @@ pub const ELASTICITY_MAX: f64 = 1.5;
 pub const EXPLOSION_THRESHOLD_MAX: usize = 1000;
 /// Particle-ping volume ceiling (percent).
 pub const PING_VOLUME_MAX: i32 = 100;
+/// Playable quantize-tempo band; 0 (off) sits outside it deliberately.
+pub const BPM_MIN: f64 = 30.0;
+pub const BPM_MAX: f64 = 300.0;
 
 /// How particles are colored.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -184,6 +187,16 @@ pub struct Config {
     #[arg(long, value_enum, default_value_t = ChimeTimbre::Chime)]
     pub chime_timbre: ChimeTimbre,
 
+    /// Quantize emitters to a beat grid at this tempo in BPM (0 = off,
+    /// emitters free-run; toggle at runtime with L). An emission that
+    /// comes due waits and fires on the next grid tick
+    #[arg(long, default_value_t = 0.0, value_parser = parse_bpm)]
+    pub bpm: f64,
+
+    /// Beat-grid resolution in ticks per beat: 1, 2, 4, or 8
+    #[arg(long, default_value_t = 4, value_parser = parse_beat_div)]
+    pub beat_div: u32,
+
     /// Mirror the frame 4-fold around the screen center (toggle at runtime
     /// with K)
     #[arg(long)]
@@ -271,6 +284,9 @@ impl Config {
         }
         if self.ping_volume != PING_VOLUME_MAX {
             println!("Ping volume: {}%", self.ping_volume);
+        }
+        if self.bpm > 0.0 {
+            println!("Quantize: {} bpm / {} per beat", self.bpm, self.beat_div);
         }
         if self.wall_chimes {
             match self.chime_timbre {
@@ -474,6 +490,10 @@ pub const CONTROLS: &[(&str, &str)] = &[
     ("S", "Toggle musical pings (pentatonic scale)"),
     ("; / '", "Adjust particle-ping volume by 10%"),
     ("I", "Toggle wall chimes (walls play notes on impact)"),
+    (
+        "L",
+        "Toggle emitter quantize: emissions snap to the beat grid (--bpm)",
+    ),
     ("K", "Toggle kaleidoscope rendering"),
     ("G (hold)", "Gravity well at the cursor; Shift+G repels"),
     ("W", "Pin a persistent well at the cursor; Shift+W repels"),
@@ -530,6 +550,25 @@ fn parse_range_f64(s: &str, name: &str, min: f64, max: f64) -> Result<f64, Strin
 
 fn parse_elasticity(s: &str) -> Result<f64, String> {
     parse_range_f64(s, "elasticity", 0.0, ELASTICITY_MAX)
+}
+
+/// 0 turns the beat grid off; any other tempo must be playable.
+fn parse_bpm(s: &str) -> Result<f64, String> {
+    let value: f64 = s.parse().map_err(|_| "bpm must be a number".to_string())?;
+    if value == 0.0 || (value.is_finite() && (BPM_MIN..=BPM_MAX).contains(&value)) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "bpm must be 0 (off) or between {BPM_MIN} and {BPM_MAX}"
+        ))
+    }
+}
+
+fn parse_beat_div(s: &str) -> Result<u32, String> {
+    match s.parse() {
+        Ok(v @ (1 | 2 | 4 | 8)) => Ok(v),
+        _ => Err("beat-div must be 1, 2, 4, or 8 ticks per beat".to_string()),
+    }
 }
 
 fn parse_particle_size(s: &str) -> Result<f64, String> {
@@ -660,6 +699,34 @@ mod tests {
     fn music_and_kaleidoscope_flags_parse() {
         assert!(parse(&["--music"]).unwrap().music);
         assert!(parse(&["--kaleidoscope"]).unwrap().kaleidoscope);
+    }
+
+    #[test]
+    fn bpm_accepts_off_and_the_playable_band() {
+        let config = parse(&[]).unwrap();
+        assert_eq!(config.bpm, 0.0, "quantize defaults off");
+        assert_eq!(config.beat_div, 4);
+        assert_eq!(parse(&["--bpm", "0"]).unwrap().bpm, 0.0);
+        assert_eq!(parse(&["--bpm", "30"]).unwrap().bpm, 30.0);
+        assert_eq!(parse(&["--bpm", "120"]).unwrap().bpm, 120.0);
+        assert_eq!(parse(&["--bpm", "300"]).unwrap().bpm, 300.0);
+        assert!(parse(&["--bpm", "29"]).is_err(), "below the band");
+        assert!(parse(&["--bpm", "301"]).is_err(), "above the band");
+        assert!(parse(&["--bpm", "-60"]).is_err());
+        assert!(parse(&["--bpm", "nan"]).is_err());
+    }
+
+    #[test]
+    fn beat_div_is_restricted_to_musical_subdivisions() {
+        for div in [1, 2, 4, 8] {
+            assert_eq!(
+                parse(&["--beat-div", &div.to_string()]).unwrap().beat_div,
+                div
+            );
+        }
+        assert!(parse(&["--beat-div", "3"]).is_err());
+        assert!(parse(&["--beat-div", "0"]).is_err());
+        assert!(parse(&["--beat-div", "16"]).is_err());
     }
 
     #[test]

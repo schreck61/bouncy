@@ -4,6 +4,23 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Quantize — emitters can snap to a beat grid (roadmap: the sequencer
+  rung's optional snap). `--bpm 30-300` sets the tempo (0 = off, the
+  default; `L` toggles at runtime and remembers the session's tempo),
+  `--beat-div 1|2|4|8` picks the grid resolution in ticks per beat.
+  Emitters keep their continuous rates: an emission that comes due
+  waits and fires on the next tick, at most one per tick per emitter,
+  and blocked ticks stay spent — no backlog bursts. The grid rides the
+  simulation clock, so pausing holds the beat and time scale acts as a
+  tempo multiplier. Both panels grow a Quantize slider and a beat-grid
+  cycle button; scenes export the tempo, share links carry it, and
+  panel relaunches keep it.
+- Fixed: copying a share link after changing the ping volume threw in
+  the panel (a missing formatter in the URL builder) instead of
+  copying.
+
 ## 1.10.0 — 2026-07-21
 
 - Inspector — select and edit a single emitter or wall stroke, on both

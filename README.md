@@ -79,6 +79,8 @@ cargo run --release -- --spawn-at-collision
 | `--wall-chimes` | Walls play pentatonic notes when particles strike them — longer wall, lower note | Off |
 | `--ping-volume <PERCENT>` | Particle collision ping volume, 0-100 (0 silences pings; wall chimes and the explosion rumble are unaffected) | 100 |
 | `--chime-timbre <VOICE>` | The voice wall chimes play with: `chime`, `marimba`, `pluck`, `drum`, or `bell` (the instrument presets each pick their own; particle pings are unaffected) | chime |
+| `--bpm <N>` | Quantize emitters to a beat grid at this tempo (30-300); emissions that come due wait for the next grid tick; 0 = off, emitters free-run (L toggles at runtime) | 0 |
+| `--beat-div <N>` | Beat-grid resolution in ticks per beat: `1`, `2`, `4`, or `8` | 4 |
 | `--kaleidoscope` | Mirror the frame 4-fold around the screen center | Off |
 | `--trails` | Leave motion trails behind particles | Off |
 | `--panel` | Start with the native control panel open (Tab toggles; the right-edge handle also reveals it) | Off |
@@ -117,6 +119,7 @@ cargo run --release -- --spawn-at-collision
 | `S` | Toggle musical pings (pentatonic scale) |
 | `;` / `'` | Adjust particle-ping volume by 10% |
 | `I` | Toggle wall chimes (walls play notes on impact) |
+| `L` | Toggle emitter quantize: emissions snap to the beat grid (`--bpm`) |
 | `K` | Toggle kaleidoscope rendering |
 | `G` (hold) | Gravity well: attract particles toward the cursor; `Shift+G` repels |
 | `W` | Pin a persistent gravity well at the cursor; `Shift+W` pins a repeller |

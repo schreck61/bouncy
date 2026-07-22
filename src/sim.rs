@@ -253,6 +253,12 @@ pub struct Simulation {
     pub particle_elasticity: f64,
     /// Spawns/sec that trigger an automatic explosion; 0 = never.
     pub explosion_threshold: usize,
+    /// Quantize tempo in BPM; 0 = off (emitters free-run). With a
+    /// tempo set, emissions that come due wait for the next tick of
+    /// the beat grid anchored to `sim_time`.
+    pub bpm: f64,
+    /// Beat-grid resolution in ticks per beat (1, 2, 4, or 8).
+    pub beat_div: u32,
     /// Fusion/fission mechanics enabled.
     pub matter: bool,
     /// Ambient flow field enabled.
@@ -341,6 +347,8 @@ impl Simulation {
             wall_elasticity: config.wall_elasticity,
             particle_elasticity: config.particle_elasticity,
             explosion_threshold: config.explosion_threshold,
+            bpm: config.bpm,
+            beat_div: config.beat_div,
             matter: config.matter,
             flow: config.flow,
             self_gravity: config.self_gravity,
@@ -1131,7 +1139,8 @@ impl Simulation {
     /// particles do not join the birth-rate window (like bursts and
     /// comets): a steady clock must never trip the auto-explosion. They
     /// emit regardless of spawn mode — emitters are user-placed sources,
-    /// not ambient spawning.
+    /// not ambient spawning. With a quantize tempo set, the schedule
+    /// snaps to the beat grid instead of free-running.
     fn run_emitters(&mut self, dt: f64) {
         if self.emitters.is_empty() {
             return;
@@ -1147,37 +1156,92 @@ impl Simulation {
                 self.emitter_counts[k] += 1;
             }
         }
+        if self.bpm > 0.0 {
+            self.run_emitters_quantized(dt);
+            return;
+        }
         for k in 0..self.emitters.len() {
             let mut e = self.emitters[k];
             e.accum += dt;
             let period = 1.0 / e.rate;
             while e.accum >= period {
                 e.accum -= period;
-                if self.particles.len() >= self.max_particles
-                    || self.emitter_counts[k] >= e.cap
-                    || self.spawn_blocked(e.x, e.y)
-                {
-                    // Skipped emissions drain the accumulator: a cleared
-                    // blockage resumes the beat, it does not burst a
-                    // backlog.
-                    continue;
-                }
-                let mut p = Particle::new_moving(
-                    &mut self.rng,
-                    e.x,
-                    e.y,
-                    e.dx * self.initial_speed,
-                    e.dy * self.initial_speed,
-                    self.base_radius,
-                );
-                p.origin = Some(e.id);
-                let p = self.stamp(p);
-                self.particles.push(p);
-                self.emitter_counts[k] += 1;
-                self.wake();
+                // Blocked emissions drain the accumulator either way: a
+                // cleared blockage resumes the beat, it does not burst
+                // a backlog.
+                self.try_emit(k);
             }
             self.emitters[k] = e;
         }
+    }
+
+    /// The quantized schedule: a grid of `bpm * beat_div` ticks per
+    /// minute of simulated time, anchored at `sim_time == 0` (so
+    /// `time_scale` acts as a tempo multiplier and pausing holds the
+    /// beat). `sim_time` has already advanced when this runs, so the
+    /// step spans `(sim_time - dt, sim_time]`. An emission that comes
+    /// due between ticks waits and fires on the next tick; each tick
+    /// fires at most one particle per emitter and then clamps the
+    /// accumulator to one period — the grid caps the effective rate at
+    /// the tick rate, and neither a blocked stretch nor a rate far
+    /// above the tick rate ever bursts a backlog.
+    fn run_emitters_quantized(&mut self, dt: f64) {
+        let tick = 60.0 / (self.bpm * f64::from(self.beat_div));
+        let (t0, t1) = (self.sim_time - dt, self.sim_time);
+        // Strict lower bound: a tick landing exactly on a step boundary
+        // belongs to the step that starts there, never to both.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let first = (t0 / tick).floor() as u64 + 1;
+        for k in 0..self.emitters.len() {
+            let mut e = self.emitters[k];
+            let period = 1.0 / e.rate;
+            let mut prev = t0;
+            let mut n = first;
+            #[allow(clippy::cast_precision_loss)]
+            while (n as f64) * tick <= t1 {
+                let tk = (n as f64) * tick;
+                e.accum += tk - prev;
+                prev = tk;
+                if e.accum >= period {
+                    e.accum -= period;
+                    // Blocked ticks drain, exactly like the free path.
+                    self.try_emit(k);
+                }
+                e.accum = e.accum.min(period);
+                n += 1;
+            }
+            // The tail past the last tick accrues unclamped, so an
+            // emission that is due keeps waiting into the next step.
+            e.accum += t1 - prev;
+            self.emitters[k] = e;
+        }
+    }
+
+    /// Attempt one emission from emitter index `k` (live counts already
+    /// filled). Does nothing when blocked — population cap, the
+    /// emitter's live cap, or a plugged muzzle; both schedules treat a
+    /// blocked emission as spent.
+    fn try_emit(&mut self, k: usize) {
+        let e = self.emitters[k];
+        if self.particles.len() >= self.max_particles
+            || self.emitter_counts[k] >= e.cap
+            || self.spawn_blocked(e.x, e.y)
+        {
+            return;
+        }
+        let mut p = Particle::new_moving(
+            &mut self.rng,
+            e.x,
+            e.y,
+            e.dx * self.initial_speed,
+            e.dy * self.initial_speed,
+            self.base_radius,
+        );
+        p.origin = Some(e.id);
+        let p = self.stamp(p);
+        self.particles.push(p);
+        self.emitter_counts[k] += 1;
+        self.wake();
     }
 
     /// Whether a particle of base radius sitting at `(x, y)` would
@@ -4416,7 +4480,165 @@ mod tests {
         assert!((rdx - e.dx).abs() < 1e-2 && (rdy - e.dy).abs() < 1e-2);
     }
 
-    // ---- Inspector --------------------------------------------------
+    // ---- Quantize ---------------------------------------------------
+
+    /// Step `s` in fixed `dt` slices, recording `sim_time` at the end
+    /// of every step that emitted, and purging emitted particles after
+    /// each step so the muzzle never clogs and the live cap never
+    /// binds. Asserts at most one emission per step (small `dt` keeps
+    /// at most one tick per step in these tests).
+    fn emission_times(s: &mut Simulation, dt: f64, steps: usize) -> Vec<f64> {
+        let now = Instant::now();
+        let mut times = Vec::new();
+        for _ in 0..steps {
+            let before = s.particle_count();
+            s.step(dt, now, None);
+            let emitted = s.particle_count() - before;
+            assert!(emitted <= 1, "one emission per tick at most");
+            if emitted == 1 {
+                times.push(s.sim_time);
+            }
+            s.particles.retain(|p| p.origin.is_none());
+        }
+        times
+    }
+
+    /// Every recorded emission step must contain a grid tick: some
+    /// integer multiple of `tick` inside `(t_end - dt, t_end]`.
+    fn assert_on_ticks(times: &[f64], tick: f64, dt: f64) {
+        for &t in times {
+            let k = (t / tick + 1e-9).floor();
+            let boundary = k * tick;
+            assert!(
+                boundary > t - dt - 1e-9 && boundary <= t + 1e-9,
+                "emission at sim_time {t} has no tick in its step (tick {tick})"
+            );
+        }
+    }
+
+    #[test]
+    fn quantized_emissions_land_only_on_ticks() {
+        let mut s = emitter_sim();
+        s.bpm = 120.0;
+        s.beat_div = 4; // T = 0.125
+        assert!(s.place_emitter(50.0, 300.0, 1.0, 0.0, 6.0, 100));
+        let times = emission_times(&mut s, 0.01, 200); // 2.0 sim-seconds
+        assert!(!times.is_empty(), "the stream must run");
+        assert_on_ticks(&times, 0.125, 0.01);
+    }
+
+    #[test]
+    fn slow_emitter_waits_for_the_next_tick() {
+        let mut s = emitter_sim();
+        s.bpm = 120.0;
+        s.beat_div = 4; // T = 0.125
+        // Period 1/3 s: due at 0.333 and 0.667, which are not ticks —
+        // the emissions wait and land on 0.375 and 0.75.
+        assert!(s.place_emitter(50.0, 300.0, 1.0, 0.0, 3.0, 100));
+        let times = emission_times(&mut s, 0.005, 180); // 0.9 sim-seconds
+        assert!(times.len() >= 2, "two emissions in 0.9s at 3/s");
+        assert!((times[0] - 0.375).abs() < 0.01, "first: {}", times[0]);
+        assert!((times[1] - 0.75).abs() < 0.01, "second: {}", times[1]);
+    }
+
+    #[test]
+    fn fast_emitter_fires_once_per_tick() {
+        let mut s = emitter_sim();
+        s.bpm = 60.0;
+        s.beat_div = 1; // T = 1.0
+        // 20/s wants twenty times the grid rate; the grid caps it at
+        // one per tick with no backlog.
+        assert!(s.place_emitter(50.0, 300.0, 1.0, 0.0, 20.0, 100));
+        // 5.1 sim-seconds: the 0.05-float accumulation can push a
+        // whole-second tick just past a step boundary, so overshoot the
+        // window rather than land exactly on the fifth tick.
+        let times = emission_times(&mut s, 0.05, 102);
+        assert_eq!(times.len(), 5, "one per whole-beat tick: {times:?}");
+        assert_on_ticks(&times, 1.0, 0.05);
+    }
+
+    #[test]
+    fn div_change_retunes_the_grid() {
+        let mut s = emitter_sim();
+        s.bpm = 60.0;
+        s.beat_div = 1;
+        assert!(s.place_emitter(50.0, 300.0, 1.0, 0.0, 20.0, 100));
+        // 3.1 s: overshoot the third whole-second tick (float drift).
+        let coarse = emission_times(&mut s, 0.05, 62);
+        assert_eq!(coarse.len(), 3, "whole-beat grid: {coarse:?}");
+        s.beat_div = 4; // T = 0.25 from here on
+        let fine = emission_times(&mut s, 0.05, 20); // (3.1, 4.1]
+        assert_eq!(fine.len(), 4, "quarter-beat grid: {fine:?}");
+        assert_on_ticks(&fine, 0.25, 0.05);
+    }
+
+    #[test]
+    fn multi_tick_step_never_bursts_a_backlog() {
+        let mut s = emitter_sim();
+        s.bpm = 120.0;
+        s.beat_div = 4; // T = 0.125
+        assert!(s.place_emitter(50.0, 300.0, 1.0, 0.0, 20.0, 100));
+        // One 0.5 s step contains four ticks; the muzzle only clears
+        // between steps, so exactly one particle can materialize and
+        // the other ticks drain — no backlog survives.
+        let now = Instant::now();
+        s.step(0.5, now, None);
+        assert_eq!(emitted_count(&s, s.emitters()[0].id), 1);
+        let period = 1.0 / s.emitters()[0].rate;
+        assert!(
+            s.emitters[0].accum <= period + 1e-9,
+            "accumulator clamped at one period: {}",
+            s.emitters[0].accum
+        );
+        // The drained ticks stay spent: small follow-up steps emit on
+        // later ticks only, never in a catch-up burst.
+        s.particles.retain(|p| p.origin.is_none());
+        let times = emission_times(&mut s, 0.01, 50); // 0.5 s more
+        assert!(
+            times.len() <= 4,
+            "at most one per remaining tick: {times:?}"
+        );
+        assert_on_ticks(&times, 0.125, 0.01);
+    }
+
+    #[test]
+    fn blocked_tick_drains_without_backlog() {
+        let mut s = emitter_sim();
+        s.bpm = 120.0;
+        s.beat_div = 4; // T = 0.125
+        assert!(s.place_emitter(400.0, 300.0, 1.0, 0.0, 16.0, 100));
+        // Park a plug exactly on the muzzle: every tick is due
+        // (period 1/16 < T) but blocked, and blocked ticks drain.
+        s.particles[0].x = 400.0;
+        s.particles[0].y = 300.0;
+        let id = s.emitters()[0].id;
+        let now = Instant::now();
+        for _ in 0..50 {
+            s.step(0.01, now, None);
+        }
+        assert_eq!(emitted_count(&s, id), 0, "plugged muzzle stays silent");
+        // Unplug: the stream resumes on the grid, one per tick, no
+        // burst of the ~4 ticks that were blocked.
+        s.particles[0].x = 700.0;
+        let times = emission_times(&mut s, 0.01, 50); // 0.5 s ≈ 4 ticks
+        assert!(
+            (3..=4).contains(&times.len()),
+            "one per tick after unblocking: {times:?}"
+        );
+        assert_on_ticks(&times, 0.125, 0.01);
+    }
+
+    #[test]
+    fn quantized_emitters_are_deterministic_under_seed() {
+        let run = || {
+            let mut s = emitter_sim();
+            s.bpm = 97.0;
+            s.beat_div = 8;
+            assert!(s.place_emitter(50.0, 300.0, 1.0, 0.0, 7.3, 100));
+            emission_times(&mut s, 0.013, 150)
+        };
+        assert_eq!(run(), run(), "identical timeline under one seed");
+    }
 
     /// A quiet sim with one emitter at (100, 100) and one two-segment
     /// stroke along y=300 from x=200 to x=400.

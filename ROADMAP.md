@@ -37,6 +37,11 @@ file only tracks what's ahead.
   select an emitter or wall stroke on either shell (panel Select tool
   or hold-D-and-click) to retune its rate, cap, and aim or cycle its
   chime note, or delete it alone instead of clearing everything.
+- **1.11** locked it to a pulse: quantize (`--bpm`, `--beat-div`, the
+  `L` toggle) snaps due emissions to a beat grid on the simulation
+  clock — pause holds the beat, time scale bends the tempo — with a
+  Quantize slider and beat-grid button on both panels, and tempo
+  riding scenes, share links, and relaunches.
 - **1.3** shipped the browser demo: the same simulation compiled to
   WebAssembly with an HTML control panel over the `Command` dispatch,
   WebAudio, live resize, share links, launch options, and an optional
@@ -61,12 +66,13 @@ file only tracks what's ahead.
   core). Staged so each rung is independently shippable and the first
   needs no external gear — most people don't have a DAW, so the
   instrument must sound good standing alone:
-  1. *Emitters.* (Shipped free-running in 1.9.0; the optional
-     quantize snap below remains.) A pinned spawner with direction, rate, and count cap
+  1. *Emitters.* (Shipped: free-running in 1.9.0, the quantize snap
+     in 1.11.0 — `--bpm`/`--beat-div`, snap-when-due on the sim
+     clock.) A pinned spawner with direction, rate, and count cap
      (the burst/comet machinery is most of it): the "sequencer clock"
-     that makes rhythms reproducible instead of one-shot. An optional
-     in-app quantize snap serves the no-DAW majority; purists get
-     rubato by leaving it off.
+     that makes rhythms reproducible instead of one-shot. The in-app
+     quantize snap serves the no-DAW majority; purists get rubato by
+     leaving it off.
   2. *MIDI out.* Native via `midir`, browser via WebMIDI (Chrome,
      matching the demo's existing Chrome-first stance); per-wall note
      mapping becomes per-wall MIDI note/channel. Strict timing stays

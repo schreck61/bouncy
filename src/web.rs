@@ -51,6 +51,9 @@ pub struct Snapshot {
     pub muted: bool,
     pub music: bool,
     pub ping_volume: i32,
+    /// Quantize tempo (0 = off) and beat-grid ticks per beat.
+    pub bpm: f64,
+    pub beat_div: u32,
     /// Whether the `WebAudio` engine has been created (needs a user
     /// gesture; see [`WebHandle::enable_audio`]).
     pub audio_ready: bool,
@@ -206,6 +209,18 @@ impl WebHandle {
     /// Set the particle-ping volume (0-100 percent).
     pub fn set_ping_volume(&self, percent: i32) {
         self.push(WebCommand::SetPingVolume(percent));
+    }
+
+    /// Quantize tempo in BPM (0 = off; the app snaps 1-29 up to 30 and
+    /// clamps at 300, like --bpm).
+    pub fn set_bpm(&self, bpm: f64) {
+        self.push(WebCommand::SetBpm(bpm));
+    }
+
+    /// Beat-grid resolution in ticks per beat; only 1, 2, 4, or 8 take
+    /// effect, like --beat-div.
+    pub fn set_beat_div(&self, div: u32) {
+        self.push(WebCommand::SetBeatDiv(div));
     }
 
     /// Place an emitter at `(x, y)`, aimed at the arena center.
