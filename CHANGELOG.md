@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.13.0 — 2026-07-22
 
 - Filter walls — a wall stroke can be semipermeable (drawn dashed).
   A *gate* (`gate = N` in scenes, the inspector's Gate button) passes
