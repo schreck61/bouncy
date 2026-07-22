@@ -47,6 +47,15 @@ file only tracks what's ahead.
   — pentatonic degrees as keys from middle C, velocity from impact,
   guaranteed note-offs — independent of the local mute, with the `Y`
   toggle and a panel row while connected.
+- **1.13** completed the instrument roadmap with filter walls:
+  semipermeable strokes drawn dashed — gates (every Nth striker
+  passes silently, blocked strikes chime: an audible escapement) and
+  pass-note walls routing particles stamped by noted emitters —
+  configured from either inspector or scene files (`gate`/`pass-note`
+  wall keys, emitter `note`), with only the bounce branch consulting
+  the filter, so spawns, bursts, and matter still treat every wall as
+  solid and the divided-arena audit proves a gate leaks exactly its
+  grants.
 - **1.3** shipped the browser demo: the same simulation compiled to
   WebAssembly with an HTML control panel over the `Command` dispatch,
   WebAudio, live resize, share links, launch options, and an optional
@@ -64,35 +73,18 @@ file only tracks what's ahead.
   once; raise the parallel thresholds on wasm (the 1024 break-even was
   measured natively); cap the web thread pool below
   `hardwareConcurrency`; longer-term, a WebGL/WebGPU present path.
-- **The emergent instrument (staged).** From user feedback: walls that
-  play notes turn the sim into an Otomata-style generative sequencer,
-  and the primitives already exist (collision-driven synth, pentatonic
-  music mode, per-segment walls, stable particle ids, deterministic
-  core). Staged so each rung is independently shippable and the first
-  needs no external gear — most people don't have a DAW, so the
-  instrument must sound good standing alone:
-  1. *Emitters.* (Shipped: free-running in 1.9.0, the quantize snap
-     in 1.11.0 — `--bpm`/`--beat-div`, snap-when-due on the sim
-     clock.) A pinned spawner with direction, rate, and count cap
-     (the burst/comet machinery is most of it): the "sequencer clock"
-     that makes rhythms reproducible instead of one-shot. The in-app
-     quantize snap serves the no-DAW majority; purists get rubato by
-     leaving it off.
-  2. *MIDI out.* (Shipped natively in 1.12.0: `midir`, `--midi-port`
-     / `--list-midi-ports`, chimes on channel 1 with velocity from
-     impact, the `Y` toggle. Recording the IAC bus in a DAW already
-     covers capture for DAW owners.) Still ahead from this rung:
-     browser WebMIDI (Chrome, matching the demo's Chrome-first
-     stance), per-wall MIDI note/channel mapping, and a self-contained
-     capture/export path (MIDI file or WAV of the internal synth) for
-     everyone without a DAW. Strict timing stays the DAW's job.
-  3. *Filter walls.* Semipermeable walls (every-Nth-particle gates,
-     key/mode filters on note-carrying particles) — the full
-     generative toolkit. Permeability must be an explicit wall *type*:
-     solid walls keep the absolute containment guarantee the 1.4.x
-     releases established, and every wall-invariant code path (pair
-     filter, spawn side-checks, matter containment) branches on type.
-     The divided-arena audit harness re-verifies each new type.
+- **The emergent instrument: deferred MIDI rungs.** The staged
+  instrument program that grew out of user feedback (walls that play
+  notes turn the sim into an Otomata-style generative sequencer) is
+  now complete — emitters shipped in 1.9.0 with the quantize snap in
+  1.11.0, MIDI out in 1.12.0, and filter walls closed it out in
+  1.13.0 (see "Shipped so far"). What remains from the MIDI rung:
+  browser WebMIDI (Chrome, matching the demo's Chrome-first stance),
+  per-wall MIDI note/channel mapping via scene keys, and a
+  self-contained capture/export path (MIDI file or WAV of the
+  internal synth) for everyone without a DAW — recording the IAC bus
+  in a DAW already covers capture for DAW owners, and strict timing
+  stays the DAW's job.
 
 ## Smaller / opportunistic
 

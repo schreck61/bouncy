@@ -187,7 +187,18 @@ A slowly drifting field of currents that particles are *entrained into*: each pa
 
 ### Drawable Walls (`V`)
 
-Hold `V` and drag to paint static walls: the cursor path becomes a polyline of segments (up to 200) that particles bounce off under the same elasticity rule as the arena walls. Wall contact is swept over each particle's motion and resolved on both sides of particle-particle resolution, so neither raw speed, a low frame rate, nor a crowd pressing from behind can force a particle through a wall — and no collision is ever detected, or spawn site recorded, from a position on the wrong side of one. Walls are full interaction boundaries, not just obstacles: particles never exchange impulses or fuse through a wall, and everything born near one — collision spawns, burst particles, fission fragments — appears on the same side as whatever created it. A full-height wall genuinely divides the arena into independent halves. `Shift+V` erases all walls; `R` (reset) clears them too. Collision-triggered spawns refuse positions inside a wall, so nothing materializes embedded in one. Combine with spawning and gravity for pachinko boards, funnels, and marble runs — this is a purely interactive tool, so it has no CLI flag.
+Hold `V` and drag to paint static walls: the cursor path becomes a polyline of segments (up to 200) that particles bounce off under the same elasticity rule as the arena walls. Wall contact is swept over each particle's motion and resolved on both sides of particle-particle resolution, so neither raw speed, a low frame rate, nor a crowd pressing from behind can force a particle through a wall — and no collision is ever detected, or spawn site recorded, from a position on the wrong side of one. Walls are full interaction boundaries, not just obstacles: particles never exchange impulses or fuse through a wall, and everything born near one — collision spawns, burst particles, fission fragments — appears on the same side as whatever created it. A full-height wall genuinely divides the arena into independent halves; the one deliberate exception is a wall carrying a filter (see The Emergent Instrument below), which passes exactly the bouncing particles its gate or note filter grants and remains solid to every other mechanism. `Shift+V` erases all walls; `R` (reset) clears them too. Collision-triggered spawns refuse positions inside a wall, so nothing materializes embedded in one. Combine with spawning and gravity for pachinko boards, funnels, and marble runs — this is a purely interactive tool, so it has no CLI flag.
+
+### The Emergent Instrument (chimes, emitters, quantize, MIDI, filters)
+
+A family of mechanics that turns the sim into an Otomata-style generative sequencer, built up release by release:
+
+- **Wall chimes** (`--wall-chimes` / `I`): walls play pentatonic notes on impact — pitch derived from stroke length (long bar, low note), volume from impact speed, stereo pan from the contact point, with a hit flash on the struck stroke. Scenes can pin a note or mark a wall silent; `--chime-timbre` picks the voice.
+- **Emitters** (`U` hold-and-drag, or panel): pinned spawners firing one particle at a time in a fixed direction at a steady rate, pausing at a live-particle cap — the sequencer clock that makes rhythms reproducible. A wall placed in an emitter's path becomes a repeating note; the round-trip distance sets the period (the `clockwork` preset is three such lanes in a polyrhythm).
+- **Quantize** (`--bpm`/`--beat-div` / `L`): emissions that come due wait for the next tick of a beat grid anchored to the simulation clock, so pause holds the beat and time scale bends the tempo.
+- **The inspector** (`D`+click or the panel Select tool): select an emitter or wall stroke to retune it live — rate, cap, aim, stamped note; chime note; gate and pass filters — or delete it alone.
+- **MIDI out** (`--midi-port` / `Y`, native): chime strikes become MIDI notes for a DAW or hardware synth, independent of the local mute.
+- **Filter walls** (inspector Gate/Pass buttons, scene `gate`/`pass-note` keys): semipermeable strokes, drawn dashed. A *gate* passes every Nth striking particle — blocked strikes bounce and chime, the Nth slips through silently, making the gate an audible escapement whose blocked-strike cadence is itself musical. A *pass-note* wall passes exactly the particles stamped with a matching note by an emitter, routing streams by pitch between chambers. Grant decisions live in per-stroke escapement state that persists while a slow particle finishes its crossing; every non-bounce mechanism (spawns, bursts, fusion/fission) still treats a filter wall as solid, and the divided-arena test audit proves a gated divider leaks exactly what its escapement grants.
 
 ### Kaleidoscope (`--kaleidoscope` / `K`)
 
@@ -435,7 +446,7 @@ Notable implementation details:
 cargo test
 ```
 
-Unit tests cover the collision model (momentum/energy conservation, restitution behavior), the spatial grid (validated against brute-force pair detection), explosion mechanics, argument parsing, text rendering, and audio synthesis.
+Unit tests cover the collision model (momentum/energy conservation, restitution behavior), the spatial grid (validated against brute-force pair detection), explosion mechanics, argument parsing, text rendering, audio synthesis, and the headless simulation core — scenes and presets, emitters and quantize, chimes and MIDI scheduling, the panel command surface, and the divided-arena containment audit with its gated and note-filter variants.
 
 ## License
 
