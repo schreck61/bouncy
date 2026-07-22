@@ -12,7 +12,7 @@
 //! level; user presets cannot base on each other).
 //!
 //! ```toml
-//! [pachinko]
+//! [pinball]
 //! description = "Big slow balls under heavy gravity"
 //! base = "billiards"
 //! gravity = 80
@@ -54,6 +54,18 @@ pub enum Preset {
     /// Self-gravitating dust with dissipative collisions: clumps form,
     /// fuse, and sweep their orbits clean.
     Accretion,
+    /// Four silent channels with drumming end caps: weightless particles
+    /// rattle the box and thump a stereo four-note tom pattern.
+    Percussion,
+    /// A stair of eleven pitched bars, high to low: falling particles
+    /// play descending pentatonic runs and floor-bounced ascents.
+    Marimba,
+    /// A staggered peg field under gravity: cascades plink down through
+    /// descending rows and funnel back up for another pass.
+    Pachinko,
+    /// A fan of six pitched strings grazed by particles orbiting a
+    /// binary of wells: slow rolled arpeggios, painted with trails.
+    Harp,
 }
 
 impl Preset {
@@ -66,6 +78,10 @@ impl Preset {
             Preset::Orbits => "orbits",
             Preset::Mandala => "mandala",
             Preset::Accretion => "accretion",
+            Preset::Percussion => "percussion",
+            Preset::Marimba => "marimba",
+            Preset::Pachinko => "pachinko",
+            Preset::Harp => "harp",
         }
     }
 
@@ -205,7 +221,235 @@ impl Preset {
                 "--explosion-threshold",
                 "0",
             ],
+            // The four instrument scenes share one recipe: chimes on,
+            // musical pings so incidental collisions stay in key, a fixed
+            // population (spawn off, explosions off), and the default
+            // 1.0 elasticities — energy is conserved, so the instrument
+            // plays itself indefinitely. Only gravity, speed, and sizing
+            // differ per instrument.
+            Preset::Percussion => &[
+                "--wall-chimes",
+                "--music",
+                "--gravity",
+                "0",
+                "--initial-speed",
+                "240",
+                "--particle-size",
+                "3",
+                "--min-particles",
+                "16",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
+            ],
+            Preset::Marimba => &[
+                "--wall-chimes",
+                "--music",
+                "--gravity",
+                "110",
+                "--initial-speed",
+                "140",
+                "--particle-size",
+                "3",
+                "--min-particles",
+                "12",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
+            ],
+            Preset::Pachinko => &[
+                "--wall-chimes",
+                "--music",
+                "--gravity",
+                "130",
+                "--initial-speed",
+                "100",
+                "--particle-size",
+                "3.5",
+                "--min-particles",
+                "8",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
+            ],
+            Preset::Harp => &[
+                "--wall-chimes",
+                "--music",
+                "--trails",
+                "--gravity",
+                "0",
+                "--initial-speed",
+                "220",
+                "--particle-size",
+                "2",
+                "--min-particles",
+                "30",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
+            ],
         }
+    }
+
+    /// The preset's scene geometry, placed exactly like a user preset's
+    /// `walls`/`wells` keys. Most bundles are settings-only; the
+    /// instrument presets carry the walls that make them instruments.
+    /// Exhaustive so a new variant forces a conscious scene decision.
+    pub(crate) fn scene(self) -> Scene {
+        match self {
+            Preset::Fireworks
+            | Preset::Blob
+            | Preset::Billiards
+            | Preset::Peace
+            | Preset::Orbits
+            | Preset::Mandala
+            | Preset::Accretion => Scene::default(),
+            Preset::Percussion => percussion_scene(),
+            Preset::Marimba => marimba_scene(),
+            Preset::Pachinko => pachinko_scene(),
+            Preset::Harp => harp_scene(),
+        }
+    }
+}
+
+// ---- Instrument scenes -------------------------------------------------
+//
+// Shared geometry language: window fractions, sounding walls always pin
+// their pentatonic degree (auto pitch keys off the window diagonal and
+// would drift a degree across aspect ratios), silent walls are pure
+// geometry. All four rely on the default 1.0 elasticities: lossless
+// bounces are the "motor" that keeps an unattended scene playing.
+
+/// Four horizontal channels bounded by silent rails; each channel is
+/// sealed by a cap at both ends carrying the same low note, so every
+/// channel is one drum and stereo pan ping-pongs as particles shuttle.
+fn percussion_scene() -> Scene {
+    const RAIL_YS: [f64; 5] = [0.110, 0.305, 0.500, 0.695, 0.890];
+    // Channel caps top-to-bottom: G4, E4, D4, C4 — lowest channel,
+    // lowest drum.
+    const CAP_NOTES: [u8; 4] = [3, 2, 1, 0];
+    let mut walls: Vec<SceneWall> = RAIL_YS
+        .iter()
+        .map(|&y| silent(0.150, y, 0.850, y))
+        .collect();
+    for (k, &note) in CAP_NOTES.iter().enumerate() {
+        let (top, bottom) = (RAIL_YS[k], RAIL_YS[k + 1]);
+        walls.push(noted(0.150, top, 0.150, bottom, note));
+        walls.push(noted(0.850, top, 0.850, bottom, note));
+    }
+    Scene {
+        wells: Vec::new(),
+        walls,
+    }
+}
+
+/// Eleven tilted bars, one per pentatonic degree, top-left high to
+/// bottom-right low; each bar tips down-right (rise = 30% of half-length)
+/// so bounces shed particles toward the next lower bar, and the visual
+/// length gradient matches the pitch gradient.
+fn marimba_scene() -> Scene {
+    let walls = (0u8..11)
+        .map(|k| {
+            let kf = f64::from(k);
+            let (cx, cy) = (0.115 + 0.077 * kf, 0.140 + 0.068 * kf);
+            let half = 0.030 + 0.0045 * kf;
+            let rise = half * 0.3;
+            noted(cx - half, cy - rise, cx + half, cy + rise, 10 - k)
+        })
+        .collect();
+    Scene {
+        wells: Vec::new(),
+        walls,
+    }
+}
+
+/// Seven staggered rows of short pegs, pitch descending with depth, and
+/// two silent corner funnels that steer floor-bounced balls back into
+/// the field (the always-elastic arena floor is the return spring).
+fn pachinko_scene() -> Scene {
+    const PEG_HALF: f64 = 0.012;
+    let mut walls = Vec::new();
+    for row in 0u8..7 {
+        let y = 0.20 + 0.08 * f64::from(row);
+        let note = 9 - row;
+        let (count, x0) = if row % 2 == 0 { (8, 0.15) } else { (7, 0.20) };
+        for j in 0..count {
+            let cx = x0 + 0.10 * f64::from(j);
+            walls.push(noted(cx - PEG_HALF, y, cx + PEG_HALF, y, note));
+        }
+    }
+    // Funnels leave escape gaps at both ends so nothing can be trapped.
+    walls.push(silent(0.020, 0.780, 0.300, 0.940));
+    walls.push(silent(0.980, 0.780, 0.700, 0.940));
+    Scene {
+        wells: Vec::new(),
+        walls,
+    }
+}
+
+/// Six strings tangent to circles around the screen center, grazed by
+/// particles orbiting a vertical binary of wells: orbital motion crosses
+/// tangent chords at shallow angles, so passes pluck gently instead of
+/// slamming. Notes are the open set C4 E4 A4 C5 E5 A5.
+fn harp_scene() -> Scene {
+    const STRING_NOTES: [u8; 6] = [0, 2, 4, 5, 7, 9];
+    const RADII: [f64; 6] = [0.400, 0.362, 0.324, 0.286, 0.248, 0.210];
+    const HALF_LENS: [f64; 6] = [0.200, 0.175, 0.152, 0.130, 0.110, 0.092];
+    let walls = (0..6)
+        .map(|k| {
+            let kf = f64::from(u8::try_from(k).expect("six strings"));
+            let (r, half) = (RADII[k], HALF_LENS[k]);
+            let phi = (kf - 2.5) * 7.0_f64.to_radians();
+            let (tx, ty) = (0.5 - r * phi.cos(), 0.5 + r * phi.sin());
+            let (dx, dy) = (phi.sin(), phi.cos());
+            noted(
+                tx - half * dx,
+                ty - half * dy,
+                tx + half * dx,
+                ty + half * dy,
+                STRING_NOTES[k],
+            )
+        })
+        .collect();
+    Scene {
+        wells: vec![well(0.500, 0.300), well(0.500, 0.700)],
+        walls,
+    }
+}
+
+/// A sounding wall with a pinned scale degree (scene walls pin their
+/// notes so pitch survives aspect-ratio changes).
+const fn noted(x1: f64, y1: f64, x2: f64, y2: f64, note: u8) -> SceneWall {
+    SceneWall {
+        x1,
+        y1,
+        x2,
+        y2,
+        note: WallNote::Note(note),
+    }
+}
+
+/// Pure geometry: bounces, never chimes or flashes.
+const fn silent(x1: f64, y1: f64, x2: f64, y2: f64) -> SceneWall {
+    SceneWall {
+        x1,
+        y1,
+        x2,
+        y2,
+        note: WallNote::Silent,
+    }
+}
+
+/// An attracting pinned well.
+const fn well(x: f64, y: f64) -> SceneWell {
+    SceneWell {
+        x,
+        y,
+        polarity: Polarity::Attract,
     }
 }
 
@@ -226,6 +470,19 @@ pub struct SceneWell {
     pub polarity: Polarity,
 }
 
+/// How a wall sounds when chimes are on.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum WallNote {
+    /// Pitch derived from the stroke's length (the drawn-wall default).
+    #[default]
+    Auto,
+    /// Pinned pentatonic scale degree, 0 (lowest) up to `NOTE_COUNT`.
+    Note(u8),
+    /// Never sounds (and never flashes): pure geometry, like the
+    /// percussion box's guide rails.
+    Silent,
+}
+
 /// A wall segment in window-fraction coordinates.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct SceneWall {
@@ -233,9 +490,8 @@ pub struct SceneWall {
     pub y1: f64,
     pub x2: f64,
     pub y2: f64,
-    /// Explicit chime scale degree (0 = lowest). `None` derives pitch
-    /// from the wall's length when chimes are on.
-    pub note: Option<u8>,
+    /// How this wall sounds when chimes are on.
+    pub note: WallNote,
 }
 
 /// One user preset: an optional built-in to inherit from, an optional
@@ -466,7 +722,7 @@ fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>
                     y1: c[1],
                     x2: c[2],
                     y2: c[3],
-                    note: None,
+                    note: WallNote::Auto,
                 });
             }
             toml::Value::Table(table) => {
@@ -480,8 +736,32 @@ fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>
                         |v| parse_fraction(preset, "walls", v),
                     )
                 };
+                let silent = match table.get("silent") {
+                    None => false,
+                    Some(toml::Value::Boolean(true)) => true,
+                    Some(toml::Value::Boolean(false)) => {
+                        return Err(format!(
+                            "preset '{preset}': like the command line, a wall \
+                             can only be marked silent, not un-silent — drop \
+                             the 'silent = false' key"
+                        ));
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "preset '{preset}': wall 'silent' must be the \
+                             boolean true (got {other})"
+                        ));
+                    }
+                };
+                if silent && table.contains_key("note") {
+                    return Err(format!(
+                        "preset '{preset}': a wall cannot be both silent and \
+                         note-pinned — drop one of the keys"
+                    ));
+                }
                 let note = match table.get("note") {
-                    None => None,
+                    _ if silent => WallNote::Silent,
+                    None => WallNote::Auto,
                     Some(v) => {
                         let max = crate::audio::NOTE_COUNT - 1;
                         let range = 0..=i64::try_from(max).unwrap_or(i64::MAX);
@@ -494,7 +774,7 @@ fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>
                         };
                         // Bounds-checked against NOTE_COUNT - 1 (10) above.
                         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        Some(degree as u8)
+                        WallNote::Note(degree as u8)
                     }
                 };
                 walls.push(SceneWall {
@@ -508,7 +788,7 @@ fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>
             _ => {
                 return Err(format!(
                     "preset '{preset}': each wall must be an [x1, y1, x2, y2] \
-                     array or a {{ x1, y1, x2, y2, note }} table"
+                     array or a {{ x1, y1, x2, y2, note/silent }} table"
                 ));
             }
         }
@@ -590,20 +870,24 @@ pub fn scene_to_toml(
     if !walls.is_empty() {
         let walls = walls
             .iter()
-            .map(|w| match w.note {
-                // Note-free walls keep the legacy array form so exports
-                // stay readable by older binaries and diff-identical.
-                None => {
-                    toml::Value::Array(vec![w.x1.into(), w.y1.into(), w.x2.into(), w.y2.into()])
-                }
-                Some(note) => {
+            .map(|w| {
+                let table_with = |key: &str, value: toml::Value| {
                     let mut t = toml::Table::new();
                     t.insert("x1".into(), w.x1.into());
                     t.insert("y1".into(), w.y1.into());
                     t.insert("x2".into(), w.x2.into());
                     t.insert("y2".into(), w.y2.into());
-                    t.insert("note".into(), i64::from(note).into());
+                    t.insert(key.into(), value);
                     toml::Value::Table(t)
+                };
+                match w.note {
+                    // Auto walls keep the legacy array form so exports
+                    // stay readable by older binaries and diff-identical.
+                    WallNote::Auto => {
+                        toml::Value::Array(vec![w.x1.into(), w.y1.into(), w.x2.into(), w.y2.into()])
+                    }
+                    WallNote::Note(note) => table_with("note", i64::from(note).into()),
+                    WallNote::Silent => table_with("silent", true.into()),
                 }
             })
             .collect();
@@ -717,7 +1001,7 @@ mod tests {
     #[test]
     fn parses_presets_into_cli_args_and_base() {
         let user = parse_str(
-            "[pachinko]\n\
+            "[pinball]\n\
              base = \"billiards\"\n\
              gravity = 80\n\
              particle-size = 4.5\n\
@@ -725,7 +1009,7 @@ mod tests {
              trails = true\n",
         )
         .unwrap();
-        let preset = &user.presets["pachinko"];
+        let preset = &user.presets["pinball"];
         assert_eq!(preset.base, Some(Preset::Billiards));
         assert_eq!(
             preset.args,
@@ -796,7 +1080,7 @@ mod tests {
                 y1: 0.5,
                 x2: 0.9,
                 y2: 0.5,
-                note: None
+                note: WallNote::Auto
             }
         );
 
@@ -833,14 +1117,21 @@ mod tests {
                 y1: 0.2,
                 x2: 0.3,
                 y2: 0.4,
-                note: None,
+                note: WallNote::Auto,
             },
             SceneWall {
                 x1: 0.5,
                 y1: 0.6,
                 x2: 0.7,
                 y2: 0.6,
-                note: Some(4),
+                note: WallNote::Note(4),
+            },
+            SceneWall {
+                x1: 0.15,
+                y1: 0.8,
+                x2: 0.85,
+                y2: 0.8,
+                note: WallNote::Silent,
             },
         ];
         let text = scene_to_toml(
@@ -864,6 +1155,8 @@ mod tests {
         assert_eq!(preset.scene.walls, walls);
         // Note-free walls keep the legacy bare-array form on disk.
         assert!(text.contains("[0.1, 0.2, 0.3, 0.4]"), "{text}");
+        // Silent walls carry the marker explicitly.
+        assert!(text.contains("silent = true"), "{text}");
     }
 
     #[test]
@@ -874,10 +1167,38 @@ mod tests {
         .unwrap();
         let walls = &user.presets["chimes"].scene.walls;
         assert_eq!(walls.len(), 3);
-        assert_eq!(walls[0].note, None, "legacy array form");
-        assert_eq!(walls[1].note, Some(7), "table form with note");
-        assert_eq!(walls[2].note, None, "table form without note");
+        assert_eq!(walls[0].note, WallNote::Auto, "legacy array form");
+        assert_eq!(walls[1].note, WallNote::Note(7), "table form with note");
+        assert_eq!(walls[2].note, WallNote::Auto, "table form without note");
         assert!((walls[1].x1 - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn silent_walls_parse_and_are_validated_loudly() {
+        let user = parse_str(
+            "[box]\nwalls = [\n  [0.1, 0.2, 0.3, 0.2],\n  { x1 = 0.4, y1 = 0.5, x2 = 0.6, y2 = 0.5, silent = true },\n]\n",
+        )
+        .unwrap();
+        let walls = &user.presets["box"].scene.walls;
+        assert_eq!(walls[0].note, WallNote::Auto);
+        assert_eq!(walls[1].note, WallNote::Silent);
+
+        let err = parse_str(
+            "[bad]\nwalls = [{ x1 = 0.1, y1 = 0.2, x2 = 0.3, y2 = 0.2, silent = false }]\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("only be marked silent"), "{err}");
+
+        let err =
+            parse_str("[bad]\nwalls = [{ x1 = 0.1, y1 = 0.2, x2 = 0.3, y2 = 0.2, silent = 1 }]\n")
+                .unwrap_err();
+        assert!(err.contains("must be the boolean true"), "{err}");
+
+        let err = parse_str(
+            "[bad]\nwalls = [{ x1 = 0.1, y1 = 0.2, x2 = 0.3, y2 = 0.2, silent = true, note = 3 }]\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("both silent and note-pinned"), "{err}");
     }
 
     #[test]

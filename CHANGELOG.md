@@ -4,6 +4,24 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Four built-in instrument scenes — one-click demonstrations of wall
+  chimes, each a URL you can send around (`?preset=marimba`):
+  `percussion` (silent channels with drumming end caps), `marimba`
+  (a stair of eleven pitched bars playing runs), `pachinko` (cascades
+  through a staggered peg field), and `harp` (orbiting particles
+  grazing a fan of six pitched strings). Built-in presets can now
+  carry scene geometry, so these work identically native and web.
+- Scene files can mark walls silent: `{ x1, y1, x2, y2, silent = true }`
+  bounces without ever chiming or flashing. `silent = false` and
+  silent-plus-note combinations are loud errors; existing scene files
+  parse unchanged. (Binaries before 1.7.0 ignore the key and treat
+  such walls as sounding.)
+- A user preset with a `base` and no geometry of its own now inherits
+  the base preset's scene; defining any `walls`/`wells` replaces the
+  base scene entirely.
+
 ## 1.6.0 — 2026-07-21
 
 - The web demo cache-busts its WebAssembly module chain: script tags

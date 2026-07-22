@@ -26,6 +26,11 @@ file only tracks what's ahead.
   relaunch, and the touched-settings relaunch semantics shared with
   the web demo (a changed preset takes precedence; adjustments travel
   otherwise). Works on both render backends.
+- **1.6** rang the first rung of the emergent instrument: wall
+  chimes (walls play length-pitched pentatonic notes on impact, with
+  hit flashes), and **1.7** shipped the second — four built-in
+  instrument scenes (percussion, marimba, pachinko, harp) on new
+  scene-carrying built-in presets, plus silent walls in scene files.
 - **1.3** shipped the browser demo: the same simulation compiled to
   WebAssembly with an HTML control panel over the `Command` dispatch,
   WebAudio, live resize, share links, launch options, and an optional
@@ -50,27 +55,17 @@ file only tracks what's ahead.
   core). Staged so each rung is independently shippable and the first
   needs no external gear — most people don't have a DAW, so the
   instrument must sound good standing alone:
-  1. *Wall chimes.* Tag drawn segments with an optional note; wall
-     hits route through the existing synth, quantized by the music
-     mode's scale so random geometry still sounds musical. Walls
-     flash on hit — visible rhythm doubles as feedback for anyone
-     playing muted (or deaf), and makes the beat legible on screen.
-     Zero new dependencies; a weekend rung that validates the vision.
-  2. *Instrument scenes.* Ship preset scenes that demonstrate the idea
-     in one click — a percussion box (parallel silent walls, sounding
-     end caps), a marimba stair — reusing scene geometry + share
-     links so a good instrument is a URL someone can send around.
-  3. *Emitters.* A pinned spawner with direction, rate, and count cap
+  1. *Emitters.* A pinned spawner with direction, rate, and count cap
      (the burst/comet machinery is most of it): the "sequencer clock"
      that makes rhythms reproducible instead of one-shot. An optional
      in-app quantize snap serves the no-DAW majority; purists get
      rubato by leaving it off.
-  4. *MIDI out.* Native via `midir`, browser via WebMIDI (Chrome,
+  2. *MIDI out.* Native via `midir`, browser via WebMIDI (Chrome,
      matching the demo's existing Chrome-first stance); per-wall note
      mapping becomes per-wall MIDI note/channel. Strict timing stays
      the DAW's job. A capture/export path (MIDI file or WAV of the
      internal synth) keeps creations for everyone else.
-  5. *Filter walls.* Semipermeable walls (every-Nth-particle gates,
+  3. *Filter walls.* Semipermeable walls (every-Nth-particle gates,
      key/mode filters on note-carrying particles) — the full
      generative toolkit. Permeability must be an explicit wall *type*:
      solid walls keep the absolute containment guarantee the 1.4.x

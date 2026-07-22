@@ -58,7 +58,7 @@ cargo run --release -- --spawn-at-collision
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--preset <NAME>` | Apply a settings bundle: a built-in (`fireworks`, `blob`, `billiards`, `peace`, `orbits`, `mandala`, `accretion`) or a preset from the user presets file; explicit options override the preset | None |
+| `--preset <NAME>` | Apply a settings bundle: a built-in (`fireworks`, `blob`, `billiards`, `peace`, `orbits`, `mandala`, `accretion`, `percussion`, `marimba`, `pachinko`, `harp`) or a preset from the user presets file; explicit options override the preset | None |
 | `--presets-file <PATH>` | Load user presets from this TOML file instead of the platform default location | Platform config dir |
 | `--list-presets` | List built-in and user presets (and where the user file was loaded from), then exit | |
 | `--spawn-mode <MODE>` | Where collision spawns appear: `center`, `collision`, or `off` | center |
@@ -192,6 +192,10 @@ A rendering post-process that mirrors the top-left quadrant of the frame 4-fold 
 | `orbits` | Weightless particles slung around a binary system of pinned wells; trails paint the orbits |
 | `mandala` | The fireworks recipe under a kaleidoscope, minus gravity: symmetric blooms of trails |
 | `accretion` | Self-gravitating dust with dissipative collisions: clumps form, fuse, and sweep their orbits clean |
+| `percussion` | An instrument scene: silent channels with drumming end caps — weightless particles thump a stereo four-note tom pattern |
+| `marimba` | An instrument scene: a stair of eleven pitched bars plays descending pentatonic runs and floor-bounced ascents |
+| `pachinko` | An instrument scene: cascades plink down a staggered peg field, pitch falling with depth |
+| `harp` | An instrument scene: orbiting particles grace a fan of six pitched strings with slow rolled arpeggios |
 
 ### Custom Presets
 
@@ -226,6 +230,19 @@ wells = [{ x = 0.5, y = 0.9, polarity = "attract" }]
 ```
 
 (An integer `wells = 3` is still the `--wells` ring count; an array is geometry. Well `polarity` is `"attract"` or `"repel"`, defaulting to attract.)
+
+When wall chimes are on, a wall's pitch normally follows its length, but a scene can pin it or mute it: write the wall as a table with a `note` (pentatonic degree `0`-`10`, low to high) or with `silent = true` for pure geometry that bounces without ever chiming or flashing — the percussion preset's guide rails, for example:
+
+```toml
+[drumkit]
+wall-chimes = true
+walls = [
+  { x1 = 0.15, y1 = 0.5, x2 = 0.85, y2 = 0.5, silent = true },
+  { x1 = 0.15, y1 = 0.3, x2 = 0.15, y2 = 0.5, note = 3 },
+]
+```
+
+A wall cannot be both `silent` and note-pinned, and (like booleans on the command line) `silent = false` is rejected rather than ignored. A user preset with a `base` and no `walls`/`wells` of its own inherits the base's scene geometry; defining any geometry replaces the base's scene entirely.
 
 The easiest way to author a scene is in the app itself: pin wells with `W`, draw walls with `V`, tune everything with the hotkeys, then press `E` to export the whole thing — settings and geometry — as a ready-made preset file. Copy the table into your presets file (rename it to taste) and it becomes a `--preset` you can share.
 

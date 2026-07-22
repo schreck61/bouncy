@@ -65,9 +65,9 @@ impl SpawnMode {
           args_override_self = true)]
 pub struct Config {
     /// Apply a settings bundle: a built-in preset (fireworks, blob,
-    /// billiards, peace, orbits, mandala, accretion) or one from the user
-    /// presets file (see --list-presets); explicit options override its
-    /// values
+    /// billiards, peace, orbits, mandala, accretion, percussion, marimba,
+    /// pachinko, harp) or one from the user presets file (see
+    /// --list-presets); explicit options override its values
     #[arg(long, value_name = "NAME")]
     pub preset: Option<String>,
 
@@ -321,6 +321,7 @@ impl Config {
                         ),
                     )
                 })?;
+            config.scene = builtin.scene();
             config.preset = Some(builtin.label().to_string());
             return Ok(config);
         }
@@ -371,7 +372,13 @@ impl Config {
                 user.path.display()
             ))
         })?;
-        config.scene = entry.scene.clone();
+        // A user preset with geometry of its own replaces the base scene
+        // wholesale; one without any inherits the base built-in's scene.
+        config.scene = if entry.scene == Scene::default() {
+            entry.base.map(Preset::scene).unwrap_or_default()
+        } else {
+            entry.scene.clone()
+        };
         config.preset = Some(name);
         Ok(config)
     }
@@ -907,6 +914,86 @@ mod tests {
         assert_eq!(config.spawn_mode, SpawnMode::Collision);
         assert_eq!(config.color_mode, ColorMode::Velocity);
         assert_eq!(config.explosion_threshold, 80);
+
+        // The four instrument scenes share the chimes-on, fixed-population,
+        // lossless recipe; gravity is the distinguishing knob.
+        for (name, gravity) in [
+            ("percussion", 0),
+            ("marimba", 110),
+            ("pachinko", 130),
+            ("harp", 0),
+        ] {
+            let config = parse(&["--preset", name]).unwrap();
+            assert!(config.wall_chimes, "{name} arms the chimes");
+            assert!(config.music, "{name} keeps pings on the scale");
+            assert!(!config.mute, "{name} must be audible");
+            assert_eq!(config.gravity, gravity, "{name}");
+            assert_eq!(config.spawn_mode, SpawnMode::Off, "{name}");
+            assert_eq!(config.explosion_threshold, 0, "{name}");
+        }
+        assert!(parse(&["--preset", "harp"]).unwrap().trails);
+    }
+
+    #[test]
+    fn builtin_scenes_reach_config_and_respect_caps() {
+        use crate::presets::WallNote;
+        // Instrument presets deliver their geometry through resolution...
+        for name in ["percussion", "marimba", "pachinko", "harp"] {
+            let config = parse(&["--preset", name]).unwrap();
+            assert!(
+                !config.scene.walls.is_empty(),
+                "{name} must carry scene walls"
+            );
+        }
+        // ...settings-only presets stay geometry-free...
+        assert_eq!(
+            parse(&["--preset", "orbits"]).unwrap().scene,
+            Scene::default()
+        );
+        // ...and every variant respects the placement caps and note range.
+        for preset in Preset::value_variants() {
+            let scene = preset.scene();
+            assert!(scene.walls.len() <= crate::sim::MAX_WALL_SEGMENTS);
+            assert!(scene.wells.len() <= crate::sim::MAX_PINNED_WELLS);
+            for wall in &scene.walls {
+                for c in [wall.x1, wall.y1, wall.x2, wall.y2] {
+                    assert!((0.0..=1.0).contains(&c), "{}: {c}", preset.label());
+                }
+                if let WallNote::Note(n) = wall.note {
+                    assert!(usize::from(n) < crate::audio::NOTE_COUNT);
+                }
+            }
+        }
+        // The percussion box is the silent-wall showcase: rails silent,
+        // caps pinned.
+        let scene = Preset::Percussion.scene();
+        assert!(scene.walls.iter().any(|w| w.note == WallNote::Silent));
+        assert!(
+            scene
+                .walls
+                .iter()
+                .any(|w| matches!(w.note, WallNote::Note(_)))
+        );
+        // Pachinko's generated field: 8+7 alternating pegs plus 2 funnels.
+        assert_eq!(
+            Preset::Pachinko.scene().walls.len(),
+            8 + 7 + 8 + 7 + 8 + 7 + 8 + 2
+        );
+    }
+
+    #[test]
+    fn user_presets_inherit_their_base_scene_only_when_empty() {
+        const INSTRUMENTS: &str = "[stage]\nbase = \"marimba\"\ngravity = 60\n\n\
+            [custom]\nbase = \"marimba\"\nwalls = [[0.1, 0.5, 0.9, 0.5]]\n";
+
+        // No geometry of its own: the base's stair comes along.
+        let config = parse_with(&["--preset", "stage"], INSTRUMENTS).unwrap();
+        assert_eq!(config.scene, Preset::Marimba.scene());
+        assert_eq!(config.gravity, 60, "own settings still win");
+
+        // Own geometry replaces the base scene wholesale.
+        let config = parse_with(&["--preset", "custom"], INSTRUMENTS).unwrap();
+        assert_eq!(config.scene.walls.len(), 1);
     }
 
     #[test]
@@ -931,15 +1018,15 @@ mod tests {
         Config::try_resolve_with(&args, Some(&user))
     }
 
-    const PACHINKO: &str = "[pachinko]\n\
+    const PINBALL: &str = "[pinball]\n\
         base = \"billiards\"\n\
         gravity = 80\n\
         particle-size = 4.0\n";
 
     #[test]
     fn user_preset_applies_its_values_and_its_base() {
-        let config = parse_with(&["--preset", "pachinko"], PACHINKO).unwrap();
-        assert_eq!(config.preset.as_deref(), Some("pachinko"));
+        let config = parse_with(&["--preset", "pinball"], PINBALL).unwrap();
+        assert_eq!(config.preset.as_deref(), Some("pinball"));
         assert_eq!(config.gravity, 80, "preset value wins over base");
         assert_eq!(config.particle_size, 4.0, "preset value wins over default");
         assert_eq!(
@@ -953,7 +1040,7 @@ mod tests {
 
     #[test]
     fn explicit_flags_override_a_user_preset() {
-        let config = parse_with(&["--preset", "pachinko", "--gravity", "10"], PACHINKO).unwrap();
+        let config = parse_with(&["--preset", "pinball", "--gravity", "10"], PINBALL).unwrap();
         assert_eq!(config.gravity, 10, "the command line always wins");
         assert_eq!(config.particle_size, 4.0, "rest of the preset holds");
         assert_eq!(config.spawn_mode, SpawnMode::Off, "and so does its base");
@@ -980,10 +1067,10 @@ mod tests {
 
     #[test]
     fn unknown_preset_lists_the_available_user_presets() {
-        let err = parse_with(&["--preset", "nope"], PACHINKO).unwrap_err();
+        let err = parse_with(&["--preset", "nope"], PINBALL).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown preset 'nope'"), "{msg}");
-        assert!(msg.contains("pachinko"), "lists what exists: {msg}");
+        assert!(msg.contains("pinball"), "lists what exists: {msg}");
 
         let args: Vec<std::ffi::OsString> = ["bouncy", "--preset", "nope"]
             .iter()
@@ -1000,7 +1087,7 @@ mod tests {
     fn builtin_presets_win_over_the_user_file() {
         // A built-in name resolves without consulting user presets even
         // when a file is present.
-        let config = parse_with(&["--preset", "billiards"], PACHINKO).unwrap();
+        let config = parse_with(&["--preset", "billiards"], PINBALL).unwrap();
         assert_eq!(config.preset.as_deref(), Some("billiards"));
         assert_eq!(config.particle_size, 7.0);
     }

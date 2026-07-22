@@ -14,7 +14,7 @@ use crate::physics::{
     apply_self_gravity, collide_with_segments_recording, handle_collisions, has_motion, max_radius,
     motion_crosses_segment, pair_mut, substep_count, update_physics,
 };
-use crate::presets::Scene;
+use crate::presets::{Scene, WallNote};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::{HashMap, VecDeque};
@@ -158,8 +158,9 @@ pub struct WallChime {
 pub struct WallMeta {
     /// Segments sharing a stroke id sound (and flash) as one bar.
     pub stroke: u32,
-    /// Explicit scale degree from scene TOML; overrides length mapping.
-    pub note: Option<u8>,
+    /// How the wall sounds: length-derived, pinned by the scene, or
+    /// silent geometry.
+    pub note: WallNote,
 }
 
 pub use crate::physics::Polarity;
@@ -539,9 +540,11 @@ impl Simulation {
     /// pinned, else its cumulative length as a fraction of the window
     /// diagonal, log-mapped so equal length ratios step equal intervals —
     /// longest sounds the root, a flick sounds the top degree.
-    fn stroke_note(&self, stroke: u32, note_override: Option<u8>) -> usize {
-        if let Some(degree) = note_override {
-            return usize::from(degree).min(NOTE_COUNT - 1);
+    fn stroke_note(&self, stroke: u32, note: WallNote) -> Option<usize> {
+        match note {
+            WallNote::Silent => return None,
+            WallNote::Note(degree) => return Some(usize::from(degree).min(NOTE_COUNT - 1)),
+            WallNote::Auto => {}
         }
         let len: f64 = self
             .segments
@@ -558,7 +561,7 @@ impl Simulation {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         #[allow(clippy::cast_precision_loss)]
         let degree = ((1.0 - t) * (NOTE_COUNT - 1) as f64).round() as usize;
-        degree.min(NOTE_COUNT - 1)
+        Some(degree.min(NOTE_COUNT - 1))
     }
 
     /// Per-segment notes for scene export. A stroke's pitch is frozen
@@ -566,19 +569,22 @@ impl Simulation {
     /// re-import: multi-segment drag strokes (whose short pieces would
     /// come back as separate high-pitched bars) and scene-pinned notes.
     /// Lone segments stay `None` — their length round-trips the pitch.
-    pub fn wall_export_notes(&self) -> Vec<Option<u8>> {
+    pub fn wall_export_notes(&self) -> Vec<WallNote> {
         let mut per_stroke: HashMap<u32, usize> = HashMap::new();
         for m in &self.wall_meta {
             *per_stroke.entry(m.stroke).or_insert(0) += 1;
         }
         self.wall_meta
             .iter()
-            .map(|m| {
-                if m.note.is_some() || per_stroke[&m.stroke] > 1 {
-                    u8::try_from(self.stroke_note(m.stroke, m.note)).ok()
-                } else {
-                    None
-                }
+            .map(|m| match m.note {
+                WallNote::Silent => WallNote::Silent,
+                // A lone auto segment's length round-trips its pitch, so
+                // it keeps the legacy bare-array form on disk.
+                WallNote::Auto if per_stroke[&m.stroke] == 1 => WallNote::Auto,
+                _ => self
+                    .stroke_note(m.stroke, m.note)
+                    .and_then(|n| u8::try_from(n).ok())
+                    .map_or(WallNote::Silent, WallNote::Note),
             })
             .collect()
     }
@@ -598,6 +604,10 @@ impl Simulation {
                 continue;
             }
             let Some(meta) = self.wall_meta.get(hit.segment).copied() else {
+                continue;
+            };
+            // Silent geometry: no chime, no flash, no cooldown/voice slot.
+            let Some(note) = self.stroke_note(meta.stroke, meta.note) else {
                 continue;
             };
             let key = (hit.particle, meta.stroke);
@@ -620,7 +630,7 @@ impl Simulation {
                 key,
                 WallChime {
                     stroke: meta.stroke,
-                    note: self.stroke_note(meta.stroke, meta.note),
+                    note,
                     energy: hit.energy,
                     pan: (hit.x / width).clamp(0.0, 1.0),
                 },
@@ -825,7 +835,7 @@ impl Simulation {
         self.segments.push(Segment { x1, y1, x2, y2 });
         self.wall_meta.push(WallMeta {
             stroke: self.next_stroke_id,
-            note: None,
+            note: WallNote::Auto,
         });
         self.next_stroke_id += 1;
         true
@@ -3565,8 +3575,8 @@ mod tests {
         let short = s.wall_meta()[0];
         let long = s.wall_meta()[1];
         assert_ne!(short.stroke, long.stroke, "separate adds, separate bars");
-        let short_note = s.stroke_note(short.stroke, short.note);
-        let long_note = s.stroke_note(long.stroke, long.note);
+        let short_note = s.stroke_note(short.stroke, short.note).unwrap();
+        let long_note = s.stroke_note(long.stroke, long.note).unwrap();
         assert!(
             short_note > long_note,
             "shorter bar rings higher: {short_note} vs {long_note}"
@@ -3591,8 +3601,8 @@ mod tests {
             meta[1..].iter().all(|m| m.stroke == stroke),
             "the drag is one stroke"
         );
-        let tick_note = s.stroke_note(meta[0].stroke, None);
-        let drag_note = s.stroke_note(stroke, None);
+        let tick_note = s.stroke_note(meta[0].stroke, WallNote::Auto).unwrap();
+        let drag_note = s.stroke_note(stroke, WallNote::Auto).unwrap();
         assert!(
             drag_note < tick_note,
             "accumulated drag rings lower: {drag_note} vs {tick_note}"
@@ -3694,9 +3704,13 @@ mod tests {
         // A screen-spanning wall would sound the root by length...
         assert!(s.add_wall_segment(0.0, 300.0, 800.0, 300.0));
         let meta = s.wall_meta()[0];
-        assert_eq!(s.stroke_note(meta.stroke, None), 0, "length says root");
+        assert_eq!(
+            s.stroke_note(meta.stroke, WallNote::Auto),
+            Some(0),
+            "length says root"
+        );
         // ...but an explicit scene note wins.
-        assert_eq!(s.stroke_note(meta.stroke, Some(9)), 9);
+        assert_eq!(s.stroke_note(meta.stroke, WallNote::Note(9)), Some(9));
         // And place_scene carries the note into the metadata.
         let mut cfg = config(&["--wall-chimes", "--min-particles", "2"]);
         cfg.scene.walls.push(crate::presets::SceneWall {
@@ -3704,10 +3718,57 @@ mod tests {
             y1: 0.5,
             x2: 0.9,
             y2: 0.5,
-            note: Some(7),
+            note: WallNote::Note(7),
         });
         let s2 = Simulation::new(&cfg, 800, 600);
-        assert_eq!(s2.wall_meta()[0].note, Some(7));
+        assert_eq!(s2.wall_meta()[0].note, WallNote::Note(7));
+    }
+
+    #[test]
+    fn silent_walls_bounce_without_chiming_or_cooldowns() {
+        // A silent wall and a sounding wall in one scene: only the
+        // sounding one rings, and silence never books a cooldown.
+        let mut cfg = config(&["--wall-chimes", "--min-particles", "2"]);
+        cfg.scene.walls.push(crate::presets::SceneWall {
+            x1: 0.25,
+            y1: 0.5,
+            x2: 0.35,
+            y2: 0.5,
+            note: WallNote::Silent,
+        });
+        cfg.scene.walls.push(crate::presets::SceneWall {
+            x1: 0.65,
+            y1: 0.5,
+            x2: 0.75,
+            y2: 0.5,
+            note: WallNote::Note(5),
+        });
+        let mut s = Simulation::new(&cfg, 800, 600);
+        assert_eq!(s.wall_meta()[0].note, WallNote::Silent, "scene carries it");
+        assert_eq!(
+            s.stroke_note(s.wall_meta()[0].stroke, WallNote::Silent),
+            None
+        );
+        freeze(&mut s);
+        // One particle pressed into each wall from above, falling.
+        // Scene walls sit at y = 0.5 * 600 = 300; press each particle
+        // into its wall from just above, falling.
+        for (i, x) in [(0usize, 240.0), (1usize, 560.0)] {
+            s.particles[i].x = x;
+            s.particles[i].y = 299.0;
+            s.particles[i].vx = 0.0;
+            s.particles[i].vy = 200.0;
+        }
+        let events = s.step(0.01, Instant::now(), None);
+        assert_eq!(events.wall_hits.len(), 1, "only the sounding wall rings");
+        assert_eq!(events.wall_hits[0].note, 5);
+        let sounding_stroke = s.wall_meta()[1].stroke;
+        assert!(
+            s.chime_cooldowns
+                .keys()
+                .all(|(_, st)| *st == sounding_stroke),
+            "silent strokes never enter the cooldown map"
+        );
     }
 
     #[test]
@@ -3735,13 +3796,19 @@ mod tests {
         assert!(s.extend_last_wall_stroke(212.0, 400.0, 224.0, 400.0));
         let notes = s.wall_export_notes();
         assert_eq!(notes.len(), 3);
-        assert_eq!(notes[0], None, "a lone segment round-trips by length");
-        assert!(notes[1].is_some(), "a drag stroke freezes its note");
+        assert_eq!(
+            notes[0],
+            WallNote::Auto,
+            "a lone segment round-trips by length"
+        );
+        let WallNote::Note(frozen) = notes[1] else {
+            panic!("a drag stroke freezes its note, got {:?}", notes[1]);
+        };
         assert_eq!(notes[1], notes[2], "both pieces carry the stroke note");
         let meta = s.wall_meta()[1];
         assert_eq!(
-            usize::from(notes[1].unwrap()),
-            s.stroke_note(meta.stroke, None),
+            Some(usize::from(frozen)),
+            s.stroke_note(meta.stroke, WallNote::Auto),
             "the frozen note is the stroke's effective pitch"
         );
     }
