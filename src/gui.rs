@@ -127,8 +127,10 @@ pub enum ButtonId {
     Screenshot,
     PinWell,
     PinRepeller,
+    PlaceEmitter,
     ClearWells,
     ClearWalls,
+    ClearEmitters,
     ExportScene,
     CyclePreset,
     Relaunch,
@@ -143,6 +145,7 @@ pub struct PanelState {
     pub max_particles: usize,
     pub wells: usize,
     pub walls: usize,
+    pub emitters: usize,
     pub paused: bool,
     pub gravity: i32,
     pub particle_elasticity: f64,
@@ -386,6 +389,7 @@ impl Gui {
             ButtonId::Explode => PanelCommand::TriggerExplosion(x, y),
             ButtonId::PinWell => PanelCommand::PinWell(x, y, Polarity::Attract),
             ButtonId::PinRepeller => PanelCommand::PinWell(x, y, Polarity::Repel),
+            ButtonId::PlaceEmitter => PanelCommand::PlaceEmitter(x, y),
             // Non-placement ids never arm.
             _ => return None,
         })
@@ -966,7 +970,10 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         &mut out,
         x,
         w,
-        Item::Readout(format!("{} wells   {} walls", state.wells, state.walls)),
+        Item::Readout(format!(
+            "{} wells   {} walls   {} emitters",
+            state.wells, state.walls, state.emitters
+        )),
         17.0,
         &mut y,
     );
@@ -1184,6 +1191,16 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         &[
             (ButtonId::PinWell, "Pin well"),
             (ButtonId::PinRepeller, "Pin repeller"),
+        ],
+        x,
+        w,
+        &mut y,
+    );
+    button_row(
+        &mut out,
+        &[
+            (ButtonId::PlaceEmitter, "Place emitter"),
+            (ButtonId::ClearEmitters, "Clear emitters"),
         ],
         x,
         w,
@@ -1481,6 +1498,7 @@ fn is_placement(id: ButtonId) -> bool {
             | ButtonId::Explode
             | ButtonId::PinWell
             | ButtonId::PinRepeller
+            | ButtonId::PlaceEmitter
     )
 }
 
@@ -1492,6 +1510,7 @@ fn placement_label(id: ButtonId) -> &'static str {
         ButtonId::Explode => "click to place explosion",
         ButtonId::PinWell => "click to pin well",
         ButtonId::PinRepeller => "click to pin repeller",
+        ButtonId::PlaceEmitter => "click to place emitter (aims at center)",
         _ => "",
     }
 }
@@ -1508,12 +1527,14 @@ fn button_command(id: ButtonId, state: &PanelState) -> PanelCommand {
         ButtonId::Screenshot => PanelCommand::Plain(Command::Screenshot),
         ButtonId::ClearWells => PanelCommand::Plain(Command::ClearWells),
         ButtonId::ClearWalls => PanelCommand::Plain(Command::ClearWalls),
+        ButtonId::ClearEmitters => PanelCommand::Plain(Command::ClearEmitters),
         ButtonId::ExportScene => PanelCommand::Plain(Command::ExportScene),
         ButtonId::Burst
         | ButtonId::Comet
         | ButtonId::Explode
         | ButtonId::PinWell
         | ButtonId::PinRepeller
+        | ButtonId::PlaceEmitter
         | ButtonId::CyclePreset
         | ButtonId::Relaunch => {
             unreachable!("handled draft-side before dispatch")
@@ -1927,6 +1948,24 @@ mod tests {
             } if p == "fireworks"
                 && matches!(particle_size, Some(v) if (v - 10.0).abs() < 1e-9))),
             "relaunch carries the draft"
+        );
+    }
+
+    #[test]
+    fn emitter_buttons_map_to_their_commands() {
+        let mut gui = Gui::new();
+        gui.armed = Some(ButtonId::PlaceEmitter);
+        assert!(matches!(
+            gui.place_armed(120.0, 340.0),
+            Some(PanelCommand::PlaceEmitter(x, y)) if (x - 120.0).abs() < 1e-9 && (y - 340.0).abs() < 1e-9
+        ));
+        assert!(matches!(
+            button_command(ButtonId::ClearEmitters, &PanelState::default()),
+            PanelCommand::Plain(Command::ClearEmitters)
+        ));
+        assert_eq!(
+            placement_label(ButtonId::PlaceEmitter),
+            "click to place emitter (aims at center)"
         );
     }
 

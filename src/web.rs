@@ -45,6 +45,7 @@ pub struct Snapshot {
     pub wall_chimes: bool,
     pub wells: usize,
     pub walls: usize,
+    pub emitters: usize,
     pub width: u32,
     pub height: u32,
     pub muted: bool,
@@ -193,6 +194,16 @@ impl WebHandle {
     /// Set the particle-ping volume (0-100 percent).
     pub fn set_ping_volume(&self, percent: i32) {
         self.push(WebCommand::SetPingVolume(percent));
+    }
+
+    /// Place an emitter at `(x, y)`, aimed at the arena center.
+    pub fn place_emitter(&self, x: f64, y: f64) {
+        self.push(WebCommand::PlaceEmitter(x, y));
+    }
+
+    /// Remove every pinned emitter (Shift+U).
+    pub fn clear_emitters(&self) {
+        self.push(WebCommand::Plain(Command::ClearEmitters));
     }
 
     /// Cycle solid/velocity coloring (the C key).

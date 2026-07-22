@@ -100,6 +100,10 @@ pub struct Particle {
     pub color: [u8; 4],
     /// Marked for elimination by an active explosion.
     pub doomed: bool,
+    /// Id of the emitter that spawned this particle, for live-cap
+    /// accounting; `None` for every other spawn path. Never inherited:
+    /// fission fragments and fusion transfers do not carry it.
+    pub origin: Option<u32>,
 }
 
 impl Particle {
@@ -147,6 +151,7 @@ impl Particle {
             radius,
             color: crate::color::random_bright_color(rng),
             doomed: false,
+            origin: None,
         }
     }
 
@@ -1486,6 +1491,7 @@ mod tests {
             radius,
             color: [255, 255, 255, 255],
             doomed: false,
+            origin: None,
         }
     }
 

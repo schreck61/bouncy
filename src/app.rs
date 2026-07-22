@@ -10,9 +10,9 @@ use crate::config::{ColorMode, Config, ELASTICITY_MAX, EXPLOSION_THRESHOLD_MAX, 
 use crate::render::write_png;
 use crate::render::{
     RenderContext, create_render_context, dim_rect, fade_frame, kaleidoscope_frame,
-    render_explosion, render_particles, render_segments, render_wells,
+    render_emitters, render_explosion, render_particles, render_segments, render_wells,
 };
-use crate::sim::{MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, Simulation, Well};
+use crate::sim::{MAX_EMITTERS, MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, Simulation, Well};
 use crate::text::{draw_text, draw_text_centered, measure_text};
 use clap::ValueEnum;
 use std::collections::HashMap;
@@ -33,6 +33,12 @@ use winit::{dpi::LogicalSize, window::Fullscreen};
 const WARMUP_FRAMES: u32 = 3;
 /// Runtime gravity adjustment step (percent) for Up/Down arrows.
 const GRAVITY_STEP: i32 = 10;
+/// Defaults for interactively placed emitters (scene files set their own).
+const EMITTER_DEFAULT_RATE: f64 = 2.0;
+const EMITTER_DEFAULT_CAP: usize = 12;
+/// Minimum U-drag distance that counts as an aim; a bare tap aims at the
+/// screen center instead.
+const EMITTER_MIN_AIM_DRAG: f64 = 12.0;
 /// Percent step for the ; and ' ping-volume hotkeys.
 const PING_VOLUME_STEP: i32 = 10;
 /// Runtime elasticity adjustment step for arrow and bracket keys.
@@ -110,6 +116,7 @@ pub enum Command {
     Reset,
     ClearWells,
     ClearWalls,
+    ClearEmitters,
     ToggleMute,
     ToggleMusic,
     CycleHud,
@@ -168,6 +175,8 @@ pub enum PanelCommand {
     SetMusic(bool),
     /// Absolute particle-ping volume from the panel slider (percent).
     SetPingVolume(i32),
+    /// Place an emitter at the click, aimed at the arena center.
+    PlaceEmitter(f64, f64),
     /// Rebuild the simulation with new construction-time options (the
     /// native panel's launch section; the web demo restarts via URL).
     Relaunch {
@@ -377,6 +386,9 @@ pub struct App {
     held_well: Option<Polarity>,
     /// Wall drawing (V held): where the next segment starts, if active.
     wall_anchor: Option<(f64, f64)>,
+    /// Emitter placement (U held): the emitter position; releasing aims
+    /// it along the drag (a bare tap aims at the screen center).
+    emitter_anchor: Option<(f64, f64)>,
     /// Whether the current V-drag has landed its first segment; later
     /// segments extend the same stroke so the polyline chimes as one bar.
     wall_stroke_open: bool,
@@ -436,6 +448,7 @@ impl App {
             hud_mode: HudMode::Hidden,
             held_well: None,
             wall_anchor: None,
+            emitter_anchor: None,
             wall_stroke_open: false,
             wall_flash: HashMap::new(),
             shift_down: false,
@@ -582,6 +595,10 @@ impl App {
                 sim.wall_segments().len()
             ),
             format!(
+                "Emitters: {}  (U aims, Shift+U clears)",
+                sim.emitters().len()
+            ),
+            format!(
                 "Music: {}  (S)   Pings: {}%  (;/')   Chimes: {}  (I)   Kaleidoscope: {}  (K)",
                 if self.audio.is_music() { "on" } else { "off" },
                 self.audio.ping_volume_percent(),
@@ -683,6 +700,7 @@ impl App {
             }
             render_wells(frame, sim.pinned_wells(), width, height);
             render_segments(frame, sim.wall_segments(), &wall_flash, width, height);
+            render_emitters(frame, sim.emitters(), width, height);
             render_particles(
                 frame,
                 sim.particles(),
@@ -736,10 +754,13 @@ impl App {
     fn update_cursor_visibility(&mut self) {
         let idle = self.cursor.last_move.elapsed().as_secs_f64();
         #[cfg(not(target_arch = "wasm32"))]
-        let interacting =
-            self.held_well.is_some() || self.wall_anchor.is_some() || self.gui.is_open();
+        let interacting = self.held_well.is_some()
+            || self.wall_anchor.is_some()
+            || self.emitter_anchor.is_some()
+            || self.gui.is_open();
         #[cfg(target_arch = "wasm32")]
-        let interacting = self.held_well.is_some() || self.wall_anchor.is_some();
+        let interacting =
+            self.held_well.is_some() || self.wall_anchor.is_some() || self.emitter_anchor.is_some();
         let desired = cursor_should_be_visible(
             self.cursor.window_focused,
             self.cursor.inside,
@@ -909,6 +930,13 @@ impl App {
             PanelCommand::SetPingVolume(percent) => {
                 self.audio
                     .set_ping_volume(percent.clamp(0, crate::config::PING_VOLUME_MAX));
+            }
+            PanelCommand::PlaceEmitter(x, y) => {
+                if let Some(ref mut sim) = self.sim {
+                    let (w, h) = sim.dimensions();
+                    let (dx, dy) = (f64::from(w) / 2.0 - x, f64::from(h) / 2.0 - y);
+                    sim.place_emitter(x, y, dx, dy, EMITTER_DEFAULT_RATE, EMITTER_DEFAULT_CAP);
+                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             PanelCommand::Relaunch {
@@ -1127,6 +1155,7 @@ impl App {
             max_particles: sim.max_particles(),
             wells: sim.pinned_wells().len(),
             walls: sim.wall_segments().len(),
+            emitters: sim.emitters().len(),
             paused: self.paused,
             gravity: sim.gravity_percent,
             particle_elasticity: sim.particle_elasticity,
@@ -1184,6 +1213,7 @@ impl App {
             wall_chimes: sim.wall_chimes,
             wells: sim.pinned_wells().len(),
             walls: sim.wall_segments().len(),
+            emitters: sim.emitters().len(),
             width: sim.dimensions().0,
             height: sim.dimensions().1,
             muted: self.audio.is_muted(),
@@ -1216,6 +1246,11 @@ impl App {
             if key_code == KeyCode::KeyV {
                 self.wall_anchor = None;
             }
+            if key_code == KeyCode::KeyU
+                && let Some((ax, ay)) = self.emitter_anchor.take()
+            {
+                self.place_aimed_emitter(ax, ay);
+            }
             return;
         }
         let shift_polarity = if self.shift_down {
@@ -1241,6 +1276,14 @@ impl App {
                     // Start drawing: segments are added as the cursor moves.
                     self.wall_anchor = Some((self.cursor.x, self.cursor.y));
                     self.wall_stroke_open = false;
+                }
+            }
+            KeyCode::KeyU if !repeat => {
+                if self.shift_down {
+                    self.apply(Command::ClearEmitters);
+                } else {
+                    // Anchor here; the release drag aims the emitter.
+                    self.emitter_anchor = Some((self.cursor.x, self.cursor.y));
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -1322,6 +1365,10 @@ impl App {
             }),
             Command::ClearWalls => self.with_sim(|sim| {
                 println!("Cleared {} wall segments", sim.clear_wall_segments());
+            }),
+            Command::ClearEmitters => self.with_sim(|sim| {
+                let cleared = sim.clear_emitters();
+                println!("Cleared {cleared} emitters");
             }),
             Command::ToggleMute => {
                 let muted = self.audio.toggle_mute();
@@ -1458,6 +1505,28 @@ impl App {
     /// Extend the wall being drawn (V held): each time the cursor gets far
     /// enough from the anchor, drop a segment and move the anchor forward,
     /// so a curved drag becomes a polyline.
+    /// Place an emitter anchored at `(ax, ay)`, aimed along the drag to
+    /// the current cursor — or at the screen center on a bare tap.
+    fn place_aimed_emitter(&mut self, ax: f64, ay: f64) {
+        let Some(ref mut sim) = self.sim else {
+            return;
+        };
+        let (mut dx, mut dy) = (self.cursor.x - ax, self.cursor.y - ay);
+        if dx.hypot(dy) < EMITTER_MIN_AIM_DRAG {
+            let (w, h) = sim.dimensions();
+            (dx, dy) = (f64::from(w) / 2.0 - ax, f64::from(h) / 2.0 - ay);
+        }
+        if sim.place_emitter(ax, ay, dx, dy, EMITTER_DEFAULT_RATE, EMITTER_DEFAULT_CAP) {
+            println!(
+                "Emitter placed ({} of {})",
+                sim.emitters().len(),
+                MAX_EMITTERS
+            );
+        } else {
+            println!("Emitter limit reached ({MAX_EMITTERS})");
+        }
+    }
+
     fn extend_wall(&mut self) {
         let Some((ax, ay)) = self.wall_anchor else {
             return;
@@ -1500,8 +1569,9 @@ impl App {
         Vec<(&'static str, toml::Value)>,
         Vec<crate::presets::SceneWell>,
         Vec<crate::presets::SceneWall>,
+        Vec<crate::presets::SceneEmitter>,
     )> {
-        use crate::presets::{SceneWall, SceneWell};
+        use crate::presets::{SceneEmitter, SceneWall, SceneWell};
         let sim = self.sim.as_ref()?;
         let (w, h) = sim.dimensions();
         let (wf, hf) = (f64::from(w), f64::from(h));
@@ -1568,16 +1638,31 @@ impl App {
             }
         }
 
-        Some((settings, wells, walls))
+        let emitters: Vec<SceneEmitter> = sim
+            .emitters()
+            .iter()
+            .map(|e| SceneEmitter {
+                x: frac(e.x, wf),
+                y: frac(e.y, hf),
+                // The angle convention's inverse: degrees clockwise from
+                // straight up. Two decimals round-trips direction well
+                // within visual and musical tolerance.
+                angle: (e.dx.atan2(-e.dy).to_degrees().rem_euclid(360.0) * 100.0).round() / 100.0,
+                rate: e.rate,
+                cap: e.cap,
+            })
+            .collect();
+
+        Some((settings, wells, walls, emitters))
     }
 
     /// Export the scene to a uniquely named preset file (native).
     #[cfg(not(target_arch = "wasm32"))]
     fn export_scene(&mut self) {
-        let Some((settings, wells, walls)) = self.scene_export_parts() else {
+        let Some((settings, wells, walls, emitters)) = self.scene_export_parts() else {
             return;
         };
-        match crate::presets::export_scene(&settings, &wells, &walls) {
+        match crate::presets::export_scene(&settings, &wells, &walls, &emitters) {
             Ok(path) => println!(
                 "Scene exported to '{}' — copy the table into your presets \
                  file (see --list-presets) or run with --presets-file",
@@ -1591,12 +1676,13 @@ impl App {
     /// this into a download.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn scene_toml(&self) -> Option<String> {
-        let (settings, wells, walls) = self.scene_export_parts()?;
+        let (settings, wells, walls, emitters) = self.scene_export_parts()?;
         Some(crate::presets::scene_to_toml(
             "scene-web",
             &settings,
             &wells,
             &walls,
+            &emitters,
         ))
     }
 
@@ -2256,6 +2342,19 @@ mod tests {
 
         app.apply(Command::ToggleFlow);
         assert!(app.sim.as_ref().unwrap().flow);
+
+        app.apply_panel_command(PanelCommand::PlaceEmitter(100.0, 100.0));
+        {
+            let sim = app.sim.as_ref().unwrap();
+            assert_eq!(sim.emitters().len(), 1, "panel tool places an emitter");
+            let e = sim.emitters()[0];
+            // Placed at (100, 100) in an 800x600 arena: the default aim
+            // points at the center (400, 300), a (300, 200) vector.
+            assert!(e.dx > 0.0 && e.dy > 0.0, "aims at the arena center");
+            assert!((e.dx / e.dy - 1.5).abs() < 1e-9, "direction ratio 300:200");
+        }
+        app.apply(Command::ClearEmitters);
+        assert!(app.sim.as_ref().unwrap().emitters().is_empty());
 
         assert_eq!(app.audio.ping_volume_percent(), 100, "default full");
         app.apply(Command::AdjustPingVolume(-30));

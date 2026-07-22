@@ -174,6 +174,52 @@ pub struct Well {
     pub polarity: Polarity,
 }
 
+/// Maximum pinned emitters (the U gesture and scene files stop here).
+pub const MAX_EMITTERS: usize = 8;
+
+/// A pinned spawner: emits one particle at a time in a fixed direction
+/// at a steady rate, pausing while its live-particle cap is reached —
+/// the instrument roadmap's "sequencer clock". Emission rate is
+/// frame-rate-independent (a sim-time accumulator), though timelines
+/// are not bit-identical across frame rates; `--seed` fixes the RNG,
+/// which emission consumes only for particle color.
+#[derive(Copy, Clone, Debug)]
+pub struct Emitter {
+    pub x: f64,
+    pub y: f64,
+    /// Unit emission direction.
+    pub dx: f64,
+    pub dy: f64,
+    /// Particles per second of simulated time.
+    pub rate: f64,
+    /// Live-particle cap: emission pauses while this many of the
+    /// emitter's particles are alive, and resumes as they die.
+    pub cap: usize,
+    /// Emission accumulator (sim seconds owed).
+    accum: f64,
+    /// Monotonic identity, matched by `Particle::origin`.
+    pub id: u32,
+}
+
+impl Emitter {
+    /// An emitter value outside a simulation (rendering, tests): direction
+    /// normalized, default rate and cap, id 0 (unstamped) — the Simulation
+    /// stamps real ids in `place_emitter`.
+    pub fn aimed(x: f64, y: f64, dx: f64, dy: f64) -> Self {
+        let len = dx.hypot(dy).max(1e-9);
+        Emitter {
+            x,
+            y,
+            dx: dx / len,
+            dy: dy / len,
+            rate: 2.0,
+            cap: 12,
+            accum: 0.0,
+            id: 0,
+        }
+    }
+}
+
 /// Headless particle simulation.
 pub struct Simulation {
     // Geometry (fixed at creation)
@@ -203,6 +249,13 @@ pub struct Simulation {
     particles: Vec<Particle>,
     /// Persistent gravity wells pinned with the W key (or --wells).
     pinned_wells: Vec<Well>,
+    /// Pinned particle emitters (held U aims one; scenes carry them).
+    emitters: Vec<Emitter>,
+    /// Next emitter id to stamp (monotonic, like stroke ids).
+    next_emitter_id: u32,
+    /// Scratch: live-particle counts per emitter index, refilled each
+    /// step from particle origin tags; reused to avoid reallocation.
+    emitter_counts: Vec<usize>,
     /// Static wall segments drawn with the V key.
     segments: Vec<Segment>,
     /// Walls play notes on impact (--wall-chimes / I key).
@@ -278,6 +331,9 @@ impl Simulation {
             self_gravity: config.self_gravity,
             particles: Vec::new(),
             pinned_wells: Vec::new(),
+            emitters: Vec::new(),
+            next_emitter_id: 1,
+            emitter_counts: Vec::new(),
             segments: Vec::new(),
             wall_chimes: config.wall_chimes,
             wall_meta: Vec::new(),
@@ -366,6 +422,15 @@ impl Simulation {
             });
             self.next_stroke_id += 1;
         }
+        for e in self.scene.emitters.clone() {
+            let rad = e.angle.to_radians();
+            // Angle is degrees clockwise from straight up in screen
+            // coordinates (y down): 0 = up, 90 = right.
+            let (dx, dy) = (rad.sin(), -rad.cos());
+            if !self.place_emitter(e.x * w, e.y * h, dx, dy, e.rate, e.cap) {
+                break;
+            }
+        }
     }
 
     fn populate(&mut self) {
@@ -413,6 +478,7 @@ impl Simulation {
         self.segments.clear();
         self.wall_meta.clear();
         self.chime_cooldowns.clear();
+        self.emitters.clear();
         self.place_scene();
         self.explosion = None;
         self.spawn_times.clear();
@@ -471,6 +537,11 @@ impl Simulation {
         for w in &mut self.pinned_wells {
             w.x *= sx;
             w.y *= sy;
+        }
+        for e in &mut self.emitters {
+            e.x *= sx;
+            e.y *= sy;
+            // Direction is aim, not geometry: it does not stretch.
         }
         for s in &mut self.segments {
             s.x1 *= sx;
@@ -859,6 +930,118 @@ impl Simulation {
         true
     }
 
+    /// Pin an emitter at `(x, y)` aiming along `(dx, dy)`. Returns false
+    /// once the emitter limit is reached. Direction is normalized (a zero
+    /// vector aims straight up); rate and cap are clamped to their scene
+    /// bounds so every entry path agrees with the TOML validation.
+    pub fn place_emitter(
+        &mut self,
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+        rate: f64,
+        cap: usize,
+    ) -> bool {
+        if self.emitters.len() >= MAX_EMITTERS {
+            return false;
+        }
+        let len = dx.hypot(dy);
+        let (dx, dy) = if len > 1e-9 {
+            (dx / len, dy / len)
+        } else {
+            (0.0, -1.0)
+        };
+        let (w, h) = (f64::from(self.width), f64::from(self.height));
+        self.emitters.push(Emitter {
+            x: x.clamp(0.0, w),
+            y: y.clamp(0.0, h),
+            dx,
+            dy,
+            rate: rate.clamp(0.1, 20.0),
+            cap: cap.clamp(1, 200),
+            accum: 0.0,
+            id: self.next_emitter_id,
+        });
+        self.next_emitter_id += 1;
+        self.wake();
+        true
+    }
+
+    /// Remove all emitters, returning how many were cleared.
+    pub fn clear_emitters(&mut self) -> usize {
+        let cleared = self.emitters.len();
+        self.emitters.clear();
+        cleared
+    }
+
+    /// The pinned emitters.
+    pub fn emitters(&self) -> &[Emitter] {
+        &self.emitters
+    }
+
+    /// Run every emitter's emission schedule for this step. Emitted
+    /// particles do not join the birth-rate window (like bursts and
+    /// comets): a steady clock must never trip the auto-explosion. They
+    /// emit regardless of spawn mode — emitters are user-placed sources,
+    /// not ambient spawning.
+    fn run_emitters(&mut self, dt: f64) {
+        if self.emitters.is_empty() {
+            return;
+        }
+        // One pass over the population counts each emitter's live
+        // particles by origin tag.
+        self.emitter_counts.clear();
+        self.emitter_counts.resize(self.emitters.len(), 0);
+        for p in &self.particles {
+            if let Some(origin) = p.origin
+                && let Some(k) = self.emitters.iter().position(|e| e.id == origin)
+            {
+                self.emitter_counts[k] += 1;
+            }
+        }
+        for k in 0..self.emitters.len() {
+            let mut e = self.emitters[k];
+            e.accum += dt;
+            let period = 1.0 / e.rate;
+            while e.accum >= period {
+                e.accum -= period;
+                if self.particles.len() >= self.max_particles
+                    || self.emitter_counts[k] >= e.cap
+                    || self.spawn_blocked(e.x, e.y)
+                {
+                    // Skipped emissions drain the accumulator: a cleared
+                    // blockage resumes the beat, it does not burst a
+                    // backlog.
+                    continue;
+                }
+                let mut p = Particle::new_moving(
+                    &mut self.rng,
+                    e.x,
+                    e.y,
+                    e.dx * self.initial_speed,
+                    e.dy * self.initial_speed,
+                    self.base_radius,
+                );
+                p.origin = Some(e.id);
+                let p = self.stamp(p);
+                self.particles.push(p);
+                self.emitter_counts[k] += 1;
+                self.wake();
+            }
+            self.emitters[k] = e;
+        }
+    }
+
+    /// Whether a particle of base radius sitting at `(x, y)` would
+    /// overlap an existing particle (the emitter's muzzle check).
+    fn spawn_blocked(&self, x: f64, y: f64) -> bool {
+        self.particles.iter().any(|p| {
+            let clearance = self.base_radius + p.radius + 0.5;
+            (p.x - x).hypot(p.y - y) < clearance
+        })
+    }
+
     /// Remove all drawn walls, returning how many segments were cleared.
     pub fn clear_wall_segments(&mut self) -> usize {
         let cleared = self.segments.len();
@@ -907,7 +1090,12 @@ impl Simulation {
             // Ambient influences revive a stopped simulation on their own:
             // the held or pinned wells and the flow field all inject
             // motion, so callers need not remember to wake() first.
-            if well.is_some() || self.flow || self.self_gravity || !self.pinned_wells.is_empty() {
+            if well.is_some()
+                || self.flow
+                || self.self_gravity
+                || !self.pinned_wells.is_empty()
+                || !self.emitters.is_empty()
+            {
                 self.wake();
             } else {
                 return events;
@@ -916,6 +1104,7 @@ impl Simulation {
 
         events.explosion_completed = self.update_explosion(dt);
         self.sim_time += dt;
+        self.run_emitters(dt);
 
         // No particle enters physics out of bounds. Out-of-bounds space
         // lies beyond every wall segment's span (walls live inside the
@@ -1045,7 +1234,11 @@ impl Simulation {
 
         events.explosion_started = self.handle_spawning(now);
         events.motion_stopped = self.check_motion(
-            well.is_some() || self.flow || self.self_gravity || !self.pinned_wells.is_empty(),
+            well.is_some()
+                || self.flow
+                || self.self_gravity
+                || !self.pinned_wells.is_empty()
+                || !self.emitters.is_empty(),
         );
         events
     }
@@ -1065,6 +1258,9 @@ impl Simulation {
     /// now — without the guard the merged particle could teleport
     /// through the stub. Skipping the (cosmetic) centroid move keeps
     /// mass and momentum conservation intact.
+    /// Note: `origin` never transfers — the survivor keeps its own tag and
+    /// the donor's dies with it, so emitter live-counts track only the
+    /// particles an emitter actually produced.
     fn absorb(dst: &mut Particle, src: &Particle, mass: f64, segments: &[Segment]) {
         let dst_mass = dst.mass();
         let total = dst_mass + mass;
@@ -1208,6 +1404,9 @@ impl Simulation {
                         radius: frag_r,
                         color: parent.color,
                         doomed: false,
+                        // Fragments are new matter, not the emitter's own:
+                        // origin never transfers (the parent keeps its tag).
+                        origin: None,
                     };
                     let twin = self.stamp(twin);
                     self.particles.push(twin);
@@ -3832,5 +4031,241 @@ mod tests {
         let b = run();
         assert!(!a.is_empty(), "the seeded field must actually chime");
         assert_eq!(a, b, "identical runs, identical chimes");
+    }
+
+    // ---- Emitter origin tags ----------------------------------------
+
+    #[test]
+    fn fission_fragments_are_born_without_origin() {
+        let mut s = sim(&["--min-particles", "4", "--matter"]);
+        arm_collision(&mut s, 400.0, 300.0);
+        let tagged = s.particles[0].id;
+        s.particles[0].origin = Some(7);
+        s.particles[0].vx = 400.0;
+        s.particles[1].vx = -400.0;
+        let before = s.particle_count();
+        let now = Instant::now();
+        for _ in 0..20 {
+            s.step(0.01, now, None);
+        }
+        assert!(s.particle_count() > before, "fission must have fired");
+        let parent = s.find_particle(tagged).map(|i| s.particles()[i].origin);
+        assert_eq!(parent, Some(Some(7)), "the parent keeps its tag");
+        assert!(
+            s.particles()
+                .iter()
+                .filter(|p| p.id != tagged)
+                .all(|p| p.origin.is_none()),
+            "fragments and bystanders stay untagged"
+        );
+    }
+
+    #[test]
+    fn fusion_never_transfers_origin() {
+        let mut s = sim(&["--min-particles", "4", "--matter"]);
+        arm_collision(&mut s, 400.0, 300.0);
+        let tagged = s.particles[0].id;
+        s.particles[0].origin = Some(9);
+        // Slow closing speed: a fusing contact, not a fissioning impact.
+        s.particles[0].vx = 30.0;
+        s.particles[1].vx = -30.0;
+        let before = s.particle_count();
+        let now = Instant::now();
+        for _ in 0..40 {
+            s.step(0.01, now, None);
+        }
+        assert!(s.particle_count() < before, "fusion must have fired");
+        // Wherever the tag survived, it is still on the original particle:
+        // absorb copies mass and momentum, never origin.
+        assert!(
+            s.particles()
+                .iter()
+                .all(|p| p.origin != Some(9) || p.id == tagged),
+            "origin must not migrate to another particle"
+        );
+    }
+
+    // ---- Emitters ---------------------------------------------------
+
+    /// A sim with two parked, frozen particles and no ambient forces.
+    fn emitter_sim() -> Simulation {
+        let mut s = sim(&[
+            "--min-particles",
+            "2",
+            "--spawn-mode",
+            "off",
+            "--initial-speed",
+            "200",
+        ]);
+        freeze(&mut s);
+        s.particles[0].x = 780.0;
+        s.particles[0].y = 20.0;
+        s.particles[1].x = 780.0;
+        s.particles[1].y = 580.0;
+        s
+    }
+
+    fn emitted_count(s: &Simulation, id: u32) -> usize {
+        s.particles()
+            .iter()
+            .filter(|p| p.origin == Some(id))
+            .count()
+    }
+
+    #[test]
+    fn emitter_emits_rate_times_time_particles() {
+        let mut s = emitter_sim();
+        assert!(s.place_emitter(50.0, 550.0, 1.0, 0.0, 2.0, 100));
+        let id = s.emitters()[0].id;
+        let now = Instant::now();
+        for _ in 0..20 {
+            s.step(0.1, now, None);
+        }
+        // 2.0 sim-seconds at 2/s: exactly four particles, all tagged.
+        assert_eq!(emitted_count(&s, id), 4);
+    }
+
+    #[test]
+    fn emitter_pauses_at_live_cap_and_resumes_on_death() {
+        let mut s = emitter_sim();
+        assert!(s.place_emitter(50.0, 550.0, 1.0, 0.0, 10.0, 2));
+        let id = s.emitters()[0].id;
+        let now = Instant::now();
+        for _ in 0..30 {
+            s.step(0.1, now, None);
+        }
+        assert_eq!(emitted_count(&s, id), 2, "cap holds under pressure");
+        // A death frees a slot: the stream resumes.
+        let victim = s
+            .particles()
+            .iter()
+            .find(|p| p.origin == Some(id))
+            .map(|p| p.id)
+            .unwrap();
+        s.particles.retain(|p| p.id != victim);
+        for _ in 0..3 {
+            s.step(0.1, now, None);
+        }
+        assert_eq!(emitted_count(&s, id), 2, "refilled to cap, not beyond");
+    }
+
+    #[test]
+    fn blocked_muzzle_skips_without_backlog() {
+        let mut s = emitter_sim();
+        assert!(s.place_emitter(400.0, 300.0, 1.0, 0.0, 2.0, 100));
+        let id = s.emitters()[0].id;
+        // Park a plug exactly on the muzzle.
+        s.particles[0].x = 400.0;
+        s.particles[0].y = 300.0;
+        let now = Instant::now();
+        for _ in 0..30 {
+            s.step(0.1, now, None);
+        }
+        assert_eq!(emitted_count(&s, id), 0, "plugged muzzle stays silent");
+        // Unplug; one period passes; exactly one emission — the missed
+        // beats drained instead of bursting out.
+        s.particles[0].x = 780.0;
+        s.particles[0].y = 20.0;
+        s.particles[0].vx = 0.0;
+        s.particles[0].vy = 0.0;
+        for _ in 0..5 {
+            s.step(0.1, now, None);
+        }
+        assert_eq!(emitted_count(&s, id), 1, "no backlog burst");
+    }
+
+    #[test]
+    fn emitters_are_deterministic_under_seed() {
+        let run = || {
+            let mut s = sim(&[
+                "--min-particles",
+                "2",
+                "--spawn-mode",
+                "off",
+                "--seed",
+                "42",
+            ]);
+            assert!(s.place_emitter(100.0, 100.0, 0.6, 0.8, 3.0, 50));
+            let now = Instant::now();
+            for _ in 0..50 {
+                s.step(0.02, now, None);
+            }
+            s.particles()
+                .iter()
+                .map(|p| (p.id, p.x, p.y))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run(), "same seed, same schedule, same world");
+    }
+
+    #[test]
+    fn emitters_keep_the_sim_awake_and_off_the_birth_rate() {
+        let mut s = emitter_sim();
+        assert!(s.place_emitter(50.0, 550.0, 1.0, 0.0, 0.5, 1));
+        let now = Instant::now();
+        for _ in 0..200 {
+            s.step(0.05, now, None);
+        }
+        assert!(!s.stopped(), "an emitter arena never declares STOPPED");
+        assert_eq!(s.birth_rate(), 0, "emissions bypass the explosion clock");
+    }
+
+    #[test]
+    fn emitter_placement_caps_clamps_and_clears() {
+        let mut s = emitter_sim();
+        for _ in 0..MAX_EMITTERS {
+            assert!(s.place_emitter(400.0, 300.0, 0.0, 0.0, 999.0, 0));
+        }
+        assert!(!s.place_emitter(400.0, 300.0, 1.0, 0.0, 2.0, 12), "cap");
+        let e = s.emitters()[0];
+        assert!((e.dx, e.dy) == (0.0, -1.0), "zero vector aims straight up");
+        assert!((e.rate - 20.0).abs() < 1e-9, "rate clamped to bounds");
+        assert_eq!(e.cap, 1, "cap clamped to bounds");
+        assert_eq!(s.clear_emitters(), MAX_EMITTERS);
+        assert!(s.emitters().is_empty());
+    }
+
+    #[test]
+    fn scene_emitters_place_scale_and_survive_reset_and_resize() {
+        let mut cfg = config(&["--min-particles", "2", "--spawn-mode", "off"]);
+        cfg.scene.emitters.push(crate::presets::SceneEmitter {
+            x: 0.25,
+            y: 0.5,
+            angle: 90.0,
+            rate: 4.0,
+            cap: 3,
+        });
+        let mut s = Simulation::new(&cfg, 800, 600);
+        assert_eq!(s.emitters().len(), 1);
+        let e = s.emitters()[0];
+        assert!((e.x - 200.0).abs() < 1e-9 && (e.y - 300.0).abs() < 1e-9);
+        assert!((e.dx - 1.0).abs() < 1e-9, "angle 90 emits rightward");
+        assert!(e.dy.abs() < 1e-9);
+        assert!((e.rate - 4.0).abs() < 1e-9);
+        assert_eq!(e.cap, 3);
+
+        // A user-placed emitter joins it; reset restores only the scene's.
+        assert!(s.place_emitter(700.0, 100.0, 0.0, 1.0, 2.0, 12));
+        assert_eq!(s.emitters().len(), 2);
+        s.reset();
+        assert_eq!(s.emitters().len(), 1, "reset restores the scene layout");
+
+        // Resize rescales position, not aim.
+        s.resize(1600, 600);
+        let e = s.emitters()[0];
+        assert!((e.x - 400.0).abs() < 1e-9, "x rescaled");
+        assert!((e.dx - 1.0).abs() < 1e-9, "direction unchanged");
+    }
+
+    #[test]
+    fn emitter_export_round_trips_direction() {
+        let mut s = sim(&["--min-particles", "2", "--spawn-mode", "off"]);
+        assert!(s.place_emitter(200.0, 300.0, 0.6, 0.8, 3.0, 6));
+        let e = s.emitters()[0];
+        // Reconstruct the export convention and re-derive the direction.
+        let angle = (e.dx.atan2(-e.dy).to_degrees().rem_euclid(360.0) * 100.0).round() / 100.0;
+        let rad = angle.to_radians();
+        let (rdx, rdy) = (rad.sin(), -rad.cos());
+        assert!((rdx - e.dx).abs() < 1e-2 && (rdy - e.dy).abs() < 1e-2);
     }
 }

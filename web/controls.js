@@ -125,6 +125,10 @@ function bind(handle) {
       label: "repeller",
       act: (x, y) => handle.pin_well(x, y, true),
     },
+    "btn-emitter": {
+      label: "emitter",
+      act: (x, y) => handle.place_emitter(x, y),
+    },
     "btn-explode": {
       label: "explosion",
       act: (x, y) => handle.trigger_explosion(x, y),
@@ -154,6 +158,7 @@ function bind(handle) {
 
   $("btn-clear-wells").onclick = () => handle.clear_wells();
   $("btn-clear-walls").onclick = () => handle.clear_walls();
+  $("btn-clear-emitters").onclick = () => handle.clear_emitters();
   $("btn-color").onclick = () => handle.cycle_color_mode();
   $("btn-spawn").onclick = () => handle.cycle_spawn_mode();
   $("btn-hud").onclick = () => handle.cycle_hud();
@@ -357,6 +362,8 @@ function reflect(s) {
     s.wells > 0 ? `Clear wells (${s.wells})` : "Clear wells";
   $("btn-clear-walls").textContent =
     s.walls > 0 ? `Clear walls (${s.walls})` : "Clear walls";
+  $("btn-clear-emitters").textContent =
+    s.emitters > 0 ? `Clear emitters (${s.emitters})` : "Clear emitters";
 
   const follow = (id, value, format) => {
     const el = $(`in-${id}`);

@@ -4,6 +4,25 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Emitters — the instrument's sequencer clock (roadmap rung 3): pinned
+  spawners that fire one particle at a time in a fixed direction at a
+  steady rate. Hold `U` and drag to place and aim one (a tap aims at
+  the arena center; `Shift+U` clears); both panels grow an Emitter
+  placement tool and a clear button; the glyph is a green ring with a
+  direction arrow. Each emitter pauses at its live-particle cap and
+  resumes as its particles die, so streams self-regulate. Scene files
+  carry them — `emitters = [{ x, y, angle, rate, cap }]`, angle in
+  degrees clockwise from straight up — and scene export round-trips
+  placement, aim, rate, and cap. Free-running this rung (no beat
+  quantize yet); emissions never count toward the explosion birth
+  rate, and there is no CLI flag — emitters come from scenes or
+  interaction. Share links don't carry them; downloaded scenes do.
+  A new `clockwork` preset demos the mechanic: three emitter lanes
+  strike a C4-A4-E5 triad of bars at different periods, a polyrhythm
+  that drifts in and out of phase, with ambient pings ducked to 30%.
+
 ## 1.8.0 — 2026-07-21
 
 - Particle collision pings have their own volume: `--ping-volume 0-100`

@@ -55,7 +55,8 @@ file only tracks what's ahead.
   core). Staged so each rung is independently shippable and the first
   needs no external gear — most people don't have a DAW, so the
   instrument must sound good standing alone:
-  1. *Emitters.* A pinned spawner with direction, rate, and count cap
+  1. *Emitters.* (Shipped free-running in 1.9.0; the optional
+     quantize snap below remains.) A pinned spawner with direction, rate, and count cap
      (the burst/comet machinery is most of it): the "sequencer clock"
      that makes rhythms reproducible instead of one-shot. An optional
      in-app quantize snap serves the no-DAW majority; purists get

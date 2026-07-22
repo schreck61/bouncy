@@ -8,7 +8,7 @@ use crate::color::{color_component, hsv_to_rgba};
 use crate::config::ColorMode;
 use crate::explosion::{EXPLOSION_RING_WIDTH, Explosion};
 use crate::physics::{Particle, Segment};
-use crate::sim::{Polarity, Well};
+use crate::sim::{Emitter, Polarity, Well};
 #[cfg(not(target_arch = "wasm32"))]
 use ouroboros::self_referencing;
 #[cfg(not(target_arch = "wasm32"))]
@@ -262,6 +262,45 @@ pub fn render_wells(frame: &mut [u8], wells: &[Well], width: u32, height: u32) {
                 }
             }
         }
+    }
+}
+
+/// Emitter marker: soft green, distinct from the well cyan/orange.
+const EMITTER_COLOR: [u8; 4] = [140, 255, 140, 255];
+
+/// Draw each emitter as a ring with a direction arrow: the pinned
+/// spawner's glyph, the arrow showing where the stream goes.
+pub fn render_emitters(frame: &mut [u8], emitters: &[Emitter], width: u32, height: u32) {
+    let r = WELL_MARKER_RADIUS;
+    for e in emitters {
+        let cx = coord_to_pixel(e.x);
+        let cy = coord_to_pixel(e.y);
+        for dy in -r..=r {
+            for dx in -r..=r {
+                let d2 = dx * dx + dy * dy;
+                let on_ring = d2 <= r * r && d2 >= (r - 1) * (r - 1);
+                if !on_ring {
+                    continue;
+                }
+                let px = cx + dx;
+                let py = cy + dy;
+                // Bounds check: px/py are valid pixel coordinates after this check
+                #[allow(clippy::cast_sign_loss)]
+                if px >= 0 && (px as u32) < width && py >= 0 && (py as u32) < height {
+                    let idx = ((py as u32) as usize * width as usize + (px as u32) as usize) * 4;
+                    frame[idx..idx + 4].copy_from_slice(&EMITTER_COLOR);
+                }
+            }
+        }
+        let reach = f64::from(r) * 3.0;
+        draw_line(
+            frame,
+            width,
+            height,
+            (e.x, e.y),
+            (e.x + e.dx * reach, e.y + e.dy * reach),
+            EMITTER_COLOR,
+        );
     }
 }
 
@@ -867,6 +906,23 @@ mod tests {
         assert_eq!(px(10, 20), WALL_COLOR, "resting bar keeps its color");
         // A missing flash entry is a resting wall, never a panic.
         render_segments(&mut frame, &segments, &[0.5], width, height);
+    }
+
+    #[test]
+    fn render_emitters_draws_marker_arrow_and_clips() {
+        let (width, height) = (60u32, 50u32);
+        let mut frame = vec![0u8; (width * height * 4) as usize];
+        let emitters = [
+            Emitter::aimed(30.0, 25.0, 1.0, 0.0),
+            // Straddles the frame edge: must clip, not panic.
+            Emitter::aimed(1.0, 1.0, -1.0, -1.0),
+        ];
+        render_emitters(&mut frame, &emitters, width, height);
+        let px = |x: u32, y: u32| frame[((y * width + x) * 4) as usize];
+        assert_eq!(px(37, 25), EMITTER_COLOR[0], "ring pixel");
+        assert_eq!(px(45, 25), EMITTER_COLOR[0], "arrow tip along +x");
+        // Interior off the arrow axis stays empty (the ring is hollow).
+        assert_eq!(px(30, 21), 0, "ring interior stays empty");
     }
 
     #[test]

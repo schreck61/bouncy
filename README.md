@@ -58,7 +58,7 @@ cargo run --release -- --spawn-at-collision
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--preset <NAME>` | Apply a settings bundle: a built-in (`fireworks`, `blob`, `billiards`, `peace`, `orbits`, `mandala`, `accretion`, `percussion`, `marimba`, `pachinko`, `harp`) or a preset from the user presets file; explicit options override the preset | None |
+| `--preset <NAME>` | Apply a settings bundle: a built-in (`fireworks`, `blob`, `billiards`, `peace`, `orbits`, `mandala`, `accretion`, `percussion`, `marimba`, `pachinko`, `harp`, `clockwork`) or a preset from the user presets file; explicit options override the preset | None |
 | `--presets-file <PATH>` | Load user presets from this TOML file instead of the platform default location | Platform config dir |
 | `--list-presets` | List built-in and user presets (and where the user file was loaded from), then exit | |
 | `--spawn-mode <MODE>` | Where collision spawns appear: `center`, `collision`, or `off` | center |
@@ -123,6 +123,8 @@ cargo run --release -- --spawn-at-collision
 | `Shift+R` | Clear all pinned wells |
 | `V` (hold + drag) | Draw wall segments that particles bounce off |
 | `Shift+V` | Clear all drawn walls |
+| `U` (hold + drag) | Place an emitter; the drag aims it (a tap aims at the center) |
+| `Shift+U` | Clear all emitters |
 | `O` | Save a screenshot (PNG in the working directory) |
 | `E` | Export settings and scene (wells/walls) as a preset file |
 | `J` | Launch a comet from the far edge toward the cursor (same as middle click) |
@@ -199,6 +201,7 @@ A rendering post-process that mirrors the top-left quadrant of the frame 4-fold 
 | `marimba` | An instrument scene: a stair of eleven pitched bars plays descending pentatonic runs and floor-bounced ascents |
 | `pachinko` | An instrument scene: cascades plink down a staggered peg field, pitch falling with depth |
 | `harp` | An instrument scene: orbiting particles grace a fan of six pitched strings with slow rolled arpeggios |
+| `clockwork` | An instrument scene: three emitter lanes strike pitched bars at different periods — a polyrhythmic mechanism |
 
 ### Custom Presets
 

@@ -86,7 +86,7 @@ pub enum ChimeTimbre {
 pub struct Config {
     /// Apply a settings bundle: a built-in preset (fireworks, blob,
     /// billiards, peace, orbits, mandala, accretion, percussion, marimba,
-    /// pachinko, harp) or one from the user presets file (see
+    /// pachinko, harp, clockwork) or one from the user presets file (see
     /// --list-presets); explicit options override its values
     #[arg(long, value_name = "NAME")]
     pub preset: Option<String>,
@@ -483,6 +483,11 @@ pub const CONTROLS: &[(&str, &str)] = &[
         "Draw wall segments that particles bounce off",
     ),
     ("Shift+V", "Clear all drawn walls"),
+    (
+        "U (hold + drag)",
+        "Place an emitter; the drag aims it (a tap aims at the center)",
+    ),
+    ("Shift+U", "Clear all emitters"),
     ("O", "Save a screenshot (PNG in the working directory)"),
     (
         "E",
@@ -1001,13 +1006,19 @@ mod tests {
             assert_eq!(config.explosion_threshold, 0, "{name}");
         }
         assert!(parse(&["--preset", "harp"]).unwrap().trails);
+
+        let config = parse(&["--preset", "clockwork"]).unwrap();
+        assert!(config.wall_chimes && config.music);
+        assert_eq!(config.ping_volume, 30, "ambience ducks under the beat");
+        assert_eq!(config.gravity, 0);
+        assert_eq!(config.spawn_mode, SpawnMode::Off);
     }
 
     #[test]
     fn builtin_scenes_reach_config_and_respect_caps() {
         use crate::presets::WallNote;
         // Instrument presets deliver their geometry through resolution...
-        for name in ["percussion", "marimba", "pachinko", "harp"] {
+        for name in ["percussion", "marimba", "pachinko", "harp", "clockwork"] {
             let config = parse(&["--preset", name]).unwrap();
             assert!(
                 !config.scene.walls.is_empty(),
@@ -1024,6 +1035,7 @@ mod tests {
             let scene = preset.scene();
             assert!(scene.walls.len() <= crate::sim::MAX_WALL_SEGMENTS);
             assert!(scene.wells.len() <= crate::sim::MAX_PINNED_WELLS);
+            assert!(scene.emitters.len() <= crate::sim::MAX_EMITTERS);
             for wall in &scene.walls {
                 for c in [wall.x1, wall.y1, wall.x2, wall.y2] {
                     assert!((0.0..=1.0).contains(&c), "{}: {c}", preset.label());
@@ -1043,6 +1055,10 @@ mod tests {
                 .iter()
                 .any(|w| matches!(w.note, WallNote::Note(_)))
         );
+        // Clockwork: one single-shot emitter per bar.
+        let scene = Preset::Clockwork.scene();
+        assert_eq!(scene.emitters.len(), scene.walls.len());
+        assert!(scene.emitters.iter().all(|e| e.cap == 1));
         // Pachinko's generated field: 8+7 alternating pegs plus 2 funnels.
         assert_eq!(
             Preset::Pachinko.scene().walls.len(),

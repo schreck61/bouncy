@@ -66,6 +66,9 @@ pub enum Preset {
     /// A fan of six pitched strings grazed by particles orbiting a
     /// binary of wells: slow rolled arpeggios, painted with trails.
     Harp,
+    /// Three emitter lanes strike pitched bars at different periods: a
+    /// polyrhythmic mechanism that never quite repeats.
+    Clockwork,
 }
 
 impl Preset {
@@ -82,6 +85,7 @@ impl Preset {
             Preset::Marimba => "marimba",
             Preset::Pachinko => "pachinko",
             Preset::Harp => "harp",
+            Preset::Clockwork => "clockwork",
         }
     }
 
@@ -300,6 +304,30 @@ impl Preset {
                 "--explosion-threshold",
                 "0",
             ],
+            // The emitter showcase: each lane's particle ping-pongs between
+            // the left arena wall and its bar, so strike period = round-trip
+            // distance / speed — three distances, three tempos, one
+            // polyrhythm. Ambient pings duck under the beat.
+            Preset::Clockwork => &[
+                "--wall-chimes",
+                "--music",
+                "--chime-timbre",
+                "marimba",
+                "--ping-volume",
+                "30",
+                "--gravity",
+                "0",
+                "--initial-speed",
+                "320",
+                "--particle-size",
+                "3",
+                "--min-particles",
+                "2",
+                "--spawn-mode",
+                "off",
+                "--explosion-threshold",
+                "0",
+            ],
         }
     }
 
@@ -320,6 +348,7 @@ impl Preset {
             Preset::Marimba => marimba_scene(),
             Preset::Pachinko => pachinko_scene(),
             Preset::Harp => harp_scene(),
+            Preset::Clockwork => clockwork_scene(),
         }
     }
 }
@@ -352,6 +381,7 @@ fn percussion_scene() -> Scene {
     Scene {
         wells: Vec::new(),
         walls,
+        emitters: Vec::new(),
     }
 }
 
@@ -372,6 +402,7 @@ fn marimba_scene() -> Scene {
     Scene {
         wells: Vec::new(),
         walls,
+        emitters: Vec::new(),
     }
 }
 
@@ -396,6 +427,7 @@ fn pachinko_scene() -> Scene {
     Scene {
         wells: Vec::new(),
         walls,
+        emitters: Vec::new(),
     }
 }
 
@@ -426,6 +458,34 @@ fn harp_scene() -> Scene {
     Scene {
         wells: vec![well(0.500, 0.300), well(0.500, 0.700)],
         walls,
+        emitters: Vec::new(),
+    }
+}
+
+/// Three horizontal emitter lanes, each a single particle ping-ponging
+/// between the left arena wall and a pitched bar. Strike period is the
+/// round-trip distance over the launch speed: three bar distances give
+/// three tempos in a polyrhythm that drifts in and out of phase.
+fn clockwork_scene() -> Scene {
+    // Lane y, bar x, and pentatonic degree (C4, A4, E5 triad).
+    const LANES: [(f64, f64, u8); 3] = [(0.30, 0.35, 0), (0.50, 0.50, 4), (0.65, 0.65, 7)];
+    const BAR_HALF: f64 = 0.06;
+    let mut walls = Vec::new();
+    let mut emitters = Vec::new();
+    for &(y, bar_x, note) in &LANES {
+        walls.push(noted(bar_x, y - BAR_HALF, bar_x, y + BAR_HALF, note));
+        emitters.push(SceneEmitter {
+            x: 0.05,
+            y,
+            angle: 90.0,
+            rate: 1.0,
+            cap: 1,
+        });
+    }
+    Scene {
+        wells: Vec::new(),
+        walls,
+        emitters,
     }
 }
 
@@ -468,6 +528,19 @@ const fn well(x: f64, y: f64) -> SceneWell {
 pub struct Scene {
     pub wells: Vec<SceneWell>,
     pub walls: Vec<SceneWall>,
+    pub emitters: Vec<SceneEmitter>,
+}
+
+/// A pinned particle emitter in window-fraction coordinates. `angle` is
+/// degrees clockwise from straight up (12 o'clock, screen coordinates):
+/// 0 emits upward, 90 emits right, 180 emits down.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SceneEmitter {
+    pub x: f64,
+    pub y: f64,
+    pub angle: f64,
+    pub rate: f64,
+    pub cap: usize,
 }
 
 /// A pinned gravity well in window-fraction coordinates.
@@ -600,6 +673,7 @@ pub fn parse(text: &str, path: &Path) -> Result<UserPresets, String> {
             let key = key.replace('_', "-");
             match key.as_str() {
                 "walls" => scene.walls = parse_scene_walls(&name, &value)?,
+                "emitters" => scene.emitters = parse_scene_emitters(&name, &value)?,
                 // `wells` is double-duty: an integer is the --wells ring
                 // count (a CLI option), an array is scene geometry.
                 "wells" if value.is_array() => {
@@ -845,6 +919,69 @@ fn parse_scene_wells(preset: &str, value: &toml::Value) -> Result<Vec<SceneWell>
     Ok(wells)
 }
 
+/// Parse `emitters = [{ x, y, angle = 0.0, rate = 2.0, cap = 12 }]`
+/// (window fractions; angle in degrees clockwise from straight up).
+fn parse_scene_emitters(preset: &str, value: &toml::Value) -> Result<Vec<SceneEmitter>, String> {
+    let toml::Value::Array(entries) = value else {
+        return Err(format!(
+            "preset '{preset}': emitters must be an array of tables like \
+             {{ x = 0.5, y = 0.1, angle = 180.0, rate = 2.0, cap = 12 }}"
+        ));
+    };
+    let mut emitters = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let toml::Value::Table(table) = entry else {
+            return Err(format!("preset '{preset}': each emitter must be a table"));
+        };
+        let coord = |key: &str| -> Result<f64, String> {
+            table.get(key).map_or_else(
+                || Err(format!("preset '{preset}': an emitter is missing '{key}'")),
+                |v| parse_fraction(preset, "emitters", v),
+            )
+        };
+        let number = |key: &str, default: f64| -> Result<f64, String> {
+            match table.get(key) {
+                None => Ok(default),
+                Some(v) => v
+                    .as_float()
+                    // Integer scene numbers are tiny: through i32 losslessly.
+                    .or_else(|| i32::try_from(v.as_integer()?).ok().map(f64::from))
+                    .ok_or_else(|| format!("preset '{preset}': emitter '{key}' must be a number")),
+            }
+        };
+        let rate = number("rate", 2.0)?;
+        if !(0.1..=20.0).contains(&rate) {
+            return Err(format!(
+                "preset '{preset}': emitter rate must be 0.1-20 particles/sec (got {rate})"
+            ));
+        }
+        let cap = match table.get("cap") {
+            None => 12,
+            Some(v) => {
+                let cap = v.as_integer().filter(|c| (1..=200).contains(c));
+                let Some(cap) = cap else {
+                    return Err(format!(
+                        "preset '{preset}': emitter cap must be an integer 1-200"
+                    ));
+                };
+                // Bounds-checked to 1-200 above.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    cap as usize
+                }
+            }
+        };
+        emitters.push(SceneEmitter {
+            x: coord("x")?,
+            y: coord("y")?,
+            angle: number("angle", 0.0)?.rem_euclid(360.0),
+            rate,
+            cap,
+        });
+    }
+    Ok(emitters)
+}
+
 /// Serialize a captured scene as a complete `[name]` preset table that
 /// [`parse`] round-trips. Pure (no filesystem), so tests can verify the
 /// round trip.
@@ -853,6 +990,7 @@ pub fn scene_to_toml(
     settings: &[(&str, toml::Value)],
     wells: &[SceneWell],
     walls: &[SceneWall],
+    emitters: &[SceneEmitter],
 ) -> String {
     let mut table = toml::Table::new();
     for (key, value) in settings {
@@ -901,6 +1039,23 @@ pub fn scene_to_toml(
             .collect();
         table.insert("walls".into(), toml::Value::Array(walls));
     }
+    if !emitters.is_empty() {
+        let emitters = emitters
+            .iter()
+            .map(|e| {
+                let mut t = toml::Table::new();
+                t.insert("x".into(), e.x.into());
+                t.insert("y".into(), e.y.into());
+                t.insert("angle".into(), e.angle.into());
+                t.insert("rate".into(), e.rate.into());
+                // Caps are far below i64::MAX.
+                #[allow(clippy::cast_possible_wrap)]
+                t.insert("cap".into(), (e.cap as i64).into());
+                toml::Value::Table(t)
+            })
+            .collect();
+        table.insert("emitters".into(), toml::Value::Array(emitters));
+    }
     let mut document = toml::Table::new();
     document.insert(name.to_string(), toml::Value::Table(table));
     document.to_string()
@@ -915,6 +1070,7 @@ pub fn export_scene(
     settings: &[(&str, toml::Value)],
     wells: &[SceneWell],
     walls: &[SceneWall],
+    emitters: &[SceneEmitter],
 ) -> Result<std::path::PathBuf, String> {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -930,7 +1086,13 @@ pub fn export_scene(
         if path.exists() {
             continue;
         }
-        let text = scene_to_toml(&format!("scene-{secs}{suffix}"), settings, wells, walls);
+        let text = scene_to_toml(
+            &format!("scene-{secs}{suffix}"),
+            settings,
+            wells,
+            walls,
+            emitters,
+        );
         std::fs::write(&path, text)
             .map_err(|e| format!("cannot write '{}': {e}", path.display()))?;
         return Ok(path);
@@ -1142,6 +1304,13 @@ mod tests {
                 note: WallNote::Silent,
             },
         ];
+        let emitters = [SceneEmitter {
+            x: 0.5,
+            y: 0.1,
+            angle: 180.0,
+            rate: 3.5,
+            cap: 6,
+        }];
         let text = scene_to_toml(
             "saved",
             &[
@@ -1152,6 +1321,7 @@ mod tests {
             ],
             &wells,
             &walls,
+            &emitters,
         );
 
         let user = parse(&text, Path::new("/test/export.toml")).unwrap();
@@ -1161,10 +1331,30 @@ mod tests {
         assert!(preset.args.contains(&"--trails".to_string()));
         assert_eq!(preset.scene.wells, wells);
         assert_eq!(preset.scene.walls, walls);
+        assert_eq!(preset.scene.emitters, emitters);
         // Note-free walls keep the legacy bare-array form on disk.
         assert!(text.contains("[0.1, 0.2, 0.3, 0.4]"), "{text}");
         // Silent walls carry the marker explicitly.
         assert!(text.contains("silent = true"), "{text}");
+    }
+
+    #[test]
+    fn scene_emitters_are_validated_loudly() {
+        let user = parse_str("[rig]\nemitters = [{ x = 0.5, y = 0.1 }]\n").unwrap();
+        let e = user.presets["rig"].scene.emitters[0];
+        assert_eq!((e.angle, e.rate, e.cap), (0.0, 2.0, 12), "defaults");
+
+        let err = parse_str("[bad]\nemitters = [[0.5, 0.1]]\n").unwrap_err();
+        assert!(err.contains("must be a table"), "{err}");
+        let err = parse_str("[bad]\nemitters = [{ x = 0.5 }]\n").unwrap_err();
+        assert!(err.contains("missing 'y'"), "{err}");
+        let err = parse_str("[bad]\nemitters = [{ x = 0.5, y = 0.1, rate = 25.0 }]\n").unwrap_err();
+        assert!(err.contains("0.1-20"), "{err}");
+        let err = parse_str("[bad]\nemitters = [{ x = 0.5, y = 0.1, cap = 0 }]\n").unwrap_err();
+        assert!(err.contains("1-200"), "{err}");
+        // Angles normalize instead of erroring.
+        let user = parse_str("[rig]\nemitters = [{ x = 0.5, y = 0.1, angle = -90.0 }]\n").unwrap();
+        assert!((user.presets["rig"].scene.emitters[0].angle - 270.0).abs() < 1e-9);
     }
 
     #[test]
