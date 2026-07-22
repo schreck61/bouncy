@@ -17,6 +17,10 @@ Notable changes to Bouncy, by release. Version numbers follow
   Deleting an emitter leaves its particles flying. Natively, Esc now
   backs out in steps — armed tool, then selection, then exit — so
   leaving the app can take an extra press while inspecting.
+- Fixed: a panel relaunch dropped `--mute` from the rebuilt launch
+  context, so relaunching a muted session silently unmuted it (and
+  opened an audio device nobody asked for). Mute now travels with the
+  process, like the window size and render backend.
 
 ## 1.9.0 — 2026-07-21
 

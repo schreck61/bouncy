@@ -1127,6 +1127,15 @@ impl App {
         if self.config.cpu {
             args.push("--cpu".into());
         }
+        // A muted process stays muted across relaunches. Dropping this
+        // flag would let apply_session_deltas unmute against the new
+        // bundle and open an audio device the user never asked for —
+        // and on Windows, re-opening WASAPI after an earlier stream was
+        // dropped can fault inside an unloaded MMDevApi.dll (the CI
+        // crash this line fixes).
+        if self.config.mute {
+            args.push("--mute".into());
+        }
         if self.config.verbose {
             args.push("--verbose".into());
         }
@@ -2398,6 +2407,26 @@ mod tests {
             "failed relaunch leaves the old config in place"
         );
         assert!(app.sim.is_some());
+    }
+
+    #[test]
+    fn relaunch_keeps_a_muted_session_muted() {
+        // Regression: relaunching under a preset used to drop --mute
+        // from the rebuilt launch context, so apply_session_deltas
+        // unmuted against the new bundle and opened an audio device the
+        // user never asked for. On the Windows CI runners that reopen
+        // faulted inside an unloaded MMDevApi.dll and took down the
+        // whole test process.
+        let mut app = test_app();
+        assert!(app.audio.is_muted(), "test app launches muted");
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: Some("peace".to_string()),
+            particle_size: None,
+            initial_speed: None,
+            min_particles: None,
+        });
+        assert!(app.config.mute, "mute is process context, not scene");
+        assert!(app.audio.is_muted(), "relaunch must not unmute");
     }
 
     #[test]
