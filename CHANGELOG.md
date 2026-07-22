@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.9.0 — 2026-07-21
 
 - Emitters — the instrument's sequencer clock (roadmap rung 3): pinned
   spawners that fire one particle at a time in a fixed direction at a
