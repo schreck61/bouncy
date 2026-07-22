@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.11.0 — 2026-07-22
 
 - Quantize — emitters can snap to a beat grid (roadmap: the sequencer
   rung's optional snap). `--bpm 30-300` sets the tempo (0 = off, the
