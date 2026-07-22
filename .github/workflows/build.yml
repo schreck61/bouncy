@@ -272,8 +272,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # dcoapp/app is a GitHub App (github.com/apps/dco), not an action,
+      # so it cannot be referenced with `uses:`. Check the trailer
+      # directly instead: every non-merge commit in the PR must carry a
+      # Signed-off-by line matching its author or committer.
       - name: Check DCO sign-off
-        uses: dcoapp/app@v1
-        with:
-          head-ref: ${{ github.event.pull_request.head.sha }}
-          base-ref: ${{ github.event.pull_request.base.sha }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          failed=0
+          for sha in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
+            author="Signed-off-by: $(git log -1 --format='%an <%ae>' "$sha")"
+            committer="Signed-off-by: $(git log -1 --format='%cn <%ce>' "$sha")"
+            if ! git log -1 --format='%B' "$sha" | grep -qF -e "$author" -e "$committer"; then
+              subject=$(git log -1 --format='%s' "$sha")
+              echo "::error::Commit ${sha:0:12} (\"$subject\") is missing a Signed-off-by trailer matching its author or committer. Sign off with: git commit --amend -s"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ] && echo "All commits are signed off."
