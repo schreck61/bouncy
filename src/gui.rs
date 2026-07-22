@@ -125,6 +125,8 @@ pub enum ToggleId {
     Music,
     WallChimes,
     Mute,
+    /// MIDI note sending; the row exists only while a port is connected.
+    Midi,
 }
 
 /// Identity of a push button.
@@ -218,6 +220,10 @@ pub struct PanelState {
     pub launch_preset: String,
     /// The inspected entity, if any (None hides the selected section).
     pub selection: Option<PanelSelection>,
+    /// A MIDI port is connected (shows the MIDI toggle row) and the
+    /// current sending state.
+    pub midi_connected: bool,
+    pub midi_enabled: bool,
 }
 
 /// An axis-aligned rectangle in frame coordinates.
@@ -1261,6 +1267,17 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         &mut y,
     );
     push_toggle(&mut out, x, w, ToggleId::Mute, "Mute", state.muted, &mut y);
+    if state.midi_connected {
+        push_toggle(
+            &mut out,
+            x,
+            w,
+            ToggleId::Midi,
+            "MIDI out",
+            state.midi_enabled,
+            &mut y,
+        );
+    }
     y += 4.0;
 
     button_row(
@@ -1672,6 +1689,7 @@ fn toggle_command(id: ToggleId) -> PanelCommand {
         ToggleId::Music => PanelCommand::Plain(Command::ToggleMusic),
         ToggleId::WallChimes => PanelCommand::Plain(Command::ToggleWallChimes),
         ToggleId::Mute => PanelCommand::Plain(Command::ToggleMute),
+        ToggleId::Midi => PanelCommand::Plain(Command::ToggleMidi),
     }
 }
 
@@ -2405,6 +2423,36 @@ mod tests {
                 "{now} steps to {next}"
             );
         }
+    }
+
+    #[test]
+    fn midi_toggle_row_exists_only_while_connected() {
+        let has_row = |s: &PanelState| {
+            layout(s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0)
+                .0
+                .iter()
+                .any(|laid| {
+                    matches!(
+                        &laid.item,
+                        Item::Toggle {
+                            id: ToggleId::Midi,
+                            ..
+                        }
+                    )
+                })
+        };
+        let disconnected = state();
+        assert!(!has_row(&disconnected), "no port, no row");
+        let connected = PanelState {
+            midi_connected: true,
+            midi_enabled: true,
+            ..state()
+        };
+        assert!(has_row(&connected));
+        assert!(matches!(
+            toggle_command(ToggleId::Midi),
+            PanelCommand::Plain(Command::ToggleMidi)
+        ));
     }
 
     #[test]

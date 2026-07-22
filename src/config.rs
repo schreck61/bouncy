@@ -197,6 +197,17 @@ pub struct Config {
     #[arg(long, default_value_t = 4, value_parser = parse_beat_div)]
     pub beat_div: u32,
 
+    /// Send wall-chime notes to this MIDI output port — a name
+    /// substring (case-insensitive) or an index from --list-midi-ports.
+    /// Native only; independent of the audio mute (Y toggles at
+    /// runtime)
+    #[arg(long, value_name = "PORT")]
+    pub midi_port: Option<String>,
+
+    /// List MIDI output ports, then exit (native only)
+    #[arg(long)]
+    pub list_midi_ports: bool,
+
     /// Mirror the frame 4-fold around the screen center (toggle at runtime
     /// with K)
     #[arg(long)]
@@ -287,6 +298,9 @@ impl Config {
         }
         if self.bpm > 0.0 {
             println!("Quantize: {} bpm / {} per beat", self.bpm, self.beat_div);
+        }
+        if let Some(ref port) = self.midi_port {
+            println!("MIDI out: port '{port}'");
         }
         if self.wall_chimes {
             match self.chime_timbre {
@@ -493,6 +507,10 @@ pub const CONTROLS: &[(&str, &str)] = &[
     (
         "L",
         "Toggle emitter quantize: emissions snap to the beat grid (--bpm)",
+    ),
+    (
+        "Y",
+        "Toggle MIDI note sending (native; needs --midi-port at launch)",
     ),
     ("K", "Toggle kaleidoscope rendering"),
     ("G (hold)", "Gravity well at the cursor; Shift+G repels"),
@@ -714,6 +732,20 @@ mod tests {
         assert!(parse(&["--bpm", "301"]).is_err(), "above the band");
         assert!(parse(&["--bpm", "-60"]).is_err());
         assert!(parse(&["--bpm", "nan"]).is_err());
+    }
+
+    #[test]
+    fn midi_flags_parse_and_default_off() {
+        let config = parse(&[]).unwrap();
+        assert_eq!(config.midi_port, None);
+        assert!(!config.list_midi_ports);
+        assert_eq!(
+            parse(&["--midi-port", "IAC Driver Bus 1"])
+                .unwrap()
+                .midi_port,
+            Some("IAC Driver Bus 1".to_string())
+        );
+        assert!(parse(&["--list-midi-ports"]).unwrap().list_midi_ports);
     }
 
     #[test]

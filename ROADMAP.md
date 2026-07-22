@@ -42,6 +42,11 @@ file only tracks what's ahead.
   clock — pause holds the beat, time scale bends the tempo — with a
   Quantize slider and beat-grid button on both panels, and tempo
   riding scenes, share links, and relaunches.
+- **1.12** put the instrument on the wire: native MIDI out
+  (`--midi-port`) sends wall-chime strikes to a DAW or hardware synth
+  — pentatonic degrees as keys from middle C, velocity from impact,
+  guaranteed note-offs — independent of the local mute, with the `Y`
+  toggle and a panel row while connected.
 - **1.3** shipped the browser demo: the same simulation compiled to
   WebAssembly with an HTML control panel over the `Command` dispatch,
   WebAudio, live resize, share links, launch options, and an optional
@@ -73,11 +78,14 @@ file only tracks what's ahead.
      that makes rhythms reproducible instead of one-shot. The in-app
      quantize snap serves the no-DAW majority; purists get rubato by
      leaving it off.
-  2. *MIDI out.* Native via `midir`, browser via WebMIDI (Chrome,
-     matching the demo's existing Chrome-first stance); per-wall note
-     mapping becomes per-wall MIDI note/channel. Strict timing stays
-     the DAW's job. A capture/export path (MIDI file or WAV of the
-     internal synth) keeps creations for everyone else.
+  2. *MIDI out.* (Shipped natively in 1.12.0: `midir`, `--midi-port`
+     / `--list-midi-ports`, chimes on channel 1 with velocity from
+     impact, the `Y` toggle. Recording the IAC bus in a DAW already
+     covers capture for DAW owners.) Still ahead from this rung:
+     browser WebMIDI (Chrome, matching the demo's Chrome-first
+     stance), per-wall MIDI note/channel mapping, and a self-contained
+     capture/export path (MIDI file or WAV of the internal synth) for
+     everyone without a DAW. Strict timing stays the DAW's job.
   3. *Filter walls.* Semipermeable walls (every-Nth-particle gates,
      key/mode filters on note-carrying particles) — the full
      generative toolkit. Permeability must be an explicit wall *type*:

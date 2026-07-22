@@ -4,6 +4,21 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- MIDI out (native) — wall-chime strikes become MIDI notes for a DAW
+  or hardware synth. `--midi-port <NAME-or-index>` connects at launch
+  (`--list-midi-ports` enumerates; a failed connect degrades to a
+  warning, never a refusal to start), `Y` pauses/resumes sending, and
+  the panel grows a MIDI out toggle while connected. Pitch is the
+  chime's pentatonic degree in C major from middle C (keys 60-84),
+  velocity follows impact energy on the audible gain curve, one
+  channel, 200 ms gate with note-offs guaranteed on quit (and CC 123
+  on connect to clear a crashed predecessor's hangers). Deliberately
+  independent of the audio mute: silence the local synth with `M` and
+  let the DAW speak. Browser WebMIDI and MIDI-file capture are future
+  rungs; per-wall MIDI note/channel scene keys likewise.
+
 ## 1.11.0 — 2026-07-22
 
 - Quantize — emitters can snap to a beat grid (roadmap: the sequencer

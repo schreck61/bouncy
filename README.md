@@ -16,6 +16,7 @@ A GPU-accelerated particle simulation written in Rust featuring elastic collisio
 - **HUD Overlay**: Optional on-screen display (H key) with FPS, particle count, and current physics settings
 - **Visual Effects**: Optional motion trails (`--trails`), velocity-based coloring (`--color-mode velocity`), and configurable particle size
 - **Synthesized Audio**: Real-time audio synthesis for collision pings (pitch based on impact energy, stereo-panned to the collision position) and explosion rumbles; runs silently when no audio device is available
+- **MIDI Out**: `--midi-port` sends wall-chime strikes to a DAW or hardware synth as MIDI notes (C-major pentatonic from middle C, velocity from impact energy) — independent of the local mute, so the synth can stay silent while the DAW plays (native only)
 - **Reproducible Runs**: `--seed` fixes the random number generator for repeatable simulations
 - **Flexible Display Modes**: Runs in borderless fullscreen by default, or use `--width` and `--height` for fixed-size windowed mode
 - **Adaptive Particle Count**: Initial particle count scales based on screen resolution
@@ -81,6 +82,8 @@ cargo run --release -- --spawn-at-collision
 | `--chime-timbre <VOICE>` | The voice wall chimes play with: `chime`, `marimba`, `pluck`, `drum`, or `bell` (the instrument presets each pick their own; particle pings are unaffected) | chime |
 | `--bpm <N>` | Quantize emitters to a beat grid at this tempo (30-300); emissions that come due wait for the next grid tick; 0 = off, emitters free-run (L toggles at runtime) | 0 |
 | `--beat-div <N>` | Beat-grid resolution in ticks per beat: `1`, `2`, `4`, or `8` | 4 |
+| `--midi-port <PORT>` | Send wall-chime notes to this MIDI output port — a name substring or an index from `--list-midi-ports`; independent of the audio mute (native only) | None |
+| `--list-midi-ports` | List MIDI output ports, then exit (native only) | |
 | `--kaleidoscope` | Mirror the frame 4-fold around the screen center | Off |
 | `--trails` | Leave motion trails behind particles | Off |
 | `--panel` | Start with the native control panel open (Tab toggles; the right-edge handle also reveals it) | Off |
@@ -120,6 +123,7 @@ cargo run --release -- --spawn-at-collision
 | `;` / `'` | Adjust particle-ping volume by 10% |
 | `I` | Toggle wall chimes (walls play notes on impact) |
 | `L` | Toggle emitter quantize: emissions snap to the beat grid (`--bpm`) |
+| `Y` | Toggle MIDI note sending (native; needs `--midi-port` at launch) |
 | `K` | Toggle kaleidoscope rendering |
 | `G` (hold) | Gravity well: attract particles toward the cursor; `Shift+G` repels |
 | `W` | Pin a persistent gravity well at the cursor; `Shift+W` pins a repeller |

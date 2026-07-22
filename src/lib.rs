@@ -19,6 +19,8 @@ pub mod text;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod gui;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod midi;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 
@@ -33,6 +35,18 @@ pub fn run() {
 
     if config.list_presets {
         presets::print_list(config.presets_file.as_deref());
+        return;
+    }
+
+    if config.list_midi_ports {
+        let ports = midi::MidiOut::ports();
+        if ports.is_empty() {
+            println!("No MIDI output ports found");
+        } else {
+            for (i, name) in ports.iter().enumerate() {
+                println!("  [{i}] {name}");
+            }
+        }
         return;
     }
 

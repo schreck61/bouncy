@@ -151,6 +151,9 @@ pub enum Command {
     LaunchComet,
     /// Toggle emitter quantize between off and the last tempo (L).
     ToggleQuantize,
+    /// Toggle MIDI note sending while connected (Y; native only).
+    #[cfg(not(target_arch = "wasm32"))]
+    ToggleMidi,
 }
 
 /// A control-panel action, shared by every panel surface (the native
@@ -447,6 +450,15 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     gui: crate::gui::Gui,
 
+    /// MIDI out for wall chimes (--midi-port), if connected. Sending
+    /// pauses via `midi_enabled` (Y) while the connection stays open.
+    /// Deliberately independent of the audio mute: silencing the local
+    /// synth while driving a DAW is a primary use.
+    #[cfg(not(target_arch = "wasm32"))]
+    midi: Option<crate::midi::MidiOut>,
+    #[cfg(not(target_arch = "wasm32"))]
+    midi_enabled: bool,
+
     /// Mailbox shared with the JS control panel: commands flow in, a
     /// state snapshot flows out, once per frame (see `web.rs`).
     #[cfg(target_arch = "wasm32")]
@@ -461,6 +473,21 @@ impl App {
         // A session launched with a tempo keeps it as the L-toggle
         // restore point; otherwise the toggle starts at a sane default.
         let launch_bpm = if config.bpm > 0.0 { config.bpm } else { 120.0 };
+        // MIDI failure degrades like missing audio: say so and run on.
+        #[cfg(not(target_arch = "wasm32"))]
+        let midi =
+            config.midi_port.as_deref().and_then(|port| {
+                match crate::midi::MidiOut::connect(port) {
+                    Ok(m) => {
+                        println!("MIDI out: connected to '{}'", m.port_name);
+                        Some(m)
+                    }
+                    Err(e) => {
+                        eprintln!("MIDI unavailable ({e}); running without MIDI");
+                        None
+                    }
+                }
+            });
         App {
             trails: config.trails,
             color_mode: config.color_mode,
@@ -507,6 +534,10 @@ impl App {
                 }
                 gui
             },
+            #[cfg(not(target_arch = "wasm32"))]
+            midi,
+            #[cfg(not(target_arch = "wasm32"))]
+            midi_enabled: true,
             #[cfg(target_arch = "wasm32")]
             web_shared: None,
         }
@@ -582,6 +613,12 @@ impl App {
             #[allow(clippy::cast_possible_truncation)]
             self.audio
                 .play_note(chime.note, chime.energy, chime.pan as f32);
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.midi_enabled
+                && let Some(ref mut midi) = self.midi
+            {
+                midi.note_on(chime.note, chime.energy, now);
+            }
             self.wall_flash.insert(chime.stroke, 1.0);
         }
         // Decay hit flashes over ~250 ms of simulated time (paused frames
@@ -592,6 +629,14 @@ impl App {
             *v *= decay;
             *v > 0.02
         });
+        // MIDI note-offs drain unconditionally — even with sending
+        // paused (Y), in-flight notes must still release. Pause skips
+        // simulate entirely, so a gate held across a pause stretches
+        // like the wall flash freeze does; both resume together.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ref mut midi) = self.midi {
+            midi.flush(now);
+        }
         // Selection sweep: an id that died this frame (clear-all, reset,
         // Shift+V/U) drops the selection with it.
         if let Some(sel) = self.selection {
@@ -668,6 +713,12 @@ impl App {
                 if self.kaleidoscope { "on" } else { "off" },
             ),
         ]);
+        // MIDI line only while a port is connected — for everyone else
+        // the row would be noise the Y key can't even act on.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ref midi) = self.midi {
+            lines.push(midi_hud_line(&midi.port_name, self.midi_enabled));
+        }
 
         let mut flags = Vec::new();
         if self.paused {
@@ -700,7 +751,7 @@ impl App {
                 "P pause   N step   R reset   M mute",
                 "T trails   C colors   B spawn mode",
                 "X matter (fusion/fission)   F flow   A self-gravity",
-                "S musical pings   K kaleidoscope   L quantize",
+                "S musical pings   K kaleidoscope   L quantize   Y MIDI",
                 "G hold: gravity well (Shift+G repels)",
                 "W pin well (Shift+W repel, Shift+R clear)",
                 "V hold+drag: draw walls (Shift+V clears)",
@@ -1182,6 +1233,13 @@ impl App {
         if self.config.mute {
             args.push("--mute".into());
         }
+        // The live MIDI connection is App-owned and survives a relaunch
+        // untouched; the flag rides along so the rebuilt Config stays
+        // truthful about the process context.
+        if let Some(ref port) = self.config.midi_port {
+            args.push("--midi-port".into());
+            args.push(port.into());
+        }
         if self.config.verbose {
             args.push("--verbose".into());
         }
@@ -1376,6 +1434,8 @@ impl App {
                         })
                 }
             }),
+            midi_connected: self.midi.is_some(),
+            midi_enabled: self.midi_enabled,
         }
     }
 
@@ -1560,6 +1620,8 @@ impl App {
             KeyCode::Quote => self.apply(Command::AdjustPingVolume(PING_VOLUME_STEP)),
             KeyCode::KeyI if !repeat => self.apply(Command::ToggleWallChimes),
             KeyCode::KeyL if !repeat => self.apply(Command::ToggleQuantize),
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyCode::KeyY if !repeat => self.apply(Command::ToggleMidi),
             KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
             KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
             KeyCode::ArrowUp => self.apply(Command::AdjustGravity(GRAVITY_STEP)),
@@ -1732,6 +1794,22 @@ impl App {
                         sim.bpm = self.last_bpm;
                         println!("Quantize: {} bpm / {} per beat", sim.bpm, sim.beat_div);
                     }
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::ToggleMidi => {
+                if self.midi.is_some() {
+                    self.midi_enabled = !self.midi_enabled;
+                    println!(
+                        "MIDI: {}",
+                        if self.midi_enabled {
+                            "sending"
+                        } else {
+                            "paused"
+                        }
+                    );
+                } else {
+                    println!("MIDI: no port connected (launch with --midi-port)");
                 }
             }
             Command::PinWell(polarity) => {
@@ -2017,6 +2095,19 @@ fn bullet_time_factor(elapsed: f64) -> f64 {
     } else {
         let t = ((elapsed - BULLET_TIME_HOLD_SECS) / BULLET_TIME_RAMP_SECS).clamp(0.0, 1.0);
         BULLET_TIME_SCALE + (1.0 - BULLET_TIME_SCALE) * t
+    }
+}
+
+/// The HUD's MIDI stats line for a connected port: the port name while
+/// sending, "paused" while gated off. Callers skip the line entirely
+/// without a connection (the majority of runs never touch MIDI, and Y
+/// can't act without a port anyway).
+#[cfg(not(target_arch = "wasm32"))]
+fn midi_hud_line(port: &str, enabled: bool) -> String {
+    if enabled {
+        format!("MIDI: {port}  (Y)")
+    } else {
+        "MIDI: paused  (Y)".to_string()
     }
 }
 
@@ -2816,6 +2907,86 @@ mod tests {
         );
         // A dead id is a no-op, never a panic.
         app.apply_panel_command(PanelCommand::AimEmitterAt(id + 1, 0.0, 0.0));
+    }
+
+    /// An App launched with a MIDI port that cannot exist: the connect
+    /// fails and the app runs on without MIDI.
+    fn app_with_bad_midi_port() -> App {
+        let config = Config::try_resolve_from([
+            "bouncy",
+            "--seed",
+            "7",
+            "--mute",
+            "--midi-port",
+            "no-such-port-zzz",
+        ])
+        .unwrap();
+        let mut app = App::new(config.clone());
+        app.sim = Some(Simulation::new(&config, 800, 600));
+        app
+    }
+
+    #[test]
+    fn midi_absent_or_unreachable_never_blocks_the_app() {
+        let app = test_app();
+        assert!(app.midi.is_none(), "no flag, no connection");
+        let mut app = app_with_bad_midi_port();
+        assert!(app.midi.is_none(), "failed connect degrades to none");
+        assert!(app.midi_enabled, "the gate defaults open");
+        // The simulate path with chimes runs clean without a port.
+        app.simulate(0.016, Instant::now());
+    }
+
+    #[test]
+    fn relaunch_carries_the_midi_port_context() {
+        // No port configured: relaunching must not invent one.
+        let mut app = test_app();
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: Some("peace".to_string()),
+            particle_size: None,
+            initial_speed: None,
+            min_particles: None,
+        });
+        assert_eq!(app.config.midi_port, None);
+
+        // A configured port survives the rebuilt config even though the
+        // connection itself failed (process context, like --mute).
+        let mut app = app_with_bad_midi_port();
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: Some("peace".to_string()),
+            particle_size: None,
+            initial_speed: None,
+            min_particles: None,
+        });
+        assert_eq!(
+            app.config.midi_port.as_deref(),
+            Some("no-such-port-zzz"),
+            "midi port rides the relaunch args"
+        );
+    }
+
+    #[test]
+    fn midi_hud_line_shows_the_port_or_paused() {
+        assert_eq!(
+            midi_hud_line("IAC Driver Bus 1", true),
+            "MIDI: IAC Driver Bus 1  (Y)"
+        );
+        assert_eq!(
+            midi_hud_line("IAC Driver Bus 1", false),
+            "MIDI: paused  (Y)"
+        );
+        // The no-connection case is structural: hud_lines pushes the
+        // line inside `if let Some(ref midi)`, so absence needs no
+        // sentinel — covered by midi_absent_or_unreachable_never_blocks.
+    }
+
+    #[test]
+    fn toggle_midi_without_a_port_is_a_calm_no_op() {
+        let mut app = test_app();
+        assert!(app.midi.is_none());
+        app.apply(Command::ToggleMidi);
+        assert!(app.midi_enabled, "gate untouched without a connection");
+        // No panic, no state change — the message is the whole effect.
     }
 
     #[test]

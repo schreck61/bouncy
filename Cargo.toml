@@ -41,6 +41,7 @@ softbuffer = "0.4"
 ouroboros = "0.18"
 rodio = { version = "0.21", default-features = false, features = ["playback"] }
 dirs = "6"
+midir = "0.11"
 
 # Web-only: the JS boundary and the Canvas2D backend.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

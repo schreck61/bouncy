@@ -32,7 +32,7 @@ const EXPLOSION_DURATION_MS: u64 = 800;
 // with the collision energy picking the scale degree.
 /// Semitone offsets of the scale degrees, spanning two octaves up from the
 /// root and closing on the double octave.
-const PENTATONIC_SEMITONES: [f32; 11] =
+pub(crate) const PENTATONIC_SEMITONES: [f32; 11] =
     [0.0, 2.0, 4.0, 7.0, 9.0, 12.0, 14.0, 16.0, 19.0, 21.0, 24.0];
 /// Root note of the scale (C4). Two octaves up lands on C6 (~1046 Hz),
 /// comfortably inside the continuous map's 300-1500 Hz band.
@@ -244,8 +244,9 @@ fn pan_gains(pan: f32) -> (f32, f32) {
 }
 
 /// Chime volume for an impact: a 0.3 floor keeps gentle rolls audible
-/// while hard strikes ring out at full gain.
-fn note_gain(energy: f64) -> f32 {
+/// while hard strikes ring out at full gain. Crate-visible because MIDI
+/// velocity rides the same curve — by construction, not by copy.
+pub(crate) fn note_gain(energy: f64) -> f32 {
     0.3 + 0.7 * normalize_energy(energy)
 }
 
