@@ -6,6 +6,11 @@ Notable changes to Bouncy, by release. Version numbers follow
 
 ## Unreleased
 
+- Wall chimes gained voices: `--chime-timbre` selects `chime` (the
+  original ping), `marimba` (woody bar with the double-octave partial),
+  `pluck` (Karplus-Strong string), `drum` (pitch-swept tom), or `bell`
+  (inharmonic partials). Each instrument preset speaks in its own
+  voice; particle pings keep theirs.
 - Four built-in instrument scenes — one-click demonstrations of wall
   chimes, each a URL you can send around (`?preset=marimba`):
   `percussion` (silent channels with drumming end caps), `marimba`

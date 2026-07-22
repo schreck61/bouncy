@@ -77,6 +77,7 @@ cargo run --release -- --spawn-at-collision
 | `--mute` | Start with audio muted | Off |
 | `--music` | Quantize collision pings to a pentatonic scale (energy picks the note) | Off |
 | `--wall-chimes` | Walls play pentatonic notes when particles strike them — longer wall, lower note | Off |
+| `--chime-timbre <VOICE>` | The voice wall chimes play with: `chime`, `marimba`, `pluck`, `drum`, or `bell` (the instrument presets each pick their own; particle pings are unaffected) | chime |
 | `--kaleidoscope` | Mirror the frame 4-fold around the screen center | Off |
 | `--trails` | Leave motion trails behind particles | Off |
 | `--panel` | Start with the native control panel open (Tab toggles; the right-edge handle also reveals it) | Off |

@@ -58,6 +58,24 @@ impl SpawnMode {
     }
 }
 
+/// The synthesized voice wall chimes play with. Particle pings keep
+/// their own voice regardless — the timbre shapes the instrument, not
+/// the ambience.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum ChimeTimbre {
+    /// The original short sine ping (music-box glint).
+    #[default]
+    Chime,
+    /// Woody bar strike: fundamental plus the double-octave partial.
+    Marimba,
+    /// Plucked string (Karplus-Strong): bright attack, ringing decay.
+    Pluck,
+    /// Pitched drum: a downward sweep with a breath of attack noise.
+    Drum,
+    /// Struck bell: inharmonic partials, the higher ones dying faster.
+    Bell,
+}
+
 /// GPU-accelerated particle simulation with elastic collisions, gravity,
 /// and explosive chain reactions.
 #[derive(Parser, Clone, Debug)]
@@ -152,6 +170,11 @@ pub struct Config {
     #[arg(long)]
     pub wall_chimes: bool,
 
+    /// The voice wall chimes play with (set at launch, like the
+    /// instrument presets do; particle pings keep their own voice)
+    #[arg(long, value_enum, default_value_t = ChimeTimbre::Chime)]
+    pub chime_timbre: ChimeTimbre,
+
     /// Mirror the frame 4-fold around the screen center (toggle at runtime
     /// with K)
     #[arg(long)]
@@ -238,7 +261,16 @@ impl Config {
             println!("Musical pings: pentatonic scale");
         }
         if self.wall_chimes {
-            println!("Wall chimes: length picks the note");
+            match self.chime_timbre {
+                ChimeTimbre::Chime => println!("Wall chimes: length picks the note"),
+                timbre => println!(
+                    "Wall chimes: length picks the note, voiced as {}",
+                    timbre
+                        .to_possible_value()
+                        .expect("no skipped variants")
+                        .get_name()
+                ),
+            }
         }
         if self.kaleidoscope {
             println!("Kaleidoscope: enabled");
@@ -615,6 +647,16 @@ mod tests {
     }
 
     #[test]
+    fn chime_timbre_parses_and_defaults_to_the_original_voice() {
+        assert_eq!(parse(&[]).unwrap().chime_timbre, ChimeTimbre::Chime);
+        assert_eq!(
+            parse(&["--chime-timbre", "marimba"]).unwrap().chime_timbre,
+            ChimeTimbre::Marimba
+        );
+        assert!(parse(&["--chime-timbre", "kazoo"]).is_err());
+    }
+
+    #[test]
     fn bullet_time_flag_parses() {
         assert!(parse(&["--bullet-time"]).unwrap().bullet_time);
     }
@@ -926,6 +968,11 @@ mod tests {
             let config = parse(&["--preset", name]).unwrap();
             assert!(config.wall_chimes, "{name} arms the chimes");
             assert!(config.music, "{name} keeps pings on the scale");
+            assert_ne!(
+                config.chime_timbre,
+                ChimeTimbre::Chime,
+                "{name} speaks in its own voice"
+            );
             assert!(!config.mute, "{name} must be audible");
             assert_eq!(config.gravity, gravity, "{name}");
             assert_eq!(config.spawn_mode, SpawnMode::Off, "{name}");

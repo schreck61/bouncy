@@ -230,6 +230,8 @@ impl Preset {
             Preset::Percussion => &[
                 "--wall-chimes",
                 "--music",
+                "--chime-timbre",
+                "drum",
                 "--gravity",
                 "0",
                 "--initial-speed",
@@ -246,6 +248,8 @@ impl Preset {
             Preset::Marimba => &[
                 "--wall-chimes",
                 "--music",
+                "--chime-timbre",
+                "marimba",
                 "--gravity",
                 "110",
                 "--initial-speed",
@@ -262,6 +266,8 @@ impl Preset {
             Preset::Pachinko => &[
                 "--wall-chimes",
                 "--music",
+                "--chime-timbre",
+                "bell",
                 "--gravity",
                 "130",
                 "--initial-speed",
@@ -278,6 +284,8 @@ impl Preset {
             Preset::Harp => &[
                 "--wall-chimes",
                 "--music",
+                "--chime-timbre",
+                "pluck",
                 "--trails",
                 "--gravity",
                 "0",

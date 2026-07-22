@@ -15,6 +15,7 @@
 //! inside a user gesture (browser autoplay policy), so it initializes
 //! lazily via `web::WebHandle::enable_audio` and plays silence until then.
 
+use crate::config::ChimeTimbre;
 use crate::physics::COLLISION_ENERGY_NORMALIZER;
 use rand::Rng;
 
@@ -94,6 +95,113 @@ fn synth_explosion() -> Vec<f32> {
         .collect()
 }
 
+/// Woody bar strike: fundamental plus the double-octave partial marimba
+/// bars are tuned for, the partial dying much faster than the body.
+fn synth_marimba(frequency: f32) -> Vec<f32> {
+    let duration_samples = (u64::from(AUDIO_SAMPLE_RATE) * 250 / 1000) as usize;
+    #[allow(clippy::cast_precision_loss)]
+    let sample_rate_f = AUDIO_SAMPLE_RATE as f32;
+    (0..duration_samples)
+        .map(|i| {
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f32 / sample_rate_f;
+            let tau = 2.0 * std::f32::consts::PI * t;
+            let body = (tau * frequency).sin() * (-t * 11.0).exp();
+            let partial = (tau * frequency * 4.0).sin() * 0.45 * (-t * 32.0).exp();
+            (body + partial) * 0.32
+        })
+        .collect()
+}
+
+/// Plucked string via Karplus-Strong: a noise burst circulating a
+/// lowpassed delay line the length of one period. Bright attack, the
+/// harmonics decaying fastest — the classic cheap pluck.
+fn synth_pluck(frequency: f32) -> Vec<f32> {
+    let duration_samples = (u64::from(AUDIO_SAMPLE_RATE) * 600 / 1000) as usize;
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    #[allow(clippy::cast_sign_loss)]
+    let period = ((AUDIO_SAMPLE_RATE as f32 / frequency).round() as usize).max(2);
+    let mut rng = rand::rng();
+    let mut line: Vec<f32> = (0..period).map(|_| rng.random_range(-1.0..1.0)).collect();
+    let mut out = Vec::with_capacity(duration_samples);
+    let mut i = 0usize;
+    for _ in 0..duration_samples {
+        let next = (i + 1) % period;
+        let sample = line[i];
+        // Averaging two taps lowpasses the loop; 0.996 sets the ring time.
+        line[i] = 0.996 * 0.5 * (line[i] + line[next]);
+        out.push(sample * 0.28);
+        i = next;
+    }
+    out
+}
+
+/// Pitched drum: the fundamental swept down from nearly double the
+/// pitch (integrated phase, so the sweep is click-free) over a breath
+/// of attack noise.
+fn synth_drum(frequency: f32) -> Vec<f32> {
+    let duration_samples = (u64::from(AUDIO_SAMPLE_RATE) * 300 / 1000) as usize;
+    #[allow(clippy::cast_precision_loss)]
+    let sample_rate_f = AUDIO_SAMPLE_RATE as f32;
+    let mut rng = rand::rng();
+    let mut phase = 0.0f32;
+    (0..duration_samples)
+        .map(|i| {
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f32 / sample_rate_f;
+            let sweep = frequency * (1.0 + 0.8 * (-t * 24.0).exp());
+            phase += 2.0 * std::f32::consts::PI * sweep / sample_rate_f;
+            let body = phase.sin() * (-t * 9.0).exp();
+            let breath: f32 = rng.random_range(-1.0..1.0) * 0.35 * (-t * 60.0).exp();
+            (body + breath) * 0.34
+        })
+        .collect()
+}
+
+/// Struck bell: a few inharmonic partials (ratios from real bell
+/// spectra), the higher ones dying faster.
+fn synth_bell(frequency: f32) -> Vec<f32> {
+    const PARTIALS: [(f32, f32, f32); 4] = [
+        (1.0, 1.0, 6.0),
+        (2.76, 0.55, 10.0),
+        (5.40, 0.30, 16.0),
+        (8.93, 0.15, 24.0),
+    ];
+    let duration_samples = (u64::from(AUDIO_SAMPLE_RATE) * 400 / 1000) as usize;
+    #[allow(clippy::cast_precision_loss)]
+    let sample_rate_f = AUDIO_SAMPLE_RATE as f32;
+    (0..duration_samples)
+        .map(|i| {
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f32 / sample_rate_f;
+            let tau = 2.0 * std::f32::consts::PI * t;
+            let sum: f32 = PARTIALS
+                .iter()
+                .map(|&(ratio, amp, decay)| {
+                    (tau * frequency * ratio).sin() * amp * (-t * decay).exp()
+                })
+                .sum();
+            sum * 0.18
+        })
+        .collect()
+}
+
+/// The chime palette for a timbre: eleven pentatonic degrees in the
+/// requested voice. `Chime` is the original ping, so the default
+/// sounds exactly as it always has.
+fn synth_chime_palette(timbre: ChimeTimbre) -> Vec<Vec<f32>> {
+    let synth: fn(f32) -> Vec<f32> = match timbre {
+        ChimeTimbre::Chime => synth_ping,
+        ChimeTimbre::Marimba => synth_marimba,
+        ChimeTimbre::Pluck => synth_pluck,
+        ChimeTimbre::Drum => synth_drum,
+        ChimeTimbre::Bell => synth_bell,
+    };
+    (0..PENTATONIC_SEMITONES.len())
+        .map(|i| synth(note_frequency(i)))
+        .collect()
+}
+
 /// The two ping palettes: linear pitch buckets and pentatonic degrees.
 fn synth_ping_palettes() -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
     #[allow(clippy::cast_precision_loss)]
@@ -154,8 +262,8 @@ fn ping_audible(energy: f64) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::{
-        AUDIO_SAMPLE_RATE, energy_index, normalize_energy, note_gain, pan_gains, ping_audible,
-        synth_explosion, synth_ping_palettes,
+        AUDIO_SAMPLE_RATE, ChimeTimbre, energy_index, normalize_energy, note_gain, pan_gains,
+        ping_audible, synth_chime_palette, synth_explosion, synth_ping_palettes,
     };
     use rodio::buffer::SamplesBuffer;
     use rodio::source::ChannelVolume;
@@ -175,6 +283,9 @@ mod native {
         music: bool,
         pings: Vec<SamplesBuffer>,
         notes: Vec<SamplesBuffer>,
+        /// Wall-chime notes in the launch-selected timbre; pings keep
+        /// their own voice above.
+        chimes: Vec<SamplesBuffer>,
         explosion: SamplesBuffer,
     }
 
@@ -183,7 +294,7 @@ mod native {
         /// A muted start never touches the device at all — the stream is
         /// opened lazily on first unmute, so `--mute` runs (and unit tests)
         /// stay off the audio hardware entirely.
-        pub fn new(muted: bool, music: bool) -> Self {
+        pub fn new(muted: bool, music: bool, timbre: ChimeTimbre) -> Self {
             let stream = if muted { None } else { Self::open_stream() };
 
             let (pings, notes) = synth_ping_palettes();
@@ -193,6 +304,10 @@ mod native {
                 music,
                 pings: pings.into_iter().map(buffer).collect(),
                 notes: notes.into_iter().map(buffer).collect(),
+                chimes: synth_chime_palette(timbre)
+                    .into_iter()
+                    .map(buffer)
+                    .collect(),
                 // Pre-generated like the pings; the rumble's noise component is
                 // identical across explosions, which is imperceptible under the
                 // oscillator mix.
@@ -261,7 +376,7 @@ mod native {
                 .add(ChannelVolume::new(ping, vec![left, right]));
         }
 
-        /// Play scale degree `note` from the pentatonic palette directly,
+        /// Play scale degree `note` from the chime palette directly,
         /// with volume scaled by impact energy. Ignores the music toggle:
         /// wall-chime pitch is geometry, not energy, and chimes stay on
         /// the scale so random walls sound musical.
@@ -272,7 +387,7 @@ mod native {
             let Some(stream) = self.stream.as_ref().filter(|_| !self.muted) else {
                 return;
             };
-            let buffer = self.notes[note.min(self.notes.len() - 1)].clone();
+            let buffer = self.chimes[note.min(self.chimes.len() - 1)].clone();
             let gain = note_gain(energy);
             let (left, right) = pan_gains(pan);
             stream
@@ -298,7 +413,7 @@ mod native {
         /// the Windows CI runner with `STATUS_ACCESS_VIOLATION`.
         #[test]
         fn muted_construction_stays_off_the_audio_device() {
-            let audio = Audio::new(true, false);
+            let audio = Audio::new(true, false, super::ChimeTimbre::Chime);
             assert!(audio.muted);
             assert!(
                 audio.stream.is_none(),
@@ -319,21 +434,27 @@ pub use native::Audio;
 #[cfg(target_arch = "wasm32")]
 mod web {
     use super::{
-        AUDIO_SAMPLE_RATE, energy_index, normalize_energy, note_gain, ping_audible,
-        synth_explosion, synth_ping_palettes,
+        AUDIO_SAMPLE_RATE, ChimeTimbre, energy_index, normalize_energy, note_gain, ping_audible,
+        synth_chime_palette, synth_explosion, synth_ping_palettes,
     };
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use web_sys::{AudioBuffer, AudioContext, AudioContextOptions};
 
     struct Engine {
         ctx: AudioContext,
         pings: Vec<AudioBuffer>,
         notes: Vec<AudioBuffer>,
+        /// Wall-chime notes in the launch-selected timbre.
+        chimes: Vec<AudioBuffer>,
         explosion: AudioBuffer,
     }
 
     thread_local! {
         static ENGINE: RefCell<Option<Engine>> = const { RefCell::new(None) };
+        /// The timbre the engine should synthesize with, parked here by
+        /// [`Audio::new`]: [`web_enable`] runs inside a user-gesture
+        /// callback with no path back to the config.
+        static TIMBRE: Cell<ChimeTimbre> = const { Cell::new(ChimeTimbre::Chime) };
     }
 
     // 44,100 is exactly representable in f32; the length casts are
@@ -374,12 +495,14 @@ mod web {
             };
             let _ = ctx.resume();
             let (pings, notes) = synth_ping_palettes();
+            let chime_palette = synth_chime_palette(TIMBRE.get());
             let build = |v: Vec<Vec<f32>>| -> Option<Vec<AudioBuffer>> {
                 v.into_iter().map(|s| make_buffer(&ctx, &s)).collect()
             };
-            let (Some(pings), Some(notes), Some(explosion)) = (
+            let (Some(pings), Some(notes), Some(chimes), Some(explosion)) = (
                 build(pings),
                 build(notes),
+                build(chime_palette),
                 make_buffer(&ctx, &synth_explosion()),
             ) else {
                 return false;
@@ -388,6 +511,7 @@ mod web {
                 ctx,
                 pings,
                 notes,
+                chimes,
                 explosion,
             });
             true
@@ -434,8 +558,10 @@ mod web {
 
     impl Audio {
         /// State-only construction; the `WebAudio` engine itself is
-        /// created later by [`super::web_enable`] inside a user gesture.
-        pub fn new(muted: bool, music: bool) -> Self {
+        /// created later by [`super::web_enable`] inside a user gesture,
+        /// picking up the timbre parked here.
+        pub fn new(muted: bool, music: bool, timbre: ChimeTimbre) -> Self {
+            TIMBRE.set(timbre);
             Audio { muted, music }
         }
 
@@ -486,7 +612,7 @@ mod web {
                 return;
             }
             play(
-                move |engine| &engine.notes[note.min(engine.notes.len() - 1)],
+                move |engine| &engine.chimes[note.min(engine.chimes.len() - 1)],
                 pan,
                 note_gain(energy),
             );
@@ -573,6 +699,49 @@ mod tests {
         // Scene files and the sim address degrees through this constant.
         assert_eq!(NOTE_COUNT, PENTATONIC_SEMITONES.len());
         assert_eq!(NOTE_COUNT, 11);
+    }
+
+    #[test]
+    fn every_timbre_synthesizes_bounded_audible_notes() {
+        for timbre in [
+            ChimeTimbre::Chime,
+            ChimeTimbre::Marimba,
+            ChimeTimbre::Pluck,
+            ChimeTimbre::Drum,
+            ChimeTimbre::Bell,
+        ] {
+            let palette = synth_chime_palette(timbre);
+            assert_eq!(palette.len(), NOTE_COUNT, "{timbre:?}");
+            for (i, samples) in palette.iter().enumerate() {
+                assert!(!samples.is_empty(), "{timbre:?} note {i}");
+                assert!(
+                    samples.iter().all(|s| s.abs() <= 1.2),
+                    "{timbre:?} note {i} clips"
+                );
+                assert!(
+                    samples.iter().any(|s| s.abs() > 0.01),
+                    "{timbre:?} note {i} is silent"
+                );
+                // Voices ring out rather than ending on a cliff.
+                let tail = &samples[samples.len() - 100..];
+                assert!(
+                    tail.iter().all(|s| s.abs() < 0.2),
+                    "{timbre:?} note {i} ends abruptly"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn timbres_have_distinct_ring_times() {
+        // The pluck rings much longer than the original chime — the
+        // audible core of "sounds like an instrument, not a music box".
+        let ring = |samples: &[f32]| samples.iter().rposition(|s| s.abs() > 0.02).unwrap_or(0);
+        let chime = ring(&synth_ping(note_frequency(0)));
+        let pluck = ring(&synth_pluck(note_frequency(0)));
+        let marimba = ring(&synth_marimba(note_frequency(0)));
+        assert!(pluck > chime * 3, "pluck must ring: {pluck} vs {chime}");
+        assert!(marimba > chime, "marimba outlasts the ping");
     }
 
     #[test]

@@ -411,7 +411,7 @@ impl App {
                 enabled: config.bullet_time,
                 start: None,
             },
-            audio: Audio::new(config.mute, config.music),
+            audio: Audio::new(config.mute, config.music, config.chime_timbre),
             sim: None,
             config,
             render: None,
