@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.8.0 — 2026-07-21
 
 - Particle collision pings have their own volume: `--ping-volume 0-100`
   (default 100), the `;` / `'` hotkeys, and a panel slider on both
