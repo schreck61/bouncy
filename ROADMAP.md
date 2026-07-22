@@ -31,6 +31,12 @@ file only tracks what's ahead.
   hit flashes), and **1.7** shipped the second — four built-in
   instrument scenes (percussion, marimba, pachinko, harp) on new
   scene-carrying built-in presets, plus silent walls in scene files.
+- **1.8–1.10** made the instrument playable live: a dedicated
+  ping-volume control, emitters (the free-running sequencer clock,
+  demoed by the clockwork polyrhythm preset), and the inspector —
+  select an emitter or wall stroke on either shell (panel Select tool
+  or hold-D-and-click) to retune its rate, cap, and aim or cycle its
+  chime note, or delete it alone instead of clearing everything.
 - **1.3** shipped the browser demo: the same simulation compiled to
   WebAssembly with an HTML control panel over the `Command` dispatch,
   WebAudio, live resize, share links, launch options, and an optional
