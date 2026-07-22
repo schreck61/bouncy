@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.10.0 — 2026-07-21
 
 - Inspector — select and edit a single emitter or wall stroke, on both
   shells. Hold `D` and click an entity (or arm the new panel Select
