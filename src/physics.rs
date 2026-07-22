@@ -104,6 +104,12 @@ pub struct Particle {
     /// accounting; `None` for every other spawn path. Never inherited:
     /// fission fragments and fusion transfers do not carry it.
     pub origin: Option<u32>,
+    /// Pentatonic degree (0..=10) this particle carries, stamped from a
+    /// noted emitter; `None` for every other spawn path. Note-filter
+    /// walls pass only matching carriers. Never inherited: fission
+    /// fragments and fusion transfers do not carry it, exactly like
+    /// `origin`.
+    pub note: Option<u8>,
 }
 
 impl Particle {
@@ -152,6 +158,7 @@ impl Particle {
             color: crate::color::random_bright_color(rng),
             doomed: false,
             origin: None,
+            note: None,
         }
     }
 
@@ -989,6 +996,93 @@ pub(crate) fn contain_across_segments(p: &mut Particle, ox: f64, oy: f64, segmen
     }
 }
 
+/// What a wall stroke lets through. Solid walls (`None`) bounce every
+/// particle; `Gate(n)` passes every nth striking particle (an
+/// escapement: blocked strikes bounce and chime, the nth slips through
+/// silently); `Note(d)` passes exactly the particles carrying pentatonic
+/// degree `d` (see [`Particle::note`]) and bounces the rest. Ranges
+/// (`Gate` 2..=16, `Note` 0..=10) are enforced at the mutator and
+/// scene-parse boundaries, never here.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum WallFilter {
+    #[default]
+    None,
+    Gate(u32),
+    Note(u8),
+}
+
+/// A segment's filter and the stroke it belongs to, index-aligned with
+/// the segments slice passed to [`collide_with_segments_filtered`].
+/// Stroke-keyed grant state is what lets a multi-segment stroke pass a
+/// particle atomically instead of granting at one segment and bouncing
+/// it at the next.
+#[derive(Copy, Clone, Debug)]
+pub struct SegmentFilter {
+    pub stroke: u32,
+    pub filter: WallFilter,
+}
+
+/// Gate bookkeeping, owned by the caller and fed to every filtered wall
+/// pass. `counters` is per-stroke lifetime strike counts and persists
+/// across frames. `counted` is the per-frame strike dedup (the wall
+/// pass runs twice per substep, and several substeps per frame — one
+/// strike, one count). `granted` marks particles mid-crossing and must
+/// outlive the frame: a crossing spans several frames when the particle
+/// moves less than its radius per frame, and re-counting it next frame
+/// would bounce it back mid-wall. A grant instead lives for as long as
+/// its particle keeps contacting the stroke — `touched` records the
+/// contacts each frame, and `begin_frame` drops any grant whose
+/// particle spent a whole frame clear of the wall (crossing complete,
+/// or abandoned off the wall's end).
+///
+/// Known benign gap: a granted particle shoved back across the wall by
+/// a same-frame pair collision has consumed its grant without passing —
+/// rare, self-correcting (it strikes again), and not defended.
+#[derive(Default)]
+pub struct GateState {
+    counters: std::collections::HashMap<u32, u32>,
+    counted: std::collections::HashSet<(ParticleId, u32)>,
+    granted: std::collections::HashSet<(ParticleId, u32)>,
+    touched: std::collections::HashSet<(ParticleId, u32)>,
+}
+
+impl GateState {
+    /// Start a frame: forget the strike dedup, and expire every grant
+    /// whose particle went a whole frame without touching the stroke.
+    /// Call once per frame, not per substep — grants and counts must
+    /// survive every wall pass of the frame.
+    pub fn begin_frame(&mut self) {
+        self.counted.clear();
+        let touched = &self.touched;
+        self.granted.retain(|k| touched.contains(k));
+        self.touched.clear();
+    }
+
+    /// Drop all state for one stroke (its filter changed or the stroke
+    /// was removed): the lifetime counter and any live grants.
+    pub fn forget_stroke(&mut self, stroke: u32) {
+        self.counters.remove(&stroke);
+        self.counted.retain(|&(_, s)| s != stroke);
+        self.granted.retain(|&(_, s)| s != stroke);
+        self.touched.retain(|&(_, s)| s != stroke);
+    }
+
+    /// Drop everything (the walls were cleared).
+    pub fn clear(&mut self) {
+        self.counters.clear();
+        self.counted.clear();
+        self.granted.clear();
+        self.touched.clear();
+    }
+
+    /// Lifetime strike count of one stroke's escapement (0 if never
+    /// struck). Grants issued so far = `strikes / n` for a `Gate(n)`:
+    /// every nth strike passes.
+    pub fn strikes(&self, stroke: u32) -> u32 {
+        self.counters.get(&stroke).copied().unwrap_or(0)
+    }
+}
+
 /// Bounce particles off the drawn wall segments. Two contact conditions,
 /// both resolved from the particle's *end* position so that sustained
 /// contact never erases tangential motion (a particle sliding along a
@@ -1010,7 +1104,16 @@ pub fn collide_with_segments(
     segments: &[Segment],
     wall_elasticity: f64,
 ) {
-    collide_with_segments_recording(particles, prev, segments, wall_elasticity, None);
+    let mut gates = GateState::default();
+    collide_with_segments_filtered(
+        particles,
+        prev,
+        segments,
+        &[],
+        wall_elasticity,
+        &mut gates,
+        None,
+    );
 }
 
 /// [`collide_with_segments`] that additionally reports each real bounce
@@ -1022,9 +1125,42 @@ pub fn collide_with_segments_recording(
     prev: &[(f64, f64)],
     segments: &[Segment],
     wall_elasticity: f64,
+    recorder: Option<&mut WallHitRecorder>,
+) {
+    let mut gates = GateState::default();
+    collide_with_segments_filtered(
+        particles,
+        prev,
+        segments,
+        &[],
+        wall_elasticity,
+        &mut gates,
+        recorder,
+    );
+}
+
+/// [`collide_with_segments_recording`] with semipermeable walls:
+/// `filters` is index-aligned with `segments` (or empty — every wall
+/// solid, byte-identical to the unfiltered pass). A particle a filter
+/// passes gets no response at all — no pushout, no reflection, no
+/// recorded hit (a pass is silent; only blocked strikes chime) — and the
+/// grant stays sticky in `gates` for as long as the particle keeps
+/// contacting the stroke (see [`GateState`]), so later passes, substeps,
+/// and frames let the same particle finish its crossing instead of
+/// bouncing it back mid-wall. Blocked strikes take
+/// the full solid response, and a receding graze gets the usual
+/// position-only pushout without ever counting as a gate strike.
+pub fn collide_with_segments_filtered(
+    particles: &mut [Particle],
+    prev: &[(f64, f64)],
+    segments: &[Segment],
+    filters: &[SegmentFilter],
+    wall_elasticity: f64,
+    gates: &mut GateState,
     mut recorder: Option<&mut WallHitRecorder>,
 ) {
     debug_assert_eq!(particles.len(), prev.len());
+    debug_assert!(filters.is_empty() || filters.len() == segments.len());
     for (p, &(ox, oy)) in particles.iter_mut().zip(prev) {
         for (seg_index, seg) in segments.iter().enumerate() {
             // Cheap AABB reject (over the whole motion) before the exact
@@ -1065,9 +1201,49 @@ pub fn collide_with_segments_recording(
                     (0.0, -1.0)
                 }
             };
+            let vn = p.vx * nx + p.vy * ny;
+            if let Some(sf) = filters.get(seg_index)
+                && sf.filter != WallFilter::None
+            {
+                let key = (p.id, sf.stroke);
+                if gates.granted.contains(&key) {
+                    // Mid-crossing: let it finish, however many frames
+                    // that takes — the touch keeps the grant alive.
+                    gates.touched.insert(key);
+                    continue;
+                }
+                match sf.filter {
+                    WallFilter::Gate(n) => {
+                        // Only a real strike (a crossing, or approaching
+                        // contact) advances the escapement; a receding
+                        // graze falls through to the plain pushout.
+                        // The grant is decided once, on the strike that
+                        // increments the counter — a repeat contact in
+                        // the same frame re-bounces rather than re-rolls
+                        // (another particle may have moved the counter
+                        // to a multiple in between).
+                        if (crossed || vn < 0.0) && gates.counted.insert(key) {
+                            let c = gates.counters.entry(sf.stroke).or_insert(0);
+                            *c += 1;
+                            if *c % n == 0 {
+                                gates.granted.insert(key);
+                                gates.touched.insert(key);
+                                continue; // the nth slips through, silently
+                            }
+                        }
+                    }
+                    WallFilter::Note(want) => {
+                        if p.note == Some(want) {
+                            gates.granted.insert(key);
+                            gates.touched.insert(key);
+                            continue; // a matching carrier never interacts
+                        }
+                    }
+                    WallFilter::None => unreachable!(),
+                }
+            }
             p.x = cx + nx * r;
             p.y = cy + ny * r;
-            let vn = p.vx * nx + p.vy * ny;
             if vn < 0.0 {
                 p.vx -= (1.0 + wall_elasticity) * vn * nx;
                 p.vy -= (1.0 + wall_elasticity) * vn * ny;
@@ -1492,6 +1668,7 @@ mod tests {
             color: [255, 255, 255, 255],
             doomed: false,
             origin: None,
+            note: None,
         }
     }
 
@@ -2084,6 +2261,416 @@ mod tests {
             Some(&mut recorder),
         );
         assert_eq!(recorder.hits().len(), 1);
+    }
+
+    // ---- Filter walls -----------------------------------------------
+
+    /// Horizontal wall at y=100 spanning x 50..150 (the shared fixture of
+    /// the solid-wall tests above).
+    fn h_wall() -> Segment {
+        Segment {
+            x1: 50.0,
+            y1: 100.0,
+            x2: 150.0,
+            y2: 100.0,
+        }
+    }
+
+    /// A falling particle with a stable id, overlapping `h_wall` from
+    /// above and approaching it.
+    fn striker(id: ParticleId) -> Particle {
+        let mut p = particle(100.0, 99.0, 0.0, 200.0);
+        p.id = id;
+        p
+    }
+
+    #[test]
+    fn a_solid_filter_slice_matches_the_unfiltered_pass() {
+        let wall = h_wall();
+        let filters = [SegmentFilter {
+            stroke: 3,
+            filter: WallFilter::None,
+        }];
+        let mut gates = GateState::default();
+        let mut filtered = vec![striker(1)];
+        collide_with_segments_filtered(
+            &mut filtered,
+            &[(100.0, 99.0)],
+            &[wall],
+            &filters,
+            1.0,
+            &mut gates,
+            None,
+        );
+        let mut plain = vec![striker(1)];
+        collide_with_segments(&mut plain, &[(100.0, 99.0)], &[wall], 1.0);
+        assert_eq!(filtered[0].x, plain[0].x);
+        assert_eq!(filtered[0].y, plain[0].y);
+        assert_eq!(filtered[0].vx, plain[0].vx);
+        assert_eq!(filtered[0].vy, plain[0].vy);
+        assert!(gates.counters.is_empty(), "solid walls never count");
+    }
+
+    #[test]
+    fn a_gate_passes_every_nth_strike_silently() {
+        let wall = h_wall();
+        let filters = [SegmentFilter {
+            stroke: 7,
+            filter: WallFilter::Gate(3),
+        }];
+        let mut gates = GateState::default();
+        let mut recorder = WallHitRecorder::default();
+        for k in 1..=6u64 {
+            gates.begin_frame();
+            recorder.clear();
+            let mut particles = vec![striker(k)];
+            collide_with_segments_filtered(
+                &mut particles,
+                &[(100.0, 99.0)],
+                &[wall],
+                &filters,
+                1.0,
+                &mut gates,
+                Some(&mut recorder),
+            );
+            let p = &particles[0];
+            if k % 3 == 0 {
+                assert_eq!((p.y, p.vy), (99.0, 200.0), "strike {k} passes untouched");
+                assert!(recorder.hits().is_empty(), "a pass is silent");
+            } else {
+                assert!((p.y - (100.0 - RADIUS)).abs() < 1e-9, "strike {k} blocked");
+                assert!((p.vy + 200.0).abs() < 1e-9, "strike {k} reflected");
+                assert_eq!(recorder.hits().len(), 1, "a block chimes");
+            }
+        }
+        assert_eq!(gates.counters[&7], 6, "every strike counted");
+    }
+
+    #[test]
+    fn a_grant_sticks_across_the_second_wall_pass() {
+        let wall = h_wall();
+        let filters = [SegmentFilter {
+            stroke: 7,
+            filter: WallFilter::Gate(1),
+        }];
+        let mut gates = GateState::default();
+        gates.begin_frame();
+        let mut particles = vec![striker(1)];
+        // The wall pass runs twice per substep: the second pass must not
+        // bounce the particle whose crossing the first pass granted.
+        for pass in 0..2 {
+            collide_with_segments_filtered(
+                &mut particles,
+                &[(100.0, 99.0)],
+                &[wall],
+                &filters,
+                1.0,
+                &mut gates,
+                None,
+            );
+            let p = &particles[0];
+            assert_eq!((p.y, p.vy), (99.0, 200.0), "untouched after pass {pass}");
+        }
+        assert_eq!(gates.counters[&7], 1, "one strike, counted once");
+    }
+
+    #[test]
+    fn a_grant_survives_across_frames_while_contact_continues() {
+        // A slow crosser (half a pixel per frame, radius 1.5): granted
+        // while still short of the wall, it needs several frames of
+        // continuous contact to finish. Each new frame must keep the
+        // grant alive — re-counting it would bounce it back mid-wall.
+        // Gate(1) grants every strike (below the UI's 2..=16 range;
+        // physics doesn't validate).
+        let wall = h_wall();
+        let filters = [SegmentFilter {
+            stroke: 7,
+            filter: WallFilter::Gate(1),
+        }];
+        let mut gates = GateState::default();
+        let mut particles = vec![particle(100.0, 99.0, 0.0, 50.0)];
+        particles[0].id = 1;
+        for _ in 0..8 {
+            gates.begin_frame();
+            let prev = (particles[0].x, particles[0].y);
+            particles[0].y += 0.5;
+            collide_with_segments_filtered(
+                &mut particles,
+                &[prev],
+                &[wall],
+                &filters,
+                1.0,
+                &mut gates,
+                None,
+            );
+        }
+        let p = &particles[0];
+        assert!(
+            (p.y - 103.0).abs() < 1e-9,
+            "crossed clean over eight frames: {}",
+            p.y
+        );
+        assert_eq!(p.vy, 50.0, "never bounced");
+        assert_eq!(gates.counters[&7], 1, "one strike, one count");
+        // A frame clear of the wall expires the grant.
+        gates.begin_frame();
+        assert!(gates.granted.is_empty(), "grant expired after the crossing");
+    }
+
+    #[test]
+    fn a_blocked_strike_counts_once_per_frame() {
+        let wall = h_wall();
+        let filters = [SegmentFilter {
+            stroke: 7,
+            filter: WallFilter::Gate(10),
+        }];
+        let mut gates = GateState::default();
+        gates.begin_frame();
+        // Two passes in one frame, the overlap re-armed in between (the
+        // real sim re-approaches within a frame through its substeps):
+        // the dedup keeps the count at one.
+        for _ in 0..2 {
+            let mut particles = vec![striker(1)];
+            collide_with_segments_filtered(
+                &mut particles,
+                &[(100.0, 99.0)],
+                &[wall],
+                &filters,
+                0.0,
+                &mut gates,
+                None,
+            );
+        }
+        assert_eq!(gates.counters[&7], 1, "one particle, one count per frame");
+        // A new frame, striking again: counts again.
+        gates.begin_frame();
+        let mut particles = vec![striker(1)];
+        collide_with_segments_filtered(
+            &mut particles,
+            &[(100.0, 99.0)],
+            &[wall],
+            &filters,
+            0.0,
+            &mut gates,
+            None,
+        );
+        assert_eq!(gates.counters[&7], 2, "a new frame is a new strike");
+    }
+
+    #[test]
+    fn a_receding_graze_neither_counts_nor_grants() {
+        let wall = h_wall();
+        let filters = [SegmentFilter {
+            stroke: 7,
+            filter: WallFilter::Gate(2),
+        }];
+        let mut gates = GateState::default();
+        gates.begin_frame();
+        // Overlapping from above but already receding: the plain
+        // position-only pushout, and the escapement must not advance.
+        let mut particles = vec![particle(100.0, 99.0, 0.0, -50.0)];
+        particles[0].id = 1;
+        collide_with_segments_filtered(
+            &mut particles,
+            &[(100.0, 99.0)],
+            &[wall],
+            &filters,
+            1.0,
+            &mut gates,
+            None,
+        );
+        let p = &particles[0];
+        assert!((p.y - (100.0 - RADIUS)).abs() < 1e-9, "pushed out");
+        assert_eq!(p.vy, -50.0, "no reflection");
+        assert!(gates.counters.is_empty(), "a graze is not a strike");
+        assert!(gates.granted.is_empty());
+    }
+
+    #[test]
+    fn a_note_filter_passes_only_matching_carriers() {
+        let wall = h_wall();
+        let filters = [SegmentFilter {
+            stroke: 7,
+            filter: WallFilter::Note(4),
+        }];
+        let mut gates = GateState::default();
+        let mut recorder = WallHitRecorder::default();
+        for (id, note) in [(1u64, Some(4)), (2, Some(3)), (3, None)] {
+            gates.begin_frame();
+            recorder.clear();
+            let mut particles = vec![striker(id)];
+            particles[0].note = note;
+            collide_with_segments_filtered(
+                &mut particles,
+                &[(100.0, 99.0)],
+                &[wall],
+                &filters,
+                1.0,
+                &mut gates,
+                Some(&mut recorder),
+            );
+            let p = &particles[0];
+            if note == Some(4) {
+                assert_eq!((p.y, p.vy), (99.0, 200.0), "matching carrier passes");
+                assert!(recorder.hits().is_empty(), "silently");
+                assert!(gates.granted.contains(&(id, 7)), "grant recorded");
+            } else {
+                assert!((p.vy + 200.0).abs() < 1e-9, "note {note:?} bounces");
+                assert_eq!(recorder.hits().len(), 1, "and chimes");
+            }
+        }
+        assert!(gates.counters.is_empty(), "note filters never count");
+    }
+
+    #[test]
+    fn gate_counters_are_independent_per_stroke() {
+        // Two stacked walls carrying different strokes, each Gate(2):
+        // strikes on one must not advance the other's escapement.
+        let walls = [
+            h_wall(),
+            Segment {
+                x1: 50.0,
+                y1: 300.0,
+                x2: 150.0,
+                y2: 300.0,
+            },
+        ];
+        let filters = [
+            SegmentFilter {
+                stroke: 1,
+                filter: WallFilter::Gate(2),
+            },
+            SegmentFilter {
+                stroke: 2,
+                filter: WallFilter::Gate(2),
+            },
+        ];
+        let mut gates = GateState::default();
+        gates.begin_frame();
+        let mut particles = vec![striker(1)];
+        collide_with_segments_filtered(
+            &mut particles,
+            &[(100.0, 99.0)],
+            &walls,
+            &filters,
+            1.0,
+            &mut gates,
+            None,
+        );
+        assert_eq!(gates.counters.get(&1), Some(&1));
+        assert_eq!(gates.counters.get(&2), None, "stroke 2 untouched");
+    }
+
+    #[test]
+    fn a_multi_segment_stroke_grants_atomically() {
+        // Two collinear halves of one stroke meeting at x=100; the
+        // striker contacts both. The stroke-keyed state must count the
+        // strike once and let the granted particle through both halves.
+        let walls = [
+            Segment {
+                x1: 50.0,
+                y1: 100.0,
+                x2: 100.0,
+                y2: 100.0,
+            },
+            Segment {
+                x1: 100.0,
+                y1: 100.0,
+                x2: 150.0,
+                y2: 100.0,
+            },
+        ];
+        let stroke = 9;
+        let filters = [
+            SegmentFilter {
+                stroke,
+                filter: WallFilter::Gate(2),
+            },
+            SegmentFilter {
+                stroke,
+                filter: WallFilter::Gate(2),
+            },
+        ];
+        let mut gates = GateState::default();
+        // Strike 1 (blocked): counted once despite touching both halves.
+        gates.begin_frame();
+        let mut particles = vec![striker(1)];
+        collide_with_segments_filtered(
+            &mut particles,
+            &[(100.0, 99.0)],
+            &walls,
+            &filters,
+            1.0,
+            &mut gates,
+            None,
+        );
+        assert_eq!(gates.counters[&stroke], 1, "both halves, one count");
+        // Strike 2 (granted): passes both halves untouched.
+        gates.begin_frame();
+        let mut particles = vec![striker(2)];
+        collide_with_segments_filtered(
+            &mut particles,
+            &[(100.0, 99.0)],
+            &walls,
+            &filters,
+            1.0,
+            &mut gates,
+            None,
+        );
+        let p = &particles[0];
+        assert_eq!((p.y, p.vy), (99.0, 200.0), "granted through the joint");
+        assert_eq!(gates.counters[&stroke], 2);
+    }
+
+    #[test]
+    fn far_side_residual_overlap_resolves_without_a_strike() {
+        // A particle granted last frame ended just past the wall, still
+        // within a radius of it. This frame (grants forgotten) it recedes
+        // on the far side: the plain pushout completes the crossing —
+        // no count, no chime, no bounce back.
+        let wall = h_wall();
+        let filters = [SegmentFilter {
+            stroke: 7,
+            filter: WallFilter::Gate(2),
+        }];
+        let mut gates = GateState::default();
+        gates.begin_frame();
+        let mut recorder = WallHitRecorder::default();
+        let mut particles = vec![particle(100.0, 100.5, 0.0, 200.0)];
+        particles[0].id = 1;
+        collide_with_segments_filtered(
+            &mut particles,
+            &[(100.0, 100.5)],
+            &[wall],
+            &filters,
+            1.0,
+            &mut gates,
+            Some(&mut recorder),
+        );
+        let p = &particles[0];
+        assert!(
+            (p.y - (100.0 + RADIUS)).abs() < 1e-9,
+            "pushed out on the far side: {}",
+            p.y
+        );
+        assert_eq!(p.vy, 200.0, "no reflection");
+        assert!(recorder.hits().is_empty(), "no chime");
+        assert!(gates.counters.is_empty(), "no count");
+    }
+
+    #[test]
+    fn gate_state_forgets_a_stroke_and_clears() {
+        let mut gates = GateState::default();
+        gates.counters.insert(1, 5);
+        gates.counters.insert(2, 3);
+        gates.counted.insert((10, 1));
+        gates.granted.insert((10, 1));
+        gates.forget_stroke(1);
+        assert_eq!(gates.counters.get(&1), None);
+        assert_eq!(gates.counters.get(&2), Some(&3), "other strokes keep");
+        assert!(gates.counted.is_empty() && gates.granted.is_empty());
+        gates.clear();
+        assert!(gates.counters.is_empty());
     }
 
     #[test]

@@ -80,6 +80,9 @@
             <input id="in-ecap" type="range" min="1" max="200" step="1" value="12">
           </label>
           <div class="row">
+            <button id="btn-enote" title="cycle the note stamped onto emitted particles (pass-note walls route them)">Note: none</button>
+          </div>
+          <div class="row">
             <button id="btn-reaim" title="then click the canvas to point the emitter there">Re-aim</button>
             <button id="btn-delete-emitter">Delete</button>
           </div>
@@ -89,6 +92,10 @@
           <div class="row">
             <button id="btn-note" title="cycle the wall's chime note: auto, each degree, silent">Note: auto</button>
             <button id="btn-delete-stroke">Delete</button>
+          </div>
+          <div class="row">
+            <button id="btn-gate" title="every Nth striking particle passes; the rest bounce and chime">Gate: off</button>
+            <button id="btn-pass" title="particles stamped with this note pass; the rest bounce">Pass: off</button>
           </div>
         </div>
         <div class="row">

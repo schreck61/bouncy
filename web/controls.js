@@ -187,6 +187,21 @@ function bind(handle) {
       handle.cycle_stroke_note?.(latest.selection_id);
     }
   };
+  $("btn-gate").onclick = () => {
+    if (latest.selection_id != null) {
+      handle.cycle_stroke_gate?.(latest.selection_id);
+    }
+  };
+  $("btn-pass").onclick = () => {
+    if (latest.selection_id != null) {
+      handle.cycle_stroke_pass?.(latest.selection_id);
+    }
+  };
+  $("btn-enote").onclick = () => {
+    if (latest.selection_id != null) {
+      handle.cycle_emitter_note?.(latest.selection_id);
+    }
+  };
   $("in-erate").oninput = (e) => {
     if (latest.selection_id != null) {
       handle.set_emitter_rate?.(latest.selection_id, Number(e.target.value));
@@ -407,11 +422,16 @@ function reflect(s) {
       $("in-erate").value = s.selection_rate;
       $("in-ecap").value = s.selection_cap;
     }
+    // Pre-1.13 bundle: no emitter-note field yet.
+    $("btn-enote").textContent = `Note: ${s.selection_emitter_note ?? "…"}`;
   } else if (kind === "stroke") {
     const n = s.selection_segments;
     $("insp-stroke-label").textContent =
       `Wall #${s.selection_id} — ${n} segment${n === 1 ? "" : "s"}`;
     $("btn-note").textContent = `Note: ${s.selection_note}`;
+    // Pre-1.13 bundle: no filter fields yet.
+    $("btn-gate").textContent = `Gate: ${s.selection_gate ?? "…"}`;
+    $("btn-pass").textContent = `Pass: ${s.selection_pass ?? "…"}`;
   }
   lastSelId = kind === null ? null : s.selection_id;
   $("ro-fps").textContent = s.fps.toFixed(0);

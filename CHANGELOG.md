@@ -4,7 +4,21 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## 1.12.0 — 2026-07-22
+## Unreleased
+
+- Filter walls — a wall stroke can be semipermeable (drawn dashed).
+  A *gate* (`gate = N` in scenes, the inspector's Gate button) passes
+  every Nth striking particle: blocked strikes bounce and chime, the
+  Nth slips through silently — an audible escapement. A *pass-note*
+  wall (`pass-note = D`, the Pass button) passes exactly the particles
+  stamped with a matching note; emitters gain that stamp (`note = D`,
+  the emitter Note button), giving two-chamber routing. One filter per
+  stroke, composable with `note`/`silent` (a silent gate is legal).
+  Only bouncing particles are ever let through: spawns, bursts, and
+  fusion/fission still treat filter walls as solid, and the
+  divided-arena audit gains gated/noted variants proving the wall
+  leaks exactly its grants. Fission fragments and fusion survivors
+  never inherit a stamped note, mirroring emitter origin tags.
 
 - MIDI out (native) — wall-chime strikes become MIDI notes for a DAW
   or hardware synth. `--midi-port <NAME-or-index>` connects at launch

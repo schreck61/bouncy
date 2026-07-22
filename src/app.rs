@@ -15,7 +15,7 @@ use crate::render::{
 };
 use crate::sim::{
     MAX_EMITTERS, MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, SELECT_RADIUS, Selection,
-    Simulation, Well,
+    Simulation, WallFilter, Well,
 };
 use crate::text::{draw_text, draw_text_centered, measure_text};
 use clap::ValueEnum;
@@ -199,6 +199,14 @@ pub enum PanelCommand {
     AimEmitterAt(u32, f64, f64),
     /// Step the stroke's chime note: Auto → degrees → Silent → Auto.
     CycleStrokeNote(u32),
+    /// Step the stroke's gate: off → every 2 → 3 → 4 → 8 → off. Setting
+    /// a gate replaces any pass filter (a stroke carries one filter).
+    CycleStrokeGate(u32),
+    /// Step the stroke's pass-note: off → degree 0..10 → off. Setting a
+    /// pass filter replaces any gate.
+    CycleStrokePass(u32),
+    /// Step the emitter's stamped note: none → degree 0..10 → none.
+    CycleEmitterNote(u32),
     /// Absolute quantize tempo from the panel slider (0 = off).
     SetBpm(f64),
     /// Beat-grid resolution in ticks per beat (only 1/2/4/8 are real).
@@ -797,6 +805,11 @@ impl App {
             .iter()
             .map(|m| self.wall_flash.get(&m.stroke).copied().unwrap_or(0.0))
             .collect();
+        let wall_filtered: Vec<bool> = sim
+            .wall_meta()
+            .iter()
+            .map(|m| m.filter != WallFilter::None)
+            .collect();
         let stopped = sim.stopped();
         let paused = self.paused;
         let selection = self.selection;
@@ -814,7 +827,14 @@ impl App {
                 render_explosion(frame, exp, width, height);
             }
             render_wells(frame, sim.pinned_wells(), width, height);
-            render_segments(frame, sim.wall_segments(), &wall_flash, width, height);
+            render_segments(
+                frame,
+                sim.wall_segments(),
+                &wall_flash,
+                &wall_filtered,
+                width,
+                height,
+            );
             render_emitters(frame, sim.emitters(), width, height);
             // Selection highlight: a dedicated amber pass over the flash
             // pass (a flash-vector sentinel would be ambiguous mid-chime).
@@ -1097,6 +1117,46 @@ impl App {
                     && let Some(note) = sim.stroke_note_setting(id)
                 {
                     sim.set_stroke_note(id, note.cycled());
+                }
+            }
+            PanelCommand::CycleStrokeGate(id) => {
+                if let Some(ref mut sim) = self.sim
+                    && let Some(filter) = sim.stroke_filter_setting(id)
+                {
+                    let next = match filter {
+                        WallFilter::Gate(2) => WallFilter::Gate(3),
+                        WallFilter::Gate(3) => WallFilter::Gate(4),
+                        WallFilter::Gate(4) => WallFilter::Gate(8),
+                        WallFilter::Gate(_) => WallFilter::None,
+                        // Off — or a pass filter, which the gate replaces
+                        // wholesale: a stroke carries one filter.
+                        WallFilter::None | WallFilter::Note(_) => WallFilter::Gate(2),
+                    };
+                    sim.set_stroke_filter(id, next);
+                }
+            }
+            PanelCommand::CycleStrokePass(id) => {
+                if let Some(ref mut sim) = self.sim
+                    && let Some(filter) = sim.stroke_filter_setting(id)
+                {
+                    let next = match filter {
+                        WallFilter::Note(d) if d < 10 => WallFilter::Note(d + 1),
+                        WallFilter::Note(_) => WallFilter::None,
+                        WallFilter::None | WallFilter::Gate(_) => WallFilter::Note(0),
+                    };
+                    sim.set_stroke_filter(id, next);
+                }
+            }
+            PanelCommand::CycleEmitterNote(id) => {
+                if let Some(ref mut sim) = self.sim
+                    && let Some(e) = sim.emitter(id)
+                {
+                    let next = match e.note {
+                        None => Some(0),
+                        Some(d) if d < 10 => Some(d + 1),
+                        Some(_) => None,
+                    };
+                    sim.set_emitter_note(id, next);
                 }
             }
             PanelCommand::SetBpm(bpm) => {
@@ -1423,6 +1483,7 @@ impl App {
                             rate: e.rate,
                             cap: e.cap,
                             angle_deg: e.dx.atan2(-e.dy).to_degrees().rem_euclid(360.0),
+                            note: e.note,
                         })
                 }
                 Selection::WallStroke(id) => {
@@ -1431,6 +1492,7 @@ impl App {
                             id,
                             segments: sim.stroke_segment_count(id),
                             note,
+                            filter: sim.stroke_filter_setting(id).unwrap_or(WallFilter::None),
                         })
                 }
             }),
@@ -1458,6 +1520,9 @@ impl App {
         let mut selection_angle = None;
         let mut selection_note = None;
         let mut selection_segments = None;
+        let mut selection_gate = None;
+        let mut selection_pass = None;
+        let mut selection_emitter_note = None;
         match self.selection {
             Some(Selection::Emitter(id)) => {
                 if let Some(e) = sim.emitter(id) {
@@ -1466,6 +1531,10 @@ impl App {
                     selection_rate = Some(e.rate);
                     selection_cap = Some(e.cap);
                     selection_angle = Some(e.dx.atan2(-e.dy).to_degrees().rem_euclid(360.0));
+                    selection_emitter_note = Some(
+                        e.note
+                            .map_or_else(|| "none".to_string(), |d| format!("degree {d}")),
+                    );
                 }
             }
             Some(Selection::WallStroke(id)) => {
@@ -1478,6 +1547,15 @@ impl App {
                         crate::presets::WallNote::Silent => "silent".to_string(),
                     });
                     selection_segments = Some(sim.stroke_segment_count(id));
+                    let filter = sim.stroke_filter_setting(id).unwrap_or(WallFilter::None);
+                    selection_gate = Some(match filter {
+                        WallFilter::Gate(n) => format!("every {n}"),
+                        WallFilter::None | WallFilter::Note(_) => "off".to_string(),
+                    });
+                    selection_pass = Some(match filter {
+                        WallFilter::Note(d) => format!("degree {d}"),
+                        WallFilter::None | WallFilter::Gate(_) => "off".to_string(),
+                    });
                 }
             }
             None => {}
@@ -1523,6 +1601,9 @@ impl App {
             selection_angle,
             selection_note,
             selection_segments,
+            selection_gate,
+            selection_pass,
+            selection_emitter_note,
         };
         shared.scene_toml = scene_toml;
     }
@@ -1930,12 +2011,14 @@ impl App {
             .wall_segments()
             .iter()
             .zip(sim.wall_export_notes())
-            .map(|(seg, note)| SceneWall {
+            .zip(sim.wall_export_filters())
+            .map(|((seg, note), filter)| SceneWall {
                 x1: frac(seg.x1, wf),
                 y1: frac(seg.y1, hf),
                 x2: frac(seg.x2, wf),
                 y2: frac(seg.y2, hf),
                 note,
+                filter,
             })
             .collect();
 
@@ -1999,6 +2082,7 @@ impl App {
                 angle: (e.dx.atan2(-e.dy).to_degrees().rem_euclid(360.0) * 100.0).round() / 100.0,
                 rate: e.rate,
                 cap: e.cap,
+                note: e.note,
             })
             .collect();
 
@@ -3098,5 +3182,70 @@ mod tests {
             Some(crate::presets::WallNote::Note(0)),
             "Auto steps to the first pinned degree"
         );
+    }
+
+    #[test]
+    fn cycle_stroke_gate_and_pass_step_and_replace_each_other() {
+        let mut app = test_app();
+        {
+            let sim = app.sim.as_mut().unwrap();
+            assert!(sim.add_wall_segment(200.0, 300.0, 300.0, 300.0));
+        }
+        let stroke = app.sim.as_ref().unwrap().wall_meta()[0].stroke;
+        let filter = |app: &App| {
+            app.sim
+                .as_ref()
+                .unwrap()
+                .stroke_filter_setting(stroke)
+                .unwrap()
+        };
+        // Gate cycle: off → every 2 → 3 → 4 → 8 → off.
+        for want in [
+            WallFilter::Gate(2),
+            WallFilter::Gate(3),
+            WallFilter::Gate(4),
+            WallFilter::Gate(8),
+            WallFilter::None,
+        ] {
+            app.apply_panel_command(PanelCommand::CycleStrokeGate(stroke));
+            assert_eq!(filter(&app), want);
+        }
+        // Pass cycle steps degrees...
+        app.apply_panel_command(PanelCommand::CycleStrokePass(stroke));
+        assert_eq!(filter(&app), WallFilter::Note(0));
+        app.apply_panel_command(PanelCommand::CycleStrokePass(stroke));
+        assert_eq!(filter(&app), WallFilter::Note(1));
+        // ...a gate press replaces the pass wholesale...
+        app.apply_panel_command(PanelCommand::CycleStrokeGate(stroke));
+        assert_eq!(filter(&app), WallFilter::Gate(2), "gate replaces pass");
+        // ...and a pass press replaces the gate right back.
+        app.apply_panel_command(PanelCommand::CycleStrokePass(stroke));
+        assert_eq!(filter(&app), WallFilter::Note(0), "pass replaces gate");
+        // The pass cycle wraps to off after the top degree.
+        for _ in 0..10 {
+            app.apply_panel_command(PanelCommand::CycleStrokePass(stroke));
+        }
+        assert_eq!(filter(&app), WallFilter::Note(10));
+        app.apply_panel_command(PanelCommand::CycleStrokePass(stroke));
+        assert_eq!(filter(&app), WallFilter::None, "wraps back to off");
+    }
+
+    #[test]
+    fn cycle_emitter_note_steps_and_wraps() {
+        let mut app = test_app();
+        {
+            let sim = app.sim.as_mut().unwrap();
+            assert!(sim.place_emitter(100.0, 100.0, 0.0, -1.0, 2.0, 12));
+        }
+        let id = app.sim.as_ref().unwrap().emitters()[0].id;
+        let note = |app: &App| app.sim.as_ref().unwrap().emitter(id).unwrap().note;
+        app.apply_panel_command(PanelCommand::CycleEmitterNote(id));
+        assert_eq!(note(&app), Some(0), "none steps to the first degree");
+        for _ in 0..10 {
+            app.apply_panel_command(PanelCommand::CycleEmitterNote(id));
+        }
+        assert_eq!(note(&app), Some(10));
+        app.apply_panel_command(PanelCommand::CycleEmitterNote(id));
+        assert_eq!(note(&app), None, "wraps back to none");
     }
 }

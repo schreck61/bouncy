@@ -26,7 +26,7 @@
 //! one is a loud error — silently ignoring it would cost users an hour of
 //! wondering why their preset didn't load.
 
-use crate::physics::Polarity;
+use crate::physics::{Polarity, WallFilter};
 use clap::ValueEnum;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -480,6 +480,7 @@ fn clockwork_scene() -> Scene {
             angle: 90.0,
             rate: 1.0,
             cap: 1,
+            note: None,
         });
     }
     Scene {
@@ -498,6 +499,7 @@ const fn noted(x1: f64, y1: f64, x2: f64, y2: f64, note: u8) -> SceneWall {
         x2,
         y2,
         note: WallNote::Note(note),
+        filter: WallFilter::None,
     }
 }
 
@@ -509,6 +511,7 @@ const fn silent(x1: f64, y1: f64, x2: f64, y2: f64) -> SceneWall {
         x2,
         y2,
         note: WallNote::Silent,
+        filter: WallFilter::None,
     }
 }
 
@@ -541,6 +544,9 @@ pub struct SceneEmitter {
     pub angle: f64,
     pub rate: f64,
     pub cap: usize,
+    /// Pentatonic degree stamped onto emitted particles (`note = D` in
+    /// the TOML), for routing through pass-note walls.
+    pub note: Option<u8>,
 }
 
 /// A pinned gravity well in window-fraction coordinates.
@@ -590,6 +596,9 @@ pub struct SceneWall {
     pub y2: f64,
     /// How this wall sounds when chimes are on.
     pub note: WallNote,
+    /// What this wall lets through (`gate = N` / `pass-note = D` in the
+    /// TOML), orthogonal to how it sounds.
+    pub filter: WallFilter,
 }
 
 /// One user preset: an optional built-in to inherit from, an optional
@@ -795,6 +804,9 @@ fn parse_fraction(preset: &str, key: &str, value: &toml::Value) -> Result<f64, S
 /// bare array `[x1, y1, x2, y2]`, or a table
 /// `{ x1 = .., y1 = .., x2 = .., y2 = .., note = 4 }` whose optional
 /// `note` pins a chime scale degree instead of deriving pitch from length.
+/// A table may also carry `gate = N` (every Nth striker passes) or
+/// `pass-note = D` (particles stamped with degree D pass) — one filter
+/// per wall, composable with `note`/`silent`.
 fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>, String> {
     let toml::Value::Array(entries) = value else {
         return Err(format!(
@@ -822,6 +834,7 @@ fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>
                     x2: c[2],
                     y2: c[3],
                     note: WallNote::Auto,
+                    filter: WallFilter::None,
                 });
             }
             toml::Value::Table(table) => {
@@ -876,12 +889,46 @@ fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>
                         WallNote::Note(degree as u8)
                     }
                 };
+                if table.contains_key("gate") && table.contains_key("pass-note") {
+                    return Err(format!(
+                        "preset '{preset}': a wall carries one filter — drop \
+                         either 'gate' or 'pass-note'"
+                    ));
+                }
+                let filter = if let Some(v) = table.get("gate") {
+                    let n = v.as_integer().filter(|n| (2..=16).contains(n));
+                    let Some(n) = n else {
+                        return Err(format!(
+                            "preset '{preset}': wall gate must be an integer \
+                             2-16 (every Nth striker passes; got {v})"
+                        ));
+                    };
+                    // Bounds-checked to 2-16 above.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    WallFilter::Gate(n as u32)
+                } else if let Some(v) = table.get("pass-note") {
+                    let max = crate::audio::NOTE_COUNT - 1;
+                    let range = 0..=i64::try_from(max).unwrap_or(i64::MAX);
+                    let degree = v.as_integer().filter(|d| range.contains(d));
+                    let Some(degree) = degree else {
+                        return Err(format!(
+                            "preset '{preset}': wall pass-note must be an \
+                             integer scale degree 0-{max} (got {v})"
+                        ));
+                    };
+                    // Bounds-checked against NOTE_COUNT - 1 (10) above.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    WallFilter::Note(degree as u8)
+                } else {
+                    WallFilter::None
+                };
                 walls.push(SceneWall {
                     x1: coord("x1")?,
                     y1: coord("y1")?,
                     x2: coord("x2")?,
                     y2: coord("y2")?,
                     note,
+                    filter,
                 });
             }
             _ => {
@@ -988,12 +1035,30 @@ fn parse_scene_emitters(preset: &str, value: &toml::Value) -> Result<Vec<SceneEm
                 }
             }
         };
+        let note = match table.get("note") {
+            None => None,
+            Some(v) => {
+                let max = crate::audio::NOTE_COUNT - 1;
+                let range = 0..=i64::try_from(max).unwrap_or(i64::MAX);
+                let degree = v.as_integer().filter(|d| range.contains(d));
+                let Some(degree) = degree else {
+                    return Err(format!(
+                        "preset '{preset}': emitter note must be an integer \
+                         scale degree 0-{max} (got {v})"
+                    ));
+                };
+                // Bounds-checked against NOTE_COUNT - 1 (10) above.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                Some(degree as u8)
+            }
+        };
         emitters.push(SceneEmitter {
             x: coord("x")?,
             y: coord("y")?,
             angle: number("angle", 0.0)?.rem_euclid(360.0),
             rate,
             cap,
+            note,
         });
     }
     Ok(emitters)
@@ -1034,24 +1099,41 @@ pub fn scene_to_toml(
         let walls = walls
             .iter()
             .map(|w| {
-                let table_with = |key: &str, value: toml::Value| {
-                    let mut t = toml::Table::new();
-                    t.insert("x1".into(), w.x1.into());
-                    t.insert("y1".into(), w.y1.into());
-                    t.insert("x2".into(), w.x2.into());
-                    t.insert("y2".into(), w.y2.into());
-                    t.insert(key.into(), value);
-                    toml::Value::Table(t)
-                };
-                match w.note {
-                    // Auto walls keep the legacy array form so exports
-                    // stay readable by older binaries and diff-identical.
-                    WallNote::Auto => {
-                        toml::Value::Array(vec![w.x1.into(), w.y1.into(), w.x2.into(), w.y2.into()])
-                    }
-                    WallNote::Note(note) => table_with("note", i64::from(note).into()),
-                    WallNote::Silent => table_with("silent", true.into()),
+                // A plain auto wall keeps the legacy array form so
+                // exports stay readable by older binaries and
+                // diff-identical; any note or filter needs the table.
+                if w.note == WallNote::Auto && w.filter == WallFilter::None {
+                    return toml::Value::Array(vec![
+                        w.x1.into(),
+                        w.y1.into(),
+                        w.x2.into(),
+                        w.y2.into(),
+                    ]);
                 }
+                let mut t = toml::Table::new();
+                t.insert("x1".into(), w.x1.into());
+                t.insert("y1".into(), w.y1.into());
+                t.insert("x2".into(), w.x2.into());
+                t.insert("y2".into(), w.y2.into());
+                match w.note {
+                    WallNote::Auto => {}
+                    WallNote::Note(note) => {
+                        t.insert("note".into(), i64::from(note).into());
+                    }
+                    WallNote::Silent => {
+                        t.insert("silent".into(), true.into());
+                    }
+                }
+                match w.filter {
+                    WallFilter::None => {}
+                    WallFilter::Gate(n) => {
+                        t.insert("gate".into(), i64::from(n).into());
+                    }
+                    WallFilter::Note(d) => {
+                        t.insert("pass-note".into(), i64::from(d).into());
+                    }
+                }
+                toml::Value::Table(t)
             })
             .collect();
         table.insert("walls".into(), toml::Value::Array(walls));
@@ -1068,6 +1150,9 @@ pub fn scene_to_toml(
                 // Caps are far below i64::MAX.
                 #[allow(clippy::cast_possible_wrap)]
                 t.insert("cap".into(), (e.cap as i64).into());
+                if let Some(note) = e.note {
+                    t.insert("note".into(), i64::from(note).into());
+                }
                 toml::Value::Table(t)
             })
             .collect();
@@ -1267,7 +1352,8 @@ mod tests {
                 y1: 0.5,
                 x2: 0.9,
                 y2: 0.5,
-                note: WallNote::Auto
+                note: WallNote::Auto,
+                filter: WallFilter::None,
             }
         );
 
@@ -1305,6 +1391,7 @@ mod tests {
                 x2: 0.3,
                 y2: 0.4,
                 note: WallNote::Auto,
+                filter: WallFilter::None,
             },
             SceneWall {
                 x1: 0.5,
@@ -1312,6 +1399,7 @@ mod tests {
                 x2: 0.7,
                 y2: 0.6,
                 note: WallNote::Note(4),
+                filter: WallFilter::None,
             },
             SceneWall {
                 x1: 0.15,
@@ -1319,6 +1407,7 @@ mod tests {
                 x2: 0.85,
                 y2: 0.8,
                 note: WallNote::Silent,
+                filter: WallFilter::None,
             },
         ];
         let emitters = [SceneEmitter {
@@ -1327,6 +1416,7 @@ mod tests {
             angle: 180.0,
             rate: 3.5,
             cap: 6,
+            note: None,
         }];
         let text = scene_to_toml(
             "saved",
@@ -1353,6 +1443,85 @@ mod tests {
         assert!(text.contains("[0.1, 0.2, 0.3, 0.4]"), "{text}");
         // Silent walls carry the marker explicitly.
         assert!(text.contains("silent = true"), "{text}");
+    }
+
+    #[test]
+    fn filter_walls_and_noted_emitters_round_trip() {
+        let walls = [
+            // A gated auto wall needs the table form despite the auto note.
+            SceneWall {
+                x1: 0.5,
+                y1: 0.0,
+                x2: 0.5,
+                y2: 1.0,
+                note: WallNote::Auto,
+                filter: WallFilter::Gate(3),
+            },
+            // A silent gate: pure escapement geometry.
+            SceneWall {
+                x1: 0.2,
+                y1: 0.1,
+                x2: 0.2,
+                y2: 0.9,
+                note: WallNote::Silent,
+                filter: WallFilter::Gate(8),
+            },
+            // A chiming pass-note wall: sounds degree 2, passes degree 5.
+            SceneWall {
+                x1: 0.8,
+                y1: 0.1,
+                x2: 0.8,
+                y2: 0.9,
+                note: WallNote::Note(2),
+                filter: WallFilter::Note(5),
+            },
+        ];
+        let emitters = [SceneEmitter {
+            x: 0.9,
+            y: 0.5,
+            angle: 270.0,
+            rate: 4.0,
+            cap: 10,
+            note: Some(5),
+        }];
+        let text = scene_to_toml(
+            "routed",
+            &[("gravity", 0i64.into())],
+            &[],
+            &walls,
+            &emitters,
+        );
+        assert!(text.contains("gate = 3"), "{text}");
+        assert!(text.contains("pass-note = 5"), "{text}");
+        let user = parse(&text, Path::new("/test/export.toml")).unwrap();
+        assert_eq!(user.presets["routed"].scene.walls, walls);
+        assert_eq!(user.presets["routed"].scene.emitters, emitters);
+    }
+
+    #[test]
+    fn wall_filters_and_emitter_notes_are_validated_loudly() {
+        let wall = |extra: &str| {
+            format!("[a]\nwalls = [{{ x1 = 0.1, y1 = 0.2, x2 = 0.3, y2 = 0.2, {extra} }}]\n")
+        };
+        let err = parse_str(&wall("gate = 2, pass-note = 3")).unwrap_err();
+        assert!(err.contains("one filter"), "{err}");
+        let err = parse_str(&wall("gate = 1")).unwrap_err();
+        assert!(err.contains("2-16"), "{err}");
+        let err = parse_str(&wall("gate = 17")).unwrap_err();
+        assert!(err.contains("2-16"), "{err}");
+        let err = parse_str(&wall("pass-note = 11")).unwrap_err();
+        assert!(err.contains("0-10"), "{err}");
+        let err = parse_str("[a]\nemitters = [{ x = 0.5, y = 0.1, note = 11 }]\n").unwrap_err();
+        assert!(err.contains("0-10"), "{err}");
+        // Filterless forms — legacy arrays and plain tables — parse to
+        // no filter, and a noteless emitter to no note.
+        let user = parse_str(
+            "[old]\nwalls = [\n  [0.1, 0.2, 0.3, 0.2],\n  { x1 = 0.4, y1 = 0.5, x2 = 0.6, y2 = 0.5, note = 7 },\n]\nemitters = [{ x = 0.5, y = 0.1 }]\n",
+        )
+        .unwrap();
+        let scene = &user.presets["old"].scene;
+        assert!(scene.walls.iter().all(|w| w.filter == WallFilter::None));
+        assert_eq!(scene.emitters[0].note, None);
     }
 
     #[test]

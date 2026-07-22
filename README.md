@@ -9,7 +9,8 @@ A GPU-accelerated particle simulation written in Rust featuring elastic collisio
 - **GPU-Accelerated Rendering**: Uses the `pixels` crate with wgpu backend for smooth, hardware-accelerated 2D rendering, with automatic CPU fallback via `softbuffer` when GPU is unavailable
 - **Realistic Physics**: Particle-particle collisions with a configurable coefficient of restitution, wall bounces, configurable gravity, adaptive substepping so fast particles never tunnel through each other, and swept wall contact so they never tunnel through drawn walls
 - **Fast Collision Detection**: A uniform spatial grid keeps collision detection near-linear, comfortably handling thousands of particles
-- **Control Panel**: `Tab` (or a dwell at the window's right edge) slides in a translucent panel — readouts, detented sliders, toggles, one-shot placement tools, an inspector for the selected emitter or wall stroke (rate/cap/re-aim, chime note, single-entity delete), and launch options with in-place relaunch — matching the browser demo's controls and driving the same command dispatch as the hotkeys
+- **Control Panel**: `Tab` (or a dwell at the window's right edge) slides in a translucent panel — readouts, detented sliders, toggles, one-shot placement tools, an inspector for the selected emitter or wall stroke (rate/cap/re-aim/stamped note, chime note, gate and pass filters, single-entity delete), and launch options with in-place relaunch — matching the browser demo's controls and driving the same command dispatch as the hotkeys
+- **Filter Walls**: A wall stroke can be semipermeable, rendered dashed — a *gate* passes every Nth striking particle (blocked strikes bounce and chime; the Nth slips through silently — an audible escapement), and a *pass-note* wall passes exactly the particles stamped with a matching note by an emitter (set the emitter's note in the inspector; a pass-note wall with no matching noted emitter passes nothing and behaves as solid). Spawns, bursts, and fusion/fission never cross a filter wall — only bouncing particles are ever let through
 - **Dynamic Spawning**: New particles spawn on collision, creating organic growth patterns
 - **Explosion Mechanics**: When spawn rate exceeds threshold, a dramatic explosion kills 99% of particles
 - **Interactive**: Pause, reset, spawn particle bursts with the mouse, trigger explosions with right click, and adjust gravity and elasticity live with the arrow keys
@@ -257,6 +258,18 @@ walls = [
 ```
 
 A wall cannot be both `silent` and note-pinned, and (like booleans on the command line) `silent = false` is rejected rather than ignored. A user preset with a `base` and no `walls`/`wells` of its own inherits the base's scene geometry; defining any geometry replaces the base's scene entirely.
+
+A wall table can also carry a **filter** making it semipermeable: `gate = N` (2-16) passes every Nth striking particle — blocked strikes bounce and chime, the Nth slips through silently — and `pass-note = D` (degree 0-10) passes exactly the particles stamped with that note. One filter per wall (`gate` and `pass-note` together are rejected), but either composes freely with `note`/`silent` — a silent gate is legal escapement geometry. Particles get their stamped note from an emitter's `note = D` key (or the inspector's emitter Note button); a pass-note wall with no matching noted emitter passes nothing and behaves as solid:
+
+```toml
+[router]
+wall-chimes = true
+walls = [
+  { x1 = 0.5, y1 = 0.0, x2 = 0.5, y2 = 1.0, gate = 4 },
+  { x1 = 0.8, y1 = 0.1, x2 = 0.8, y2 = 0.9, pass-note = 5 },
+]
+emitters = [{ x = 0.9, y = 0.5, angle = 270.0, rate = 4.0, cap = 10, note = 5 }]
+```
 
 The easiest way to author a scene is in the app itself: pin wells with `W`, draw walls with `V`, tune everything with the hotkeys, then press `E` to export the whole thing — settings and geometry — as a ready-made preset file. Copy the table into your presets file (rename it to taste) and it becomes a `--preset` you can share.
 

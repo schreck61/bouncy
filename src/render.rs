@@ -130,14 +130,20 @@ const WALL_COLOR: [u8; 4] = [225, 195, 130, 255];
 /// A chimed wall flares toward this hot white of the same sandstone hue.
 const WALL_FLASH_COLOR: [u8; 4] = [255, 246, 214, 255];
 
+/// Dash rhythm of filter walls: pixels drawn, then skipped, per period.
+const DASH_STRIDE: i32 = 4;
+
 /// Draw the drawn wall segments as 1-pixel lines, clipped to the frame.
 /// `flash` holds per-segment chime-flash intensities (0.0 = resting
-/// color, 1.0 = full flare), index-aligned with `segments`; segments
-/// beyond its length render at rest.
+/// color, 1.0 = full flare) and `filtered` marks the segments of filter
+/// strokes (drawn dashed — semipermeable geometry reads as such); both
+/// are index-aligned with `segments`, and segments beyond their lengths
+/// render at rest / solid.
 pub fn render_segments(
     frame: &mut [u8],
     segments: &[Segment],
     flash: &[f32],
+    filtered: &[bool],
     width: u32,
     height: u32,
 ) {
@@ -156,13 +162,19 @@ pub fn render_segments(
         } else {
             WALL_COLOR
         };
-        draw_line(
+        let dash = if filtered.get(i).copied().unwrap_or(false) {
+            DASH_STRIDE
+        } else {
+            0
+        };
+        draw_line_dashed(
             frame,
             width,
             height,
             (seg.x1, seg.y1),
             (seg.x2, seg.y2),
             color,
+            dash,
         );
     }
 }
@@ -176,6 +188,21 @@ fn draw_line(
     to: (f64, f64),
     color: [u8; 4],
 ) {
+    draw_line_dashed(frame, width, height, from, to, color, 0);
+}
+
+/// [`draw_line`] with a dash stride: draw `stride` pixels, skip
+/// `stride`, repeat along the walk (0 = solid). Dashing follows the
+/// pixel walk, so the pattern is stable for a static segment.
+fn draw_line_dashed(
+    frame: &mut [u8],
+    width: u32,
+    height: u32,
+    from: (f64, f64),
+    to: (f64, f64),
+    color: [u8; 4],
+    stride: i32,
+) {
     let (mut x, mut y) = (coord_to_pixel(from.0), coord_to_pixel(from.1));
     let (x_end, y_end) = (coord_to_pixel(to.0), coord_to_pixel(to.1));
     let dx = (x_end - x).abs();
@@ -183,11 +210,15 @@ fn draw_line(
     let sx = if x < x_end { 1 } else { -1 };
     let sy = if y < y_end { 1 } else { -1 };
     let mut err = dx + dy;
+    let mut step: i32 = 0;
     loop {
-        put_pixel(frame, width, height, x, y, color);
+        if stride == 0 || (step / stride) % 2 == 0 {
+            put_pixel(frame, width, height, x, y, color);
+        }
         if x == x_end && y == y_end {
             break;
         }
+        step += 1;
         let e2 = 2 * err;
         if e2 >= dy {
             err += dy;
@@ -950,7 +981,7 @@ mod tests {
             },
         ];
         // Segment 0 at full flare, segment 1 resting.
-        render_segments(&mut frame, &segments, &[1.0, 0.0], width, height);
+        render_segments(&mut frame, &segments, &[1.0, 0.0], &[], width, height);
         let px = |x: u32, y: u32| {
             let i = ((y * width + x) * 4) as usize;
             [frame[i], frame[i + 1], frame[i + 2], frame[i + 3]]
@@ -958,7 +989,7 @@ mod tests {
         assert_eq!(px(10, 10), WALL_FLASH_COLOR, "flashed bar flares");
         assert_eq!(px(10, 20), WALL_COLOR, "resting bar keeps its color");
         // A missing flash entry is a resting wall, never a panic.
-        render_segments(&mut frame, &segments, &[0.5], width, height);
+        render_segments(&mut frame, &segments, &[0.5], &[], width, height);
     }
 
     #[test]
@@ -1064,7 +1095,7 @@ mod tests {
                 y2: 60.0,
             },
         ];
-        render_segments(&mut frame, &segments, &[], width, height);
+        render_segments(&mut frame, &segments, &[], &[], width, height);
 
         let px = |x: u32, y: u32| frame[((y * width + x) * 4) as usize];
         assert_eq!(px(5, 10), WALL_COLOR[0], "line start drawn");
@@ -1078,6 +1109,68 @@ mod tests {
                 (0..width).any(|x| px(x, y) == WALL_COLOR[0]),
                 "diagonal missing from row {y}"
             );
+        }
+    }
+
+    #[test]
+    fn filtered_segments_render_dashed_and_clip() {
+        let (width, height) = (50u32, 40u32);
+        let mut frame = vec![0u8; (width * height * 4) as usize];
+        let segments = [
+            // A filtered bar spanning x 5..=25 along y=10.
+            Segment {
+                x1: 5.0,
+                y1: 10.0,
+                x2: 25.0,
+                y2: 10.0,
+            },
+            // A solid bar below it for contrast.
+            Segment {
+                x1: 5.0,
+                y1: 20.0,
+                x2: 25.0,
+                y2: 20.0,
+            },
+            // Filtered and running off the frame: must clip, not panic.
+            Segment {
+                x1: -10.0,
+                y1: 30.0,
+                x2: 70.0,
+                y2: 30.0,
+            },
+        ];
+        render_segments(
+            &mut frame,
+            &segments,
+            &[],
+            &[true, false, true],
+            width,
+            height,
+        );
+        let px = |x: u32, y: u32| frame[((y * width + x) * 4) as usize];
+        // The dash rhythm from the walk start: 4 on, 4 off.
+        assert_eq!(px(5, 10), WALL_COLOR[0], "dash run drawn");
+        assert_eq!(px(8, 10), WALL_COLOR[0], "dash run drawn");
+        assert_eq!(px(9, 10), 0, "gap run skipped");
+        assert_eq!(px(12, 10), 0, "gap run skipped");
+        assert_eq!(px(13, 10), WALL_COLOR[0], "next dash drawn");
+        // The solid bar underneath has no gaps.
+        for x in 5..=25 {
+            assert_eq!(px(x, 20), WALL_COLOR[0], "solid bar unbroken at {x}");
+        }
+        // The clipped filtered bar still leaves a trace, with gaps.
+        let row: Vec<u32> = (0..width).filter(|&x| px(x, 30) != 0).collect();
+        assert!(!row.is_empty(), "clipped dashed bar still traced");
+        assert!(
+            row.len() < width as usize,
+            "dashed bar must not paint every pixel of its row"
+        );
+        // A short filtered mask leaves unmasked segments solid.
+        let mut frame2 = vec![0u8; (width * height * 4) as usize];
+        render_segments(&mut frame2, &segments, &[], &[true], width, height);
+        let px2 = |x: u32, y: u32| frame2[((y * width + x) * 4) as usize];
+        for x in 5..=25 {
+            assert_eq!(px2(x, 20), WALL_COLOR[0], "beyond-mask bar stays solid");
         }
     }
 

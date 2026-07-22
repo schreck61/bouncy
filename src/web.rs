@@ -76,6 +76,12 @@ pub struct Snapshot {
     /// Chime-note label: "auto", "degree N", or "silent".
     pub selection_note: Option<String>,
     pub selection_segments: Option<usize>,
+    /// Gate label: "off" or "every N" (pre-formatted, like the note).
+    pub selection_gate: Option<String>,
+    /// Pass-note label: "off" or "degree D".
+    pub selection_pass: Option<String>,
+    /// Emitter stamped-note label: "none" or "degree D".
+    pub selection_emitter_note: Option<String>,
 }
 
 /// The mailbox shared between the running [`App`] and the [`WebHandle`]
@@ -352,6 +358,23 @@ impl WebHandle {
     /// Step the stroke's chime note: Auto → degrees → Silent → Auto.
     pub fn cycle_stroke_note(&self, id: u32) {
         self.push(WebCommand::CycleStrokeNote(id));
+    }
+
+    /// Step the stroke's gate: off → every 2/3/4/8 → off (replacing any
+    /// pass filter).
+    pub fn cycle_stroke_gate(&self, id: u32) {
+        self.push(WebCommand::CycleStrokeGate(id));
+    }
+
+    /// Step the stroke's pass-note: off → degree 0..10 → off (replacing
+    /// any gate).
+    pub fn cycle_stroke_pass(&self, id: u32) {
+        self.push(WebCommand::CycleStrokePass(id));
+    }
+
+    /// Step the emitter's stamped note: none → degree 0..10 → none.
+    pub fn cycle_emitter_note(&self, id: u32) {
+        self.push(WebCommand::CycleEmitterNote(id));
     }
 
     /// Delete one emitter by id (its particles keep flying).

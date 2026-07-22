@@ -9,10 +9,11 @@ use crate::audio::{NOTE_COUNT, PING_MIN_ENERGY};
 use crate::config::{Config, SpawnMode};
 use crate::explosion::{EXPLOSION_KILL_RATIO, Explosion, SPAWN_RATE_WINDOW, max_radius_from};
 use crate::physics::{
-    COLLISION_ENERGY_NORMALIZER, CollisionRecorder, MOTION_STOPPED_FRAMES, Particle, ParticleId,
-    Segment, SpatialGrid, SpawnSite, WELL_STRENGTH, WallHitRecorder, apply_attractor, apply_flow,
-    apply_self_gravity, collide_with_segments_recording, handle_collisions, has_motion, max_radius,
-    motion_crosses_segment, pair_mut, substep_count, update_physics,
+    COLLISION_ENERGY_NORMALIZER, CollisionRecorder, GateState, MOTION_STOPPED_FRAMES, Particle,
+    ParticleId, Segment, SegmentFilter, SpatialGrid, SpawnSite, WELL_STRENGTH, WallHitRecorder,
+    apply_attractor, apply_flow, apply_self_gravity, collide_with_segments_filtered,
+    handle_collisions, has_motion, max_radius, motion_crosses_segment, pair_mut, substep_count,
+    update_physics,
 };
 use crate::presets::{Scene, WallNote};
 use rand::rngs::StdRng;
@@ -161,9 +162,13 @@ pub struct WallMeta {
     /// How the wall sounds: length-derived, pinned by the scene, or
     /// silent geometry.
     pub note: WallNote,
+    /// What the wall lets through (per-stroke uniform, like `note`);
+    /// orthogonal to the chime — a silent gate is legal.
+    pub filter: WallFilter,
 }
 
 pub use crate::physics::Polarity;
+pub use crate::physics::WallFilter;
 
 /// A gravity well: the transient cursor well (held G) passed into each
 /// step, or a persistent pinned well (W key) stored in the simulation.
@@ -214,6 +219,10 @@ pub struct Emitter {
     accum: f64,
     /// Monotonic identity, matched by `Particle::origin`.
     pub id: u32,
+    /// Pentatonic degree (0..=10) stamped onto every particle this
+    /// emitter fires; `None` emits unnoted particles. Note-filter walls
+    /// pass only matching carriers.
+    pub note: Option<u8>,
 }
 
 impl Emitter {
@@ -231,6 +240,7 @@ impl Emitter {
             cap: 12,
             accum: 0.0,
             id: 0,
+            note: None,
         }
     }
 }
@@ -288,6 +298,13 @@ pub struct Simulation {
     next_stroke_id: u32,
     /// Wall strikes collected across this frame's substeps.
     wall_hits: WallHitRecorder,
+    /// Gate escapement state: per-stroke lifetime strike counters and
+    /// the frame-scoped grant sets behind filter walls.
+    gate_state: GateState,
+    /// Scratch: per-segment filters rebuilt each frame from `wall_meta`
+    /// for the wall pass; left empty (the physics fast path) while no
+    /// stroke carries a filter. Reused to avoid reallocation.
+    seg_filters: Vec<SegmentFilter>,
     /// Last time each (particle, stroke) pair rang, for the chime
     /// cooldown; pruned each step, cleared with the walls.
     chime_cooldowns: HashMap<(ParticleId, u32), Instant>,
@@ -362,6 +379,8 @@ impl Simulation {
             wall_meta: Vec::new(),
             next_stroke_id: 1,
             wall_hits: WallHitRecorder::default(),
+            gate_state: GateState::default(),
+            seg_filters: Vec::new(),
             chime_cooldowns: HashMap::new(),
             next_particle_id: 1,
             initial_wells: config.wells as usize,
@@ -438,10 +457,11 @@ impl Simulation {
                 y2: wall.y2 * h,
             });
             // Each scene wall is its own stroke: a marimba stair's bars
-            // sound individually.
+            // sound individually. Filters arrive parse-validated.
             self.wall_meta.push(WallMeta {
                 stroke: self.next_stroke_id,
                 note: wall.note,
+                filter: wall.filter,
             });
             self.next_stroke_id += 1;
         }
@@ -453,6 +473,12 @@ impl Simulation {
             if !self.place_emitter(e.x * w, e.y * h, dx, dy, e.rate, e.cap) {
                 break;
             }
+            // Stamp the scene's note onto the emitter just placed
+            // (parse-validated, like the wall filters).
+            self.emitters
+                .last_mut()
+                .expect("place_emitter just pushed")
+                .note = e.note;
         }
     }
 
@@ -500,6 +526,7 @@ impl Simulation {
         self.place_initial_wells();
         self.segments.clear();
         self.wall_meta.clear();
+        self.gate_state.clear();
         self.chime_cooldowns.clear();
         self.emitters.clear();
         self.place_scene();
@@ -681,6 +708,13 @@ impl Simulation {
                     .map_or(WallNote::Silent, WallNote::Note),
             })
             .collect()
+    }
+
+    /// Per-segment filters for scene export, index-aligned with
+    /// [`Simulation::wall_segments`] like [`Simulation::wall_export_notes`]
+    /// (a stroke's filter is uniform, so this is a plain copy).
+    pub fn wall_export_filters(&self) -> Vec<WallFilter> {
+        self.wall_meta.iter().map(|m| m.filter).collect()
     }
 
     /// Filter this frame's raw wall strikes into audible chimes: drop
@@ -930,6 +964,7 @@ impl Simulation {
         self.wall_meta.push(WallMeta {
             stroke: self.next_stroke_id,
             note: WallNote::Auto,
+            filter: WallFilter::None,
         });
         self.next_stroke_id += 1;
         true
@@ -949,6 +984,7 @@ impl Simulation {
         self.wall_meta.push(WallMeta {
             stroke: last.stroke,
             note: last.note,
+            filter: last.filter,
         });
         true
     }
@@ -985,6 +1021,7 @@ impl Simulation {
             cap: cap.clamp(1, 200),
             accum: 0.0,
             id: self.next_emitter_id,
+            note: None,
         });
         self.next_emitter_id += 1;
         self.wake();
@@ -1058,6 +1095,22 @@ impl Simulation {
         true
     }
 
+    /// Set the pentatonic degree an emitter stamps onto its particles
+    /// (`None` emits unnoted). Returns false if the id is dead or the
+    /// degree is out of range (0..=10). Already-live particles keep the
+    /// note they were fired with.
+    pub fn set_emitter_note(&mut self, id: u32, note: Option<u8>) -> bool {
+        if note.is_some_and(|d| d > 10) {
+            return false;
+        }
+        let Some(e) = self.emitters.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        e.note = note;
+        self.wake();
+        true
+    }
+
     /// Re-aim an emitter along `(dx, dy)` (normalized; a zero vector aims
     /// straight up, matching `place_emitter`). Returns false if the id is
     /// dead.
@@ -1117,6 +1170,47 @@ impl Simulation {
         found
     }
 
+    /// Lifetime strike count of a gate stroke's escapement (0 if never
+    /// struck, or not a gate). For a `Gate(n)` stroke, `strikes / n`
+    /// grants have been issued so far.
+    pub fn stroke_strikes(&self, stroke: u32) -> u32 {
+        self.gate_state.strikes(stroke)
+    }
+
+    /// A stroke's configured filter, if the stroke is still alive.
+    pub fn stroke_filter_setting(&self, stroke: u32) -> Option<WallFilter> {
+        self.wall_meta
+            .iter()
+            .find(|m| m.stroke == stroke)
+            .map(|m| m.filter)
+    }
+
+    /// Set what every segment of the stroke lets through (a stroke's
+    /// filter is uniform, like its note) — a wholesale replace: the
+    /// stroke's escapement state resets, so switching Gate(3) to Gate(4)
+    /// starts a fresh count. Returns false if the id is dead or the
+    /// filter is out of range (Gate 2..=16, Note 0..=10).
+    pub fn set_stroke_filter(&mut self, stroke: u32, filter: WallFilter) -> bool {
+        let valid = match filter {
+            WallFilter::None => true,
+            WallFilter::Gate(n) => (2..=16).contains(&n),
+            WallFilter::Note(d) => d <= 10,
+        };
+        if !valid {
+            return false;
+        }
+        let mut found = false;
+        for m in self.wall_meta.iter_mut().filter(|m| m.stroke == stroke) {
+            m.filter = filter;
+            found = true;
+        }
+        if found {
+            self.gate_state.forget_stroke(stroke);
+            self.wake();
+        }
+        found
+    }
+
     /// Remove every segment of the stroke, keeping `segments` and
     /// `wall_meta` in lockstep and dropping the stroke's chime cooldowns.
     /// Returns how many segments were removed (0 if the id is dead).
@@ -1131,6 +1225,7 @@ impl Simulation {
         let mut it = keep.iter();
         self.wall_meta.retain(|_| *it.next().expect("mask matches"));
         self.chime_cooldowns.retain(|(_, s), _| *s != stroke);
+        self.gate_state.forget_stroke(stroke);
         self.wake();
         removed
     }
@@ -1238,6 +1333,7 @@ impl Simulation {
             self.base_radius,
         );
         p.origin = Some(e.id);
+        p.note = e.note;
         let p = self.stamp(p);
         self.particles.push(p);
         self.emitter_counts[k] += 1;
@@ -1258,6 +1354,7 @@ impl Simulation {
         let cleared = self.segments.len();
         self.segments.clear();
         self.wall_meta.clear();
+        self.gate_state.clear();
         self.chime_cooldowns.clear();
         cleared
     }
@@ -1333,6 +1430,18 @@ impl Simulation {
         let gravity_multiplier = f64::from(self.gravity_percent) / 100.0;
         self.collisions.clear();
         self.wall_hits.clear();
+        self.gate_state.begin_frame();
+        // Per-segment filters for the wall pass; an empty slice (no
+        // stroke filtered) is the physics fast path, byte-identical to
+        // the unfiltered pass.
+        self.seg_filters.clear();
+        if self.wall_meta.iter().any(|m| m.filter != WallFilter::None) {
+            self.seg_filters
+                .extend(self.wall_meta.iter().map(|m| SegmentFilter {
+                    stroke: m.stroke,
+                    filter: m.filter,
+                }));
+        }
 
         // Self-gravity integrates once per frame, not per substep: the
         // collective field changes on screen-crossing timescales, far
@@ -1394,11 +1503,13 @@ impl Simulation {
             // legitimate same-side contact — recording a far-side spawn
             // site that outlives every later correction.
             if !self.segments.is_empty() {
-                collide_with_segments_recording(
+                collide_with_segments_filtered(
                     &mut self.particles,
                     &self.prev_positions,
                     &self.segments,
+                    &self.seg_filters,
                     self.wall_elasticity,
+                    &mut self.gate_state,
                     self.wall_chimes.then_some(&mut self.wall_hits),
                 );
             }
@@ -1419,11 +1530,13 @@ impl Simulation {
             // may reintroduce is the softer failure — the next substep's
             // pair pass re-detects and resolves it.
             if !self.segments.is_empty() {
-                collide_with_segments_recording(
+                collide_with_segments_filtered(
                     &mut self.particles,
                     &self.prev_positions,
                     &self.segments,
+                    &self.seg_filters,
                     self.wall_elasticity,
+                    &mut self.gate_state,
                     self.wall_chimes.then_some(&mut self.wall_hits),
                 );
             }
@@ -1469,9 +1582,10 @@ impl Simulation {
     /// now — without the guard the merged particle could teleport
     /// through the stub. Skipping the (cosmetic) centroid move keeps
     /// mass and momentum conservation intact.
-    /// Note: `origin` never transfers — the survivor keeps its own tag and
-    /// the donor's dies with it, so emitter live-counts track only the
-    /// particles an emitter actually produced.
+    /// Note: `origin` and `note` never transfer — the survivor keeps its
+    /// own tags and the donor's die with it, so emitter live-counts track
+    /// only the particles an emitter actually produced and note-filter
+    /// walls never pass fused impostors.
     fn absorb(dst: &mut Particle, src: &Particle, mass: f64, segments: &[Segment]) {
         let dst_mass = dst.mass();
         let total = dst_mass + mass;
@@ -1616,8 +1730,10 @@ impl Simulation {
                         color: parent.color,
                         doomed: false,
                         // Fragments are new matter, not the emitter's own:
-                        // origin never transfers (the parent keeps its tag).
+                        // origin and note never transfer (the parent keeps
+                        // its tags).
                         origin: None,
+                        note: None,
                     };
                     let twin = self.stamp(twin);
                     self.particles.push(twin);
@@ -3389,6 +3505,306 @@ mod tests {
         );
     }
 
+    /// The full-pressure divided-arena sim (the audit fixture), with all
+    /// particles parked on the right and two bursts against the divider.
+    fn pressured_divider_sim() -> Simulation {
+        let mut s = sim(&[
+            "--explosion-threshold",
+            "0",
+            "--particle-elasticity",
+            "0.7",
+            "--wall-elasticity",
+            "0.9",
+            "--gravity",
+            "0",
+            "--self-gravity",
+            "--matter",
+            "--spawn-mode",
+            "collision",
+            "--particle-size",
+            "0.5",
+            "--min-particles",
+            "30",
+        ]);
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        for (k, p) in s.particles.iter_mut().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                p.x = 430.0 + (k % 10) as f64 * 35.0;
+                p.y = 60.0 + (k / 10) as f64 * 120.0;
+            }
+        }
+        s.spawn_burst(420.0, 200.0);
+        s.spawn_burst(420.0, 400.0);
+        s
+    }
+
+    /// Run the pressured divider for 300 frames counting side changes of
+    /// live ids (a birth's initial side is not a crossing), asserting
+    /// `crossings <= grants` (a `Gate(n)` stroke issues `strikes / n`)
+    /// on every frame. Returns (crossings, strikes, final positions).
+    #[allow(clippy::cast_possible_truncation)]
+    fn audit_gated_divider(s: &mut Simulation, n: u32) -> (u32, u32, Vec<(u64, f64, f64)>) {
+        let stroke = s.wall_meta()[0].stroke;
+        let mut sides: HashMap<u64, bool> = HashMap::new();
+        let mut crossings = 0u32;
+        let now = Instant::now();
+        for frame in 0..300 {
+            s.step(1.0 / 60.0, now, None);
+            for p in s.particles() {
+                let left = p.x < 400.0;
+                if sides.insert(p.id, left) == Some(!left) {
+                    crossings += 1;
+                }
+            }
+            let grants = s.stroke_strikes(stroke) / n;
+            assert!(
+                crossings <= grants,
+                "frame {frame}: {crossings} crossings exceed {grants} grants"
+            );
+        }
+        let positions = s
+            .particles()
+            .iter()
+            .map(|p| (p.id, p.x, p.y))
+            .collect::<Vec<_>>();
+        (crossings, s.stroke_strikes(stroke), positions)
+    }
+
+    #[test]
+    fn a_gated_divider_leaks_exactly_its_grants() {
+        // The audit's gate counterpart: under the same matter+spawn
+        // pressure, every crossing of the divider must be covered by a
+        // grant — the gate leaks exactly what its escapement dispenses,
+        // never a particle more.
+        let mut s = pressured_divider_sim();
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(4)));
+        let (crossings, strikes, _) = audit_gated_divider(&mut s, 4);
+        assert!(
+            strikes >= 4 && crossings > 0,
+            "the gate actually granted: {strikes} strikes, {crossings} crossings"
+        );
+        // Every grant this seed dispenses completes its crossing (no
+        // shove-backs, nothing in flight at the horizon): exact equality,
+        // pinned by the determinism companion.
+        assert_eq!(crossings, strikes / 4, "the gate leaks exactly its grants");
+    }
+
+    #[test]
+    fn gated_divider_grant_counts_are_deterministic() {
+        let run = || {
+            let mut s = pressured_divider_sim();
+            let stroke = s.wall_meta()[0].stroke;
+            assert!(s.set_stroke_filter(stroke, WallFilter::Gate(4)));
+            audit_gated_divider(&mut s, 4)
+        };
+        assert_eq!(run(), run(), "same seed, same grants, same field");
+    }
+
+    #[test]
+    fn a_note_divider_with_no_matching_notes_stays_divided() {
+        // No particle in the pressure sim carries a note, so a pass-note
+        // divider must behave as the literal solid wall of the audit.
+        let mut s = pressured_divider_sim();
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Note(5)));
+        let now = Instant::now();
+        for frame in 0..300 {
+            s.step(1.0 / 60.0, now, None);
+            assert!(
+                s.particles().iter().all(|p| p.x > 400.0),
+                "left half stays empty (frame {frame}, population {})",
+                s.particle_count()
+            );
+        }
+        assert!(
+            s.particle_count() > 55,
+            "the runaway actually ran: {}",
+            s.particle_count()
+        );
+    }
+
+    #[test]
+    fn a_note_divider_passes_only_matching_carriers() {
+        // A noted and an unnoted emitter both fire at a pass-note
+        // divider from the right: every particle that ever shows up on
+        // the left must carry the matching note. Matter and spawning
+        // stay off so no unnoted particle can be *born* on the left.
+        let mut s = sim(&["--min-particles", "2", "--spawn-mode", "off"]);
+        freeze(&mut s);
+        s.particles[0].x = 700.0;
+        s.particles[0].y = 100.0;
+        s.particles[1].x = 700.0;
+        s.particles[1].y = 500.0;
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Note(5)));
+        assert!(s.place_emitter(600.0, 250.0, -1.0, 0.0, 10.0, 50));
+        assert!(s.place_emitter(600.0, 350.0, -1.0, 0.0, 10.0, 50));
+        let (noted, plain) = (s.emitters()[0].id, s.emitters()[1].id);
+        assert!(s.set_emitter_note(noted, Some(5)));
+        let now = Instant::now();
+        let mut ever_left = 0u32;
+        for frame in 0..300 {
+            s.step(1.0 / 60.0, now, None);
+            for p in s.particles() {
+                if p.x < 400.0 {
+                    ever_left += 1;
+                    assert_eq!(
+                        p.note,
+                        Some(5),
+                        "unnoted particle {} on the left (frame {frame})",
+                        p.id
+                    );
+                }
+            }
+        }
+        assert!(ever_left > 0, "matching carriers actually crossed");
+        assert!(
+            emitted_count(&s, plain) > 0,
+            "the unnoted stream actually fired"
+        );
+    }
+
+    // Gated variants of the containment companions: only the bounce
+    // branch consults the filter — pair pushout, fusion side-checks,
+    // collision spawns, bursts, and fission placement keep treating a
+    // gate wall as solid. Gate(16) with a strike budget below 16
+    // (asserted) proves no grant could have covered a leak.
+
+    /// Assert the wall's escapement stayed short of a grant, so any
+    /// crossing the test observed would have been a genuine leak.
+    fn assert_no_grant_possible(s: &Simulation, stroke: u32) {
+        assert!(
+            s.stroke_strikes(stroke) < 16,
+            "test setup exceeded the Gate(16) budget: {} strikes",
+            s.stroke_strikes(stroke)
+        );
+    }
+
+    #[test]
+    fn pair_pushout_cannot_leave_a_particle_inside_a_gated_wall() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        assert!(s.add_wall_segment(100.0, 300.0, 700.0, 300.0));
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(16)));
+        let (r0, r1) = (s.particles[0].radius, s.particles[1].radius);
+        s.particles[0].x = 400.0;
+        s.particles[0].y = 300.0 - r0;
+        s.particles[1].x = 400.0;
+        s.particles[1].y = s.particles[0].y - (r0 + r1) - 0.5;
+        s.particles[1].vy = 100.0;
+        s.step(0.01, Instant::now(), None);
+        assert!(
+            s.particles[0].y <= 300.0 - r0 + 1e-6,
+            "rester stays on its side of the gated wall: y={}",
+            s.particles[0].y
+        );
+        assert_no_grant_possible(&s, stroke);
+    }
+
+    #[test]
+    fn matter_cannot_fuse_across_a_gated_wall() {
+        let mut s = sim(&["--min-particles", "2", "--matter"]);
+        freeze(&mut s);
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(16)));
+        s.particles[0].x = 399.0;
+        s.particles[0].y = 300.0;
+        s.particles[0].vx = 10.0;
+        s.particles[1].x = 401.0;
+        s.particles[1].y = 300.0;
+        s.particles[1].vx = -10.0;
+        let now = Instant::now();
+        for _ in 0..60 {
+            s.step(1.0 / 60.0, now, None);
+        }
+        assert_eq!(s.particle_count(), 2, "no fusion through the gated wall");
+        assert!(
+            s.particles[0].x < 400.0 && s.particles[1].x > 400.0,
+            "both particles keep their sides: x0={}, x1={}",
+            s.particles[0].x,
+            s.particles[1].x
+        );
+        assert_no_grant_possible(&s, stroke);
+    }
+
+    #[test]
+    fn collision_spawns_stay_on_their_side_of_a_gated_wall() {
+        let mut s = sim(&["--min-particles", "2", "--spawn-mode", "collision"]);
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(16)));
+        let now = Instant::now();
+        // Fewer rounds than the solid companion: the strike budget must
+        // stay under the gate's period for the containment assert to
+        // mean anything (the in-loop guard keeps a budget overrun from
+        // masquerading as a leak).
+        for round in 0..8 {
+            arm_collision(&mut s, 403.0, 60.0 + f64::from(round) * 12.0);
+            for _ in 0..6 {
+                s.step(0.01, now, None);
+            }
+            assert_no_grant_possible(&s, stroke);
+            assert!(
+                s.particles().iter().all(|p| p.x > 400.0),
+                "spawns stay right of the gated wall (round {round})"
+            );
+        }
+        assert!(s.particle_count() > 2, "collisions actually spawned");
+        assert_no_grant_possible(&s, stroke);
+    }
+
+    #[test]
+    fn bursts_stay_on_their_side_of_a_gated_wall() {
+        let mut s = sim(&["--min-particles", "2"]);
+        freeze(&mut s);
+        s.particles[0].x = 700.0;
+        s.particles[1].x = 720.0;
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(16)));
+        for _ in 0..4 {
+            s.spawn_burst(402.0, 300.0);
+        }
+        assert!(s.particle_count() > 2, "burst added particles");
+        assert!(
+            s.particles().iter().all(|p| p.x > 400.0),
+            "no burst particle materializes across the gated wall"
+        );
+    }
+
+    #[test]
+    fn fission_fragments_stay_on_their_side_of_a_gated_wall() {
+        let mut s = sim(&["--min-particles", "2", "--matter"]);
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(16)));
+        let now = Instant::now();
+        // The wall-hugging impact: neither perpendicular sign keeps both
+        // fragments on the right, so the shatter is skipped — gate or no
+        // gate, placement never crosses.
+        freeze(&mut s);
+        s.particles[0].x = 401.0;
+        s.particles[0].y = 290.0;
+        s.particles[0].vy = 400.0;
+        s.particles[1].x = 401.0;
+        s.particles[1].y = 310.0;
+        s.particles[1].vy = -400.0;
+        for _ in 0..30 {
+            s.step(1.0 / 120.0, now, None);
+            assert!(
+                s.particles().iter().all(|p| p.x > 400.0),
+                "wall-hugging impact leaks no fragment through the gate"
+            );
+        }
+        assert_eq!(s.particle_count(), 2, "shatter skipped at the gated wall");
+        assert_no_grant_possible(&s, stroke);
+    }
+
     #[test]
     fn wall_segment_count_is_capped() {
         let mut s = sim(&["--min-particles", "2"]);
@@ -4129,9 +4545,39 @@ mod tests {
             x2: 0.9,
             y2: 0.5,
             note: WallNote::Note(7),
+            filter: WallFilter::None,
         });
         let s2 = Simulation::new(&cfg, 800, 600);
         assert_eq!(s2.wall_meta()[0].note, WallNote::Note(7));
+    }
+
+    #[test]
+    fn scenes_carry_wall_filters_and_emitter_notes_and_export_them() {
+        let mut cfg = config(&["--min-particles", "2"]);
+        cfg.scene.walls.push(crate::presets::SceneWall {
+            x1: 0.5,
+            y1: 0.0,
+            x2: 0.5,
+            y2: 1.0,
+            note: WallNote::Auto,
+            filter: WallFilter::Gate(3),
+        });
+        cfg.scene.emitters.push(crate::presets::SceneEmitter {
+            x: 0.8,
+            y: 0.5,
+            angle: 270.0,
+            rate: 2.0,
+            cap: 12,
+            note: Some(5),
+        });
+        let mut s = Simulation::new(&cfg, 800, 600);
+        assert_eq!(s.wall_meta()[0].filter, WallFilter::Gate(3));
+        assert_eq!(s.emitters()[0].note, Some(5), "scene stamps the emitter");
+        assert_eq!(s.wall_export_filters(), vec![WallFilter::Gate(3)]);
+        // Reset restores the scene's filter and note alongside geometry.
+        s.reset();
+        assert_eq!(s.wall_meta()[0].filter, WallFilter::Gate(3));
+        assert_eq!(s.emitters()[0].note, Some(5));
     }
 
     #[test]
@@ -4145,6 +4591,7 @@ mod tests {
             x2: 0.35,
             y2: 0.5,
             note: WallNote::Silent,
+            filter: WallFilter::None,
         });
         cfg.scene.walls.push(crate::presets::SceneWall {
             x1: 0.65,
@@ -4152,6 +4599,7 @@ mod tests {
             x2: 0.75,
             y2: 0.5,
             note: WallNote::Note(5),
+            filter: WallFilter::None,
         });
         let mut s = Simulation::new(&cfg, 800, 600);
         assert_eq!(s.wall_meta()[0].note, WallNote::Silent, "scene carries it");
@@ -4296,6 +4744,54 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fission_fragments_are_born_without_note() {
+        let mut s = sim(&["--min-particles", "4", "--matter"]);
+        arm_collision(&mut s, 400.0, 300.0);
+        let tagged = s.particles[0].id;
+        s.particles[0].note = Some(7);
+        s.particles[0].vx = 400.0;
+        s.particles[1].vx = -400.0;
+        let before = s.particle_count();
+        let now = Instant::now();
+        for _ in 0..20 {
+            s.step(0.01, now, None);
+        }
+        assert!(s.particle_count() > before, "fission must have fired");
+        let parent = s.find_particle(tagged).map(|i| s.particles()[i].note);
+        assert_eq!(parent, Some(Some(7)), "the parent keeps its note");
+        assert!(
+            s.particles()
+                .iter()
+                .filter(|p| p.id != tagged)
+                .all(|p| p.note.is_none()),
+            "fragments and bystanders stay unnoted"
+        );
+    }
+
+    #[test]
+    fn fusion_never_transfers_note() {
+        let mut s = sim(&["--min-particles", "4", "--matter"]);
+        arm_collision(&mut s, 400.0, 300.0);
+        let tagged = s.particles[0].id;
+        s.particles[0].note = Some(9);
+        // Slow closing speed: a fusing contact, not a fissioning impact.
+        s.particles[0].vx = 30.0;
+        s.particles[1].vx = -30.0;
+        let before = s.particle_count();
+        let now = Instant::now();
+        for _ in 0..40 {
+            s.step(0.01, now, None);
+        }
+        assert!(s.particle_count() < before, "fusion must have fired");
+        assert!(
+            s.particles()
+                .iter()
+                .all(|p| p.note != Some(9) || p.id == tagged),
+            "a note must not migrate to another particle"
+        );
+    }
+
     // ---- Emitters ---------------------------------------------------
 
     /// A sim with two parked, frozen particles and no ambient forces.
@@ -4358,6 +4854,54 @@ mod tests {
             s.step(0.1, now, None);
         }
         assert_eq!(emitted_count(&s, id), 2, "refilled to cap, not beyond");
+    }
+
+    #[test]
+    fn emitted_particles_carry_the_emitter_note() {
+        let mut s = emitter_sim();
+        assert!(s.place_emitter(50.0, 550.0, 1.0, 0.0, 2.0, 100));
+        assert!(s.place_emitter(50.0, 50.0, 1.0, 0.0, 2.0, 100));
+        let (noted, plain) = (s.emitters()[0].id, s.emitters()[1].id);
+        assert!(s.set_emitter_note(noted, Some(4)));
+        let now = Instant::now();
+        for _ in 0..20 {
+            s.step(0.1, now, None);
+        }
+        assert!(emitted_count(&s, noted) > 0 && emitted_count(&s, plain) > 0);
+        for p in s.particles() {
+            let expect = if p.origin == Some(noted) {
+                Some(4)
+            } else {
+                // The noteless emitter's stream and the ambient
+                // population alike stay unnoted.
+                None
+            };
+            assert_eq!(p.note, expect);
+        }
+    }
+
+    #[test]
+    fn bursts_and_comets_are_unnoted() {
+        let mut s = emitter_sim();
+        let before = s.particle_count();
+        s.spawn_burst(400.0, 300.0);
+        s.launch_comet(200.0, 200.0);
+        assert!(s.particle_count() > before, "burst and comet must spawn");
+        assert!(s.particles().iter().all(|p| p.note.is_none()));
+    }
+
+    #[test]
+    fn set_emitter_note_validates_range_and_ids() {
+        let mut s = emitter_sim();
+        assert!(s.place_emitter(50.0, 550.0, 1.0, 0.0, 2.0, 100));
+        let id = s.emitters()[0].id;
+        assert!(!s.set_emitter_note(id, Some(11)), "degree 11 out of range");
+        assert_eq!(s.emitter(id).unwrap().note, None, "rejected set is a no-op");
+        assert!(s.set_emitter_note(id, Some(10)), "degree 10 is the top");
+        assert_eq!(s.emitter(id).unwrap().note, Some(10));
+        assert!(s.set_emitter_note(id, None), "back to unnoted");
+        assert_eq!(s.emitter(id).unwrap().note, None);
+        assert!(!s.set_emitter_note(id + 1, Some(3)), "unknown id rejected");
     }
 
     #[test]
@@ -4445,6 +4989,7 @@ mod tests {
             angle: 90.0,
             rate: 4.0,
             cap: 3,
+            note: None,
         });
         let mut s = Simulation::new(&cfg, 800, 600);
         assert_eq!(s.emitters().len(), 1);
@@ -4790,6 +5335,181 @@ mod tests {
         );
         assert_eq!(s.stroke_note_setting(stroke + 1), None);
         assert_eq!(s.stroke_segment_count(stroke + 1), 0);
+    }
+
+    // ---- Filter walls -----------------------------------------------
+
+    /// A quiet chiming sim divided by a vertical wall at x=400, with
+    /// both resident particles parked in the left chamber.
+    fn filter_sim() -> Simulation {
+        let mut s = sim(&[
+            "--wall-chimes",
+            "--min-particles",
+            "2",
+            "--spawn-mode",
+            "off",
+        ]);
+        freeze(&mut s);
+        s.particles[0].x = 100.0;
+        s.particles[0].y = 300.0;
+        s.particles[1].x = 100.0;
+        s.particles[1].y = 500.0;
+        assert!(s.add_wall_segment(400.0, 0.0, 400.0, 600.0));
+        s
+    }
+
+    /// Fire particle 0 at the divider from the left and report
+    /// `(crossed, chimes)` for the trip. `now` advances past the chime
+    /// cooldown every step so repeat trips ring independently.
+    fn wall_trip(s: &mut Simulation, now: &mut Instant) -> (bool, usize) {
+        s.particles[0].x = 380.0;
+        s.particles[0].y = 300.0;
+        s.particles[0].vx = 100.0;
+        s.particles[0].vy = 0.0;
+        let mut chimes = 0;
+        for _ in 0..100 {
+            let ev = s.step(0.01, *now, None);
+            chimes += ev.wall_hits.len();
+            *now += Duration::from_millis(200);
+            let p = &s.particles[0];
+            if p.x > 405.0 {
+                return (true, chimes);
+            }
+            if p.vx < 0.0 {
+                return (false, chimes);
+            }
+        }
+        panic!("trip never resolved");
+    }
+
+    #[test]
+    fn a_gate_wall_passes_every_third_trip_and_stays_silent() {
+        let mut s = filter_sim();
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(3)));
+        let mut now = Instant::now();
+        // Six trips spanning many frames each: the escapement counter
+        // persists across frames, blocked strikes chime, and every
+        // third slips through without a sound.
+        for trip in 1..=6 {
+            let (crossed, chimes) = wall_trip(&mut s, &mut now);
+            if trip % 3 == 0 {
+                assert!(crossed, "trip {trip} passes");
+                assert_eq!(chimes, 0, "a pass is silent");
+                // Walk the crosser back for the next trip (the wall
+                // grants one crossing, it does not teleport state).
+                s.particles[0].x = 100.0;
+                s.particles[0].vx = 0.0;
+            } else {
+                assert!(!crossed, "trip {trip} blocked");
+                assert_eq!(chimes, 1, "a blocked strike chimes");
+            }
+        }
+    }
+
+    #[test]
+    fn a_note_wall_routes_only_matching_particles() {
+        let mut s = filter_sim();
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Note(5)));
+        let mut now = Instant::now();
+        for (note, expect_cross) in [(Some(5), true), (Some(2), false), (None, false)] {
+            s.particles[0].note = note;
+            let (crossed, chimes) = wall_trip(&mut s, &mut now);
+            assert_eq!(crossed, expect_cross, "note {note:?}");
+            assert_eq!(chimes, usize::from(!expect_cross), "blocked chimes");
+            if crossed {
+                s.particles[0].x = 100.0;
+                s.particles[0].vx = 0.0;
+            }
+        }
+    }
+
+    #[test]
+    fn replacing_a_filter_restarts_its_escapement() {
+        let mut s = filter_sim();
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(2)));
+        let mut now = Instant::now();
+        let (crossed, _) = wall_trip(&mut s, &mut now);
+        assert!(!crossed, "strike 1 of Gate(2) blocked");
+        // Wholesale replace, same filter: the count restarts, so the
+        // next strike is again strike 1, not the passing strike 2.
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(2)));
+        let (crossed, _) = wall_trip(&mut s, &mut now);
+        assert!(!crossed, "the escapement restarted");
+        let (crossed, _) = wall_trip(&mut s, &mut now);
+        assert!(crossed, "strike 2 after the reset passes");
+    }
+
+    #[test]
+    fn set_stroke_filter_covers_segments_validates_and_copies_on_extend() {
+        let mut s = inspect_sim();
+        let stroke = s.wall_meta()[0].stroke;
+        assert_eq!(s.stroke_filter_setting(stroke), Some(WallFilter::None));
+        assert!(s.set_stroke_filter(stroke, WallFilter::Gate(8)));
+        assert!(
+            s.wall_meta()
+                .iter()
+                .filter(|m| m.stroke == stroke)
+                .all(|m| m.filter == WallFilter::Gate(8)),
+            "every segment of the stroke carries the filter"
+        );
+        assert_eq!(s.stroke_filter_setting(stroke), Some(WallFilter::Gate(8)));
+        // The V-drag continuation inherits the stroke's filter.
+        assert!(s.extend_last_wall_stroke(400.0, 300.0, 500.0, 300.0));
+        assert_eq!(s.wall_meta().last().unwrap().filter, WallFilter::Gate(8));
+        // Range validation at the boundary; rejected sets are no-ops.
+        for bad in [
+            WallFilter::Gate(1),
+            WallFilter::Gate(17),
+            WallFilter::Note(11),
+        ] {
+            assert!(!s.set_stroke_filter(stroke, bad), "{bad:?} out of range");
+        }
+        assert_eq!(s.stroke_filter_setting(stroke), Some(WallFilter::Gate(8)));
+        for good in [
+            WallFilter::Gate(2),
+            WallFilter::Gate(16),
+            WallFilter::Note(0),
+            WallFilter::Note(10),
+            WallFilter::None,
+        ] {
+            assert!(s.set_stroke_filter(stroke, good), "{good:?} in range");
+        }
+        assert!(
+            !s.set_stroke_filter(stroke + 99, WallFilter::Gate(2)),
+            "dead id rejected"
+        );
+        assert_eq!(s.stroke_filter_setting(stroke + 99), None);
+    }
+
+    #[test]
+    fn a_wall_whose_filter_was_removed_matches_a_never_filtered_run() {
+        let base = Instant::now();
+        let run = |toggle: bool| {
+            let mut s = sim(&["--min-particles", "8"]);
+            assert!(s.add_wall_segment(400.0, 100.0, 400.0, 500.0));
+            let stroke = s.wall_meta()[0].stroke;
+            if toggle {
+                assert!(s.set_stroke_filter(stroke, WallFilter::Gate(3)));
+                assert!(s.set_stroke_filter(stroke, WallFilter::None));
+            }
+            let mut now = base;
+            for _ in 0..120 {
+                s.step(0.01, now, None);
+                now += Duration::from_millis(10);
+            }
+            s.particles()
+                .iter()
+                .map(|p| (p.id, p.x, p.y))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            run(false),
+            run(true),
+            "the None fast path leaves no trace of the old filter"
+        );
     }
 
     #[test]

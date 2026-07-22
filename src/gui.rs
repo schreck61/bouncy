@@ -20,7 +20,7 @@
 
 use crate::app::{Command, PanelCommand};
 use crate::presets::WallNote;
-use crate::sim::Polarity;
+use crate::sim::{Polarity, WallFilter};
 use crate::text::draw_text;
 
 /// Panel width in simulation pixels.
@@ -157,6 +157,14 @@ pub enum ButtonId {
     ReAim,
     /// Steps the selected stroke's note: Auto → degrees → Silent.
     CycleStrokeNote,
+    /// Steps the selected stroke's gate: off → every 2/3/4/8 → off
+    /// (replacing any pass filter).
+    CycleStrokeGate,
+    /// Steps the selected stroke's pass-note: off → degree 0..10 → off
+    /// (replacing any gate).
+    CycleStrokePass,
+    /// Steps the selected emitter's stamped note: none → degree 0..10.
+    CycleEmitterNote,
     /// Steps the beat-grid resolution: 1 → 2 → 4 → 8 ticks per beat.
     CycleBeatDiv,
     /// Deletes the selected entity (either kind).
@@ -173,11 +181,14 @@ pub enum PanelSelection {
         cap: usize,
         /// Aim as compass degrees (0 = up), the scene-export convention.
         angle_deg: f64,
+        /// Pentatonic degree stamped onto emitted particles.
+        note: Option<u8>,
     },
     Stroke {
         id: u32,
         segments: usize,
         note: WallNote,
+        filter: WallFilter,
     },
 }
 
@@ -745,6 +756,18 @@ impl Gui {
                     } else if pressed == ButtonId::CycleStrokeNote {
                         if let Some(PanelSelection::Stroke { id, .. }) = state.selection {
                             commands.push(PanelCommand::CycleStrokeNote(id));
+                        }
+                    } else if pressed == ButtonId::CycleStrokeGate {
+                        if let Some(PanelSelection::Stroke { id, .. }) = state.selection {
+                            commands.push(PanelCommand::CycleStrokeGate(id));
+                        }
+                    } else if pressed == ButtonId::CycleStrokePass {
+                        if let Some(PanelSelection::Stroke { id, .. }) = state.selection {
+                            commands.push(PanelCommand::CycleStrokePass(id));
+                        }
+                    } else if pressed == ButtonId::CycleEmitterNote {
+                        if let Some(PanelSelection::Emitter { id, .. }) = state.selection {
+                            commands.push(PanelCommand::CycleEmitterNote(id));
                         }
                     } else if pressed == ButtonId::CyclePreset {
                         self.launch.preset_idx =
@@ -1373,6 +1396,7 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
                 rate,
                 cap,
                 angle_deg,
+                note,
             } => {
                 push_item(
                     &mut out,
@@ -1409,6 +1433,16 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
                 );
                 button_row(
                     &mut out,
+                    &[(
+                        ButtonId::CycleEmitterNote,
+                        &format!("Note: {}", emitter_note_label(note)),
+                    )],
+                    x,
+                    w,
+                    &mut y,
+                );
+                button_row(
+                    &mut out,
                     &[
                         (ButtonId::ReAim, "Re-aim"),
                         (ButtonId::DeleteSelected, "Delete"),
@@ -1418,7 +1452,12 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
                     &mut y,
                 );
             }
-            PanelSelection::Stroke { id, segments, note } => {
+            PanelSelection::Stroke {
+                id,
+                segments,
+                note,
+                filter,
+            } => {
                 let plural = if segments == 1 { "" } else { "s" };
                 push_item(
                     &mut out,
@@ -1434,6 +1473,22 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
                         ButtonId::CycleStrokeNote,
                         &format!("Note: {}", note_label(note)),
                     )],
+                    x,
+                    w,
+                    &mut y,
+                );
+                button_row(
+                    &mut out,
+                    &[
+                        (
+                            ButtonId::CycleStrokeGate,
+                            &format!("Gate: {}", gate_label(filter)),
+                        ),
+                        (
+                            ButtonId::CycleStrokePass,
+                            &format!("Pass: {}", pass_label(filter)),
+                        ),
+                    ],
                     x,
                     w,
                     &mut y,
@@ -1728,6 +1783,28 @@ fn note_label(note: WallNote) -> String {
     }
 }
 
+/// The gate label the stroke inspector shows (a pass filter reads as
+/// "off" here — the two cycle buttons replace each other).
+fn gate_label(filter: WallFilter) -> String {
+    match filter {
+        WallFilter::Gate(n) => format!("every {n}"),
+        WallFilter::None | WallFilter::Note(_) => "off".to_string(),
+    }
+}
+
+/// The pass-note label the stroke inspector shows.
+fn pass_label(filter: WallFilter) -> String {
+    match filter {
+        WallFilter::Note(d) => format!("degree {d}"),
+        WallFilter::None | WallFilter::Gate(_) => "off".to_string(),
+    }
+}
+
+/// The stamped-note label the emitter inspector shows.
+fn emitter_note_label(note: Option<u8>) -> String {
+    note.map_or_else(|| "none".to_string(), |d| format!("degree {d}"))
+}
+
 /// The buttons that arm a one-shot placement tool.
 fn is_placement(id: ButtonId) -> bool {
     matches!(
@@ -1787,6 +1864,9 @@ fn button_command(id: ButtonId, state: &PanelState) -> PanelCommand {
         | ButtonId::Select
         | ButtonId::ReAim
         | ButtonId::CycleStrokeNote
+        | ButtonId::CycleStrokeGate
+        | ButtonId::CycleStrokePass
+        | ButtonId::CycleEmitterNote
         | ButtonId::DeleteSelected
         | ButtonId::CyclePreset
         | ButtonId::Relaunch => {
@@ -2247,6 +2327,7 @@ mod tests {
                 rate: 2.0,
                 cap: 12,
                 angle_deg: 90.0,
+                note: None,
             }),
             ..state()
         }
@@ -2258,6 +2339,7 @@ mod tests {
                 id: 5,
                 segments: 4,
                 note: WallNote::Auto,
+                filter: WallFilter::None,
             }),
             ..state()
         }
@@ -2343,6 +2425,26 @@ mod tests {
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, PanelCommand::CycleStrokeNote(5)))
+        );
+    }
+
+    #[test]
+    fn filter_buttons_emit_their_cycle_commands() {
+        let mut gui = open_gui();
+        let cmds = click_button(&mut gui, &stroke_selected(), ButtonId::CycleStrokeGate);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::CycleStrokeGate(5)))
+        );
+        let cmds = click_button(&mut gui, &stroke_selected(), ButtonId::CycleStrokePass);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::CycleStrokePass(5)))
+        );
+        let cmds = click_button(&mut gui, &emitter_selected(), ButtonId::CycleEmitterNote);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::CycleEmitterNote(3)))
         );
     }
 
