@@ -357,14 +357,22 @@ mod tests {
 
     #[test]
     fn connect_to_a_missing_port_errors_cleanly() {
+        // Three environments, three failure shapes: a machine with
+        // ports names the query, a machine without ports says so, and
+        // a headless Linux runner (no /dev/snd/seq) fails at backend
+        // init. All must error cleanly; none may connect.
         let err = expect_err(MidiOut::connect("no-such-port-zzz"));
         assert!(
-            err.contains("no-such-port-zzz") || err.contains("no MIDI output ports"),
-            "error names the query or the empty-port state: {err}"
+            err.contains("no-such-port-zzz")
+                || err.contains("no MIDI output ports")
+                || err.contains("MIDI init"),
+            "error names the query, the empty-port state, or the backend: {err}"
         );
         let err = expect_err(MidiOut::connect("9999"));
         assert!(
-            err.contains("out of range") || err.contains("no MIDI output ports"),
+            err.contains("out of range")
+                || err.contains("no MIDI output ports")
+                || err.contains("MIDI init"),
             "index errors are specific: {err}"
         );
     }
