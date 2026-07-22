@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.7.0 — 2026-07-21
 
 - Wall chimes gained voices: `--chime-timbre` selects `chime` (the
   original ping), `marimba` (woody bar with the double-octave partial),
