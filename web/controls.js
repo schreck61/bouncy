@@ -133,6 +133,20 @@ function bind(handle) {
       label: "explosion",
       act: (x, y) => handle.trigger_explosion(x, y),
     },
+    // Inspector tools. Optional-chained: a stale cached wasm bundle
+    // without these exports degrades to a no-op click.
+    "btn-select": {
+      label: "selection (click an emitter or wall)",
+      act: (x, y) => handle.select_at?.(x, y),
+    },
+    "btn-reaim": {
+      label: "emitter aim",
+      act: (x, y) => {
+        if (latest.selection_id != null) {
+          handle.aim_emitter_at?.(latest.selection_id, x, y);
+        }
+      },
+    },
   };
   for (const [id, spec] of Object.entries(tools)) {
     $(id).onclick = () => armTool(id, spec);
@@ -159,6 +173,30 @@ function bind(handle) {
   $("btn-clear-wells").onclick = () => handle.clear_wells();
   $("btn-clear-walls").onclick = () => handle.clear_walls();
   $("btn-clear-emitters").onclick = () => handle.clear_emitters();
+
+  // Inspector actions, all addressed to the currently selected id.
+  $("btn-deselect").onclick = () => handle.deselect?.();
+  $("btn-delete-emitter").onclick = () => {
+    if (latest.selection_id != null) handle.delete_emitter?.(latest.selection_id);
+  };
+  $("btn-delete-stroke").onclick = () => {
+    if (latest.selection_id != null) handle.delete_stroke?.(latest.selection_id);
+  };
+  $("btn-note").onclick = () => {
+    if (latest.selection_id != null) {
+      handle.cycle_stroke_note?.(latest.selection_id);
+    }
+  };
+  $("in-erate").oninput = (e) => {
+    if (latest.selection_id != null) {
+      handle.set_emitter_rate?.(latest.selection_id, Number(e.target.value));
+    }
+  };
+  $("in-ecap").oninput = (e) => {
+    if (latest.selection_id != null) {
+      handle.set_emitter_cap?.(latest.selection_id, Number(e.target.value));
+    }
+  };
   $("btn-color").onclick = () => handle.cycle_color_mode();
   $("btn-spawn").onclick = () => handle.cycle_spawn_mode();
   $("btn-hud").onclick = () => handle.cycle_hud();
@@ -335,10 +373,38 @@ function shareUrl() {
 // Console access for testing and tinkering.
 globalThis.bouncyShareUrl = shareUrl;
 
+// The selection id the inspector last showed: slider *inputs* are
+// (re)written only when this changes — outputs update every frame, but
+// rewriting a range input mid-drag would fight the user's thumb.
+let lastSelId = null;
+
 // Reflect the snapshot into the panel. Sliders follow the simulation
 // unless the user is mid-drag (their element has focus).
 function reflect(s) {
   latest = s;
+
+  // Inspector: `??` guards degrade a stale wasm bundle (no selection
+  // fields) to a permanently hidden inspector, never an error.
+  const kind = s.selection_kind ?? null;
+  $("inspector").hidden = kind === null;
+  $("insp-emitter").hidden = kind !== "emitter";
+  $("insp-stroke").hidden = kind !== "stroke";
+  if (kind === "emitter") {
+    $("insp-emitter-label").textContent =
+      `Emitter #${s.selection_id} — aim ${Math.round(s.selection_angle)}°`;
+    $("out-erate").textContent = `${s.selection_rate.toFixed(1)}/s`;
+    $("out-ecap").textContent = `${s.selection_cap} live`;
+    if (s.selection_id !== lastSelId) {
+      $("in-erate").value = s.selection_rate;
+      $("in-ecap").value = s.selection_cap;
+    }
+  } else if (kind === "stroke") {
+    const n = s.selection_segments;
+    $("insp-stroke-label").textContent =
+      `Wall #${s.selection_id} — ${n} segment${n === 1 ? "" : "s"}`;
+    $("btn-note").textContent = `Note: ${s.selection_note}`;
+  }
+  lastSelId = kind === null ? null : s.selection_id;
   $("ro-fps").textContent = s.fps.toFixed(0);
   $("ro-particles").textContent = s.particles.toLocaleString();
   $("ro-cap").textContent = `of ${s.max_particles.toLocaleString()}`;

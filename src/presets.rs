@@ -564,6 +564,23 @@ pub enum WallNote {
     Silent,
 }
 
+impl WallNote {
+    /// The next setting in the inspector's note cycle: Auto → Note(0)
+    /// … Note(NOTE_COUNT-1) → Silent → Auto. Out-of-range pinned notes
+    /// (scene files may carry them) step to Silent like the top degree.
+    #[must_use]
+    pub fn cycled(self) -> Self {
+        #[allow(clippy::cast_possible_truncation)]
+        let top = (crate::audio::NOTE_COUNT - 1) as u8;
+        match self {
+            WallNote::Auto => WallNote::Note(0),
+            WallNote::Note(n) if n < top => WallNote::Note(n + 1),
+            WallNote::Note(_) => WallNote::Silent,
+            WallNote::Silent => WallNote::Auto,
+        }
+    }
+}
+
 /// A wall segment in window-fraction coordinates.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct SceneWall {
@@ -1477,5 +1494,26 @@ mod tests {
     fn explicit_missing_file_is_an_error_for_load() {
         let err = load(Some(Path::new("/nonexistent/bouncy-presets.toml"))).unwrap_err();
         assert!(err.contains("cannot read presets file"), "{err}");
+    }
+
+    #[test]
+    fn wall_note_cycle_walks_every_degree_and_wraps() {
+        let mut note = WallNote::Auto;
+        let mut seen = vec![note];
+        loop {
+            note = note.cycled();
+            if note == WallNote::Auto {
+                break;
+            }
+            seen.push(note);
+            assert!(seen.len() < 64, "cycle must close");
+        }
+        // Auto, every pentatonic degree in order, then Silent.
+        assert_eq!(seen.len(), 2 + crate::audio::NOTE_COUNT);
+        assert_eq!(seen[1], WallNote::Note(0));
+        assert_eq!(seen[seen.len() - 2], WallNote::Note(10));
+        assert_eq!(seen[seen.len() - 1], WallNote::Silent);
+        // An out-of-range pinned note steps to Silent, not out of bounds.
+        assert_eq!(WallNote::Note(200).cycled(), WallNote::Silent);
     }
 }

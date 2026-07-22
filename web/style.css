@@ -218,6 +218,20 @@ button.cycle span { display: block; }
 }
 #toggles input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+/* Inspector for the selected emitter/wall stroke: amber accent to
+   match the canvas selection highlight. */
+#inspector {
+  margin: 10px 0;
+  border: 1px solid #8a6d2f;
+  border-radius: 6px;
+  padding: 6px 10px 8px;
+}
+.insp-title {
+  margin: 2px 0 4px;
+  font-size: 12.5px;
+  color: #ffd25a;
+}
+
 #launch {
   margin: 12px 0 4px;
   border: 1px solid var(--line);

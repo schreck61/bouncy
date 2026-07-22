@@ -304,6 +304,59 @@ pub fn render_emitters(frame: &mut [u8], emitters: &[Emitter], width: u32, heigh
     }
 }
 
+/// Selection highlight: amber, distinct from the sandstone walls, the
+/// hot flash white, and every entity marker color.
+pub const SELECT_COLOR: [u8; 4] = [255, 210, 90, 255];
+
+/// Redraw the selected stroke's segments in the selection color.
+/// `selected` marks which segments belong to the stroke, index-aligned
+/// with `segments` (segments beyond its length are unselected). Runs
+/// after the wall pass so the highlight also reads over a mid-chime
+/// flash.
+pub fn render_stroke_highlight(
+    frame: &mut [u8],
+    segments: &[Segment],
+    selected: &[bool],
+    width: u32,
+    height: u32,
+) {
+    for (seg, _) in segments.iter().zip(selected).filter(|&(_, &keep)| keep) {
+        draw_line(
+            frame,
+            width,
+            height,
+            (seg.x1, seg.y1),
+            (seg.x2, seg.y2),
+            SELECT_COLOR,
+        );
+    }
+}
+
+/// Ring the selected emitter just outside its marker so both stay
+/// visible: the amber halo says "inspected", the green glyph keeps
+/// showing its aim.
+pub fn render_emitter_highlight(frame: &mut [u8], e: &Emitter, width: u32, height: u32) {
+    let r = WELL_MARKER_RADIUS + 3;
+    let cx = coord_to_pixel(e.x);
+    let cy = coord_to_pixel(e.y);
+    for dy in -r..=r {
+        for dx in -r..=r {
+            let d2 = dx * dx + dy * dy;
+            if !(d2 <= r * r && d2 >= (r - 1) * (r - 1)) {
+                continue;
+            }
+            let px = cx + dx;
+            let py = cy + dy;
+            // Bounds check: px/py are valid pixel coordinates after this check
+            #[allow(clippy::cast_sign_loss)]
+            if px >= 0 && (px as u32) < width && py >= 0 && (py as u32) < height {
+                let idx = ((py as u32) as usize * width as usize + (px as u32) as usize) * 4;
+                frame[idx..idx + 4].copy_from_slice(&SELECT_COLOR);
+            }
+        }
+    }
+}
+
 /// Render the explosion as an expanding orange ring.
 pub fn render_explosion(frame: &mut [u8], exp: &Explosion, width: u32, height: u32) {
     let inner_radius = (exp.radius - EXPLOSION_RING_WIDTH).max(0.0);
@@ -923,6 +976,73 @@ mod tests {
         assert_eq!(px(45, 25), EMITTER_COLOR[0], "arrow tip along +x");
         // Interior off the arrow axis stays empty (the ring is hollow).
         assert_eq!(px(30, 21), 0, "ring interior stays empty");
+    }
+
+    #[test]
+    fn stroke_highlight_paints_only_selected_segments_and_clips() {
+        let (width, height) = (50u32, 40u32);
+        let mut frame = vec![0u8; (width * height * 4) as usize];
+        let segments = [
+            Segment {
+                x1: 5.0,
+                y1: 10.0,
+                x2: 15.0,
+                y2: 10.0,
+            },
+            Segment {
+                x1: 5.0,
+                y1: 20.0,
+                x2: 15.0,
+                y2: 20.0,
+            },
+            // Selected and running off the frame: must clip, not panic.
+            Segment {
+                x1: -10.0,
+                y1: 30.0,
+                x2: 70.0,
+                y2: 30.0,
+            },
+        ];
+        render_stroke_highlight(&mut frame, &segments, &[true, false, true], width, height);
+        let px = |x: u32, y: u32| {
+            let i = ((y * width + x) * 4) as usize;
+            [frame[i], frame[i + 1], frame[i + 2], frame[i + 3]]
+        };
+        assert_eq!(px(10, 10), SELECT_COLOR, "selected segment highlighted");
+        assert_eq!(px(10, 20), [0, 0, 0, 0], "unselected segment untouched");
+        assert_eq!(px(10, 30), SELECT_COLOR, "clipped segment still traced");
+        // A short mask leaves the unmasked tail untouched, never panics.
+        let mut frame2 = vec![0u8; (width * height * 4) as usize];
+        render_stroke_highlight(&mut frame2, &segments, &[true], width, height);
+        let px2 = |x: u32, y: u32| frame2[((y * width + x) * 4) as usize];
+        assert_eq!(px2(10, 10), SELECT_COLOR[0], "masked head still paints");
+        assert_eq!(px2(10, 30), 0, "beyond-mask segment stays unhighlighted");
+    }
+
+    #[test]
+    fn emitter_highlight_rings_outside_the_marker_and_clips() {
+        let (width, height) = (60u32, 50u32);
+        let mut frame = vec![0u8; (width * height * 4) as usize];
+        let e = Emitter::aimed(30.0, 25.0, 1.0, 0.0);
+        render_emitters(&mut frame, &[e], width, height);
+        render_emitter_highlight(&mut frame, &e, width, height);
+        let px = |x: u32, y: u32| {
+            let i = ((y * width + x) * 4) as usize;
+            [frame[i], frame[i + 1], frame[i + 2], frame[i + 3]]
+        };
+        assert_eq!(px(40, 25), SELECT_COLOR, "halo sits outside the marker");
+        assert_eq!(
+            px(37, 25),
+            EMITTER_COLOR,
+            "marker ring survives under the halo"
+        );
+        // A highlight at the frame corner clips instead of panicking.
+        render_emitter_highlight(
+            &mut frame,
+            &Emitter::aimed(0.0, 0.0, 0.0, -1.0),
+            width,
+            height,
+        );
     }
 
     #[test]

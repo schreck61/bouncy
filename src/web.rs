@@ -61,6 +61,18 @@ pub struct Snapshot {
     /// Current HUD overlay level (hidden / stats / stats+keys), so the
     /// panel's cycle button can show where in the cycle it is.
     pub hud: String,
+    /// Inspector: the selected entity, flattened to per-field optionals
+    /// (all None when nothing is selected). Flat so a stale cached page
+    /// sees absent fields and simply never shows the inspector.
+    pub selection_kind: Option<String>,
+    pub selection_id: Option<u32>,
+    pub selection_rate: Option<f64>,
+    pub selection_cap: Option<usize>,
+    /// Aim as compass degrees (0 = up), the scene-export convention.
+    pub selection_angle: Option<f64>,
+    /// Chime-note label: "auto", "degree N", or "silent".
+    pub selection_note: Option<String>,
+    pub selection_segments: Option<usize>,
 }
 
 /// The mailbox shared between the running [`App`] and the [`WebHandle`]
@@ -290,6 +302,51 @@ impl WebHandle {
     /// Absolute musical-pings state (pentatonic collision pitches).
     pub fn set_music(&self, music: bool) {
         self.push(WebCommand::SetMusic(music));
+    }
+
+    /// Resolve a click to a selection; a miss deselects (the panel's
+    /// Select tool). The result arrives via the snapshot's
+    /// `selection_*` fields.
+    pub fn select_at(&self, x: f64, y: f64) {
+        self.push(WebCommand::SelectAt(x, y));
+    }
+
+    /// Drop the selection.
+    pub fn deselect(&self) {
+        self.push(WebCommand::Deselect);
+    }
+
+    /// Set the selected emitter's emission rate (particles/second,
+    /// clamped like scene TOML).
+    pub fn set_emitter_rate(&self, id: u32, rate: f64) {
+        self.push(WebCommand::SetEmitterRate(id, rate));
+    }
+
+    /// Set the selected emitter's live-particle cap (clamped like scene
+    /// TOML).
+    pub fn set_emitter_cap(&self, id: u32, cap: i32) {
+        self.push(WebCommand::SetEmitterCap(id, cap));
+    }
+
+    /// Point the emitter from its position toward `(x, y)` (the panel's
+    /// armed Re-aim tool).
+    pub fn aim_emitter_at(&self, id: u32, x: f64, y: f64) {
+        self.push(WebCommand::AimEmitterAt(id, x, y));
+    }
+
+    /// Step the stroke's chime note: Auto → degrees → Silent → Auto.
+    pub fn cycle_stroke_note(&self, id: u32) {
+        self.push(WebCommand::CycleStrokeNote(id));
+    }
+
+    /// Delete one emitter by id (its particles keep flying).
+    pub fn delete_emitter(&self, id: u32) {
+        self.push(WebCommand::DeleteEmitter(id));
+    }
+
+    /// Delete one wall stroke (all its segments) by id.
+    pub fn delete_stroke(&self, id: u32) {
+        self.push(WebCommand::DeleteStroke(id));
     }
 }
 

@@ -177,6 +177,21 @@ pub struct Well {
 /// Maximum pinned emitters (the U gesture and scene files stop here).
 pub const MAX_EMITTERS: usize = 8;
 
+/// Pick radius for [`Simulation::select_at`], in logical pixels: how far
+/// a click may land from an emitter marker or wall stroke and still
+/// grab it.
+pub const SELECT_RADIUS: f64 = 12.0;
+
+/// A selectable entity, as resolved by [`Simulation::select_at`]. Ids
+/// are the simulation's monotonic emitter and stroke ids; holders must
+/// tolerate the id dying underneath them (mutators return false,
+/// accessors return None).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Selection {
+    Emitter(u32),
+    WallStroke(u32),
+}
+
 /// A pinned spawner: emits one particle at a time in a fixed direction
 /// at a steady rate, pausing while its live-particle cap is reached —
 /// the instrument roadmap's "sequencer clock". Emission rate is
@@ -978,6 +993,138 @@ impl Simulation {
     /// The pinned emitters.
     pub fn emitters(&self) -> &[Emitter] {
         &self.emitters
+    }
+
+    // --- Inspector --------------------------------------------------------
+
+    /// Resolve a click at `(x, y)` to the nearest emitter or wall stroke
+    /// within `threshold` pixels ([`SELECT_RADIUS`] for the UI). Emitters
+    /// win ties: a point target is harder to hit than a line, so when
+    /// both are equally close the marker is what the user aimed at.
+    pub fn select_at(&self, x: f64, y: f64, threshold: f64) -> Option<Selection> {
+        let emitter = self
+            .emitters
+            .iter()
+            .map(|e| ((e.x - x).hypot(e.y - y), e.id))
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        let stroke = self
+            .segments
+            .iter()
+            .zip(&self.wall_meta)
+            .map(|(s, m)| (s.distance_to(x, y), m.stroke))
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        match (emitter, stroke) {
+            (Some((ed, id)), Some((sd, _))) if ed <= threshold && ed <= sd => {
+                Some(Selection::Emitter(id))
+            }
+            (Some((ed, id)), None) if ed <= threshold => Some(Selection::Emitter(id)),
+            (_, Some((sd, stroke))) if sd <= threshold => Some(Selection::WallStroke(stroke)),
+            _ => None,
+        }
+    }
+
+    /// The emitter with `id`, if it is still alive.
+    pub fn emitter(&self, id: u32) -> Option<&Emitter> {
+        self.emitters.iter().find(|e| e.id == id)
+    }
+
+    /// Set an emitter's emission rate (particles per second), clamped to
+    /// the scene bounds. Returns false if the id is dead.
+    pub fn set_emitter_rate(&mut self, id: u32, rate: f64) -> bool {
+        let Some(e) = self.emitters.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        e.rate = rate.clamp(0.1, 20.0);
+        self.wake();
+        true
+    }
+
+    /// Set an emitter's live-particle cap, clamped to the scene bounds.
+    /// Returns false if the id is dead.
+    pub fn set_emitter_cap(&mut self, id: u32, cap: usize) -> bool {
+        let Some(e) = self.emitters.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        e.cap = cap.clamp(1, 200);
+        self.wake();
+        true
+    }
+
+    /// Re-aim an emitter along `(dx, dy)` (normalized; a zero vector aims
+    /// straight up, matching `place_emitter`). Returns false if the id is
+    /// dead.
+    pub fn aim_emitter(&mut self, id: u32, dx: f64, dy: f64) -> bool {
+        let Some(e) = self.emitters.iter_mut().find(|e| e.id == id) else {
+            return false;
+        };
+        let len = dx.hypot(dy);
+        (e.dx, e.dy) = if len > 1e-9 {
+            (dx / len, dy / len)
+        } else {
+            (0.0, -1.0)
+        };
+        self.wake();
+        true
+    }
+
+    /// Remove the emitter with `id`. Its live particles keep flying with
+    /// their origin tags orphaned — `run_emitters` counts by live id, so
+    /// an orphaned tag is simply never matched. Returns false if the id
+    /// is dead.
+    pub fn remove_emitter(&mut self, id: u32) -> bool {
+        let before = self.emitters.len();
+        self.emitters.retain(|e| e.id != id);
+        if self.emitters.len() == before {
+            return false;
+        }
+        self.wake();
+        true
+    }
+
+    /// A stroke's configured chime note ([`WallNote`], not the resolved
+    /// degree), if the stroke is still alive.
+    pub fn stroke_note_setting(&self, stroke: u32) -> Option<WallNote> {
+        self.wall_meta
+            .iter()
+            .find(|m| m.stroke == stroke)
+            .map(|m| m.note)
+    }
+
+    /// How many segments make up the stroke (0 if dead).
+    pub fn stroke_segment_count(&self, stroke: u32) -> usize {
+        self.wall_meta.iter().filter(|m| m.stroke == stroke).count()
+    }
+
+    /// Set the chime note of every segment in the stroke (segments of a
+    /// stroke always share one note). Returns false if the id is dead.
+    pub fn set_stroke_note(&mut self, stroke: u32, note: WallNote) -> bool {
+        let mut found = false;
+        for m in self.wall_meta.iter_mut().filter(|m| m.stroke == stroke) {
+            m.note = note;
+            found = true;
+        }
+        if found {
+            self.wake();
+        }
+        found
+    }
+
+    /// Remove every segment of the stroke, keeping `segments` and
+    /// `wall_meta` in lockstep and dropping the stroke's chime cooldowns.
+    /// Returns how many segments were removed (0 if the id is dead).
+    pub fn remove_stroke(&mut self, stroke: u32) -> usize {
+        let keep: Vec<bool> = self.wall_meta.iter().map(|m| m.stroke != stroke).collect();
+        let removed = keep.iter().filter(|&&k| !k).count();
+        if removed == 0 {
+            return 0;
+        }
+        let mut it = keep.iter();
+        self.segments.retain(|_| *it.next().expect("mask matches"));
+        let mut it = keep.iter();
+        self.wall_meta.retain(|_| *it.next().expect("mask matches"));
+        self.chime_cooldowns.retain(|(_, s), _| *s != stroke);
+        self.wake();
+        removed
     }
 
     /// Run every emitter's emission schedule for this step. Emitted
@@ -4267,5 +4414,203 @@ mod tests {
         let rad = angle.to_radians();
         let (rdx, rdy) = (rad.sin(), -rad.cos());
         assert!((rdx - e.dx).abs() < 1e-2 && (rdy - e.dy).abs() < 1e-2);
+    }
+
+    // ---- Inspector --------------------------------------------------
+
+    /// A quiet sim with one emitter at (100, 100) and one two-segment
+    /// stroke along y=300 from x=200 to x=400.
+    fn inspect_sim() -> Simulation {
+        let mut s = emitter_sim();
+        assert!(s.place_emitter(100.0, 100.0, 1.0, 0.0, 2.0, 12));
+        assert!(s.add_wall_segment(200.0, 300.0, 300.0, 300.0));
+        assert!(s.extend_last_wall_stroke(300.0, 300.0, 400.0, 300.0));
+        s
+    }
+
+    #[test]
+    fn select_at_picks_nearest_within_threshold() {
+        let s = inspect_sim();
+        let eid = s.emitters()[0].id;
+        let stroke = s.wall_meta()[0].stroke;
+        assert_eq!(
+            s.select_at(105.0, 100.0, SELECT_RADIUS),
+            Some(Selection::Emitter(eid)),
+            "near the marker"
+        );
+        assert_eq!(
+            s.select_at(250.0, 308.0, SELECT_RADIUS),
+            Some(Selection::WallStroke(stroke)),
+            "near the bar, either segment resolves to the stroke"
+        );
+        assert_eq!(
+            s.select_at(390.0, 295.0, SELECT_RADIUS),
+            Some(Selection::WallStroke(stroke)),
+            "second segment resolves to the same stroke"
+        );
+        assert_eq!(
+            s.select_at(600.0, 100.0, SELECT_RADIUS),
+            None,
+            "empty space misses"
+        );
+        assert_eq!(
+            s.select_at(100.0, 100.0 + SELECT_RADIUS + 0.1, SELECT_RADIUS),
+            None,
+            "just past the threshold misses"
+        );
+    }
+
+    #[test]
+    fn select_at_prefers_the_emitter_on_a_tie() {
+        let mut s = emitter_sim();
+        // A wall running straight through the emitter position: every
+        // click near it is equidistant-or-closer to the line.
+        assert!(s.place_emitter(300.0, 300.0, 1.0, 0.0, 2.0, 12));
+        assert!(s.add_wall_segment(200.0, 300.0, 400.0, 300.0));
+        let eid = s.emitters()[0].id;
+        assert_eq!(
+            s.select_at(300.0, 305.0, SELECT_RADIUS),
+            Some(Selection::Emitter(eid)),
+            "the point target wins when both are in range and the line is nearer"
+        );
+        // Far from the marker along the wall, the stroke wins.
+        let stroke = s.wall_meta()[0].stroke;
+        assert_eq!(
+            s.select_at(210.0, 300.0, SELECT_RADIUS),
+            Some(Selection::WallStroke(stroke))
+        );
+    }
+
+    #[test]
+    fn emitter_mutators_clamp_and_reject_dead_ids() {
+        let mut s = inspect_sim();
+        let id = s.emitters()[0].id;
+        assert!(s.set_emitter_rate(id, 999.0));
+        assert!(
+            (s.emitter(id).unwrap().rate - 20.0).abs() < 1e-9,
+            "clamped high"
+        );
+        assert!(s.set_emitter_rate(id, 0.0));
+        assert!(
+            (s.emitter(id).unwrap().rate - 0.1).abs() < 1e-9,
+            "clamped low"
+        );
+        assert!(s.set_emitter_cap(id, 100_000));
+        assert_eq!(s.emitter(id).unwrap().cap, 200, "cap clamped");
+        assert!(!s.set_emitter_rate(id + 1, 5.0), "unknown id rejected");
+        assert!(!s.set_emitter_cap(id + 1, 5), "unknown id rejected");
+        assert!(!s.aim_emitter(id + 1, 1.0, 0.0), "unknown id rejected");
+        assert!(!s.remove_emitter(id + 1), "unknown id rejected");
+        assert!(s.emitter(id + 1).is_none());
+    }
+
+    #[test]
+    fn aim_emitter_normalizes_and_zero_vector_aims_up() {
+        let mut s = inspect_sim();
+        let id = s.emitters()[0].id;
+        assert!(s.aim_emitter(id, 3.0, 4.0));
+        let e = s.emitter(id).unwrap();
+        assert!((e.dx - 0.6).abs() < 1e-9 && (e.dy - 0.8).abs() < 1e-9);
+        assert!(s.aim_emitter(id, 0.0, 0.0));
+        let e = s.emitter(id).unwrap();
+        assert!(
+            (e.dx - 0.0).abs() < 1e-9 && (e.dy + 1.0).abs() < 1e-9,
+            "zero aims up"
+        );
+    }
+
+    #[test]
+    fn remove_emitter_leaves_particles_and_other_emitters_running() {
+        let mut s = emitter_sim();
+        assert!(s.place_emitter(100.0, 100.0, 1.0, 0.0, 5.0, 100));
+        assert!(s.place_emitter(700.0, 100.0, -1.0, 0.0, 5.0, 100));
+        let (a, b) = (s.emitters()[0].id, s.emitters()[1].id);
+        let now = Instant::now();
+        for _ in 0..10 {
+            s.step(0.1, now, None);
+        }
+        let orphans = emitted_count(&s, a);
+        assert!(orphans > 0 && emitted_count(&s, b) > 0);
+        let total = s.particle_count();
+        assert!(s.remove_emitter(a));
+        assert_eq!(s.emitters().len(), 1);
+        assert_eq!(
+            s.particle_count(),
+            total,
+            "no particle dies with its emitter"
+        );
+        // The survivor keeps emitting; the orphaned tags never revive.
+        for _ in 0..10 {
+            s.step(0.1, now, None);
+        }
+        assert_eq!(emitted_count(&s, a), orphans, "orphan stream stays dead");
+        assert!(emitted_count(&s, b) > 0, "survivor keeps running");
+    }
+
+    #[test]
+    fn set_stroke_note_covers_every_segment() {
+        let mut s = inspect_sim();
+        let stroke = s.wall_meta()[0].stroke;
+        assert_eq!(s.stroke_note_setting(stroke), Some(WallNote::Auto));
+        assert_eq!(s.stroke_segment_count(stroke), 2);
+        assert!(s.set_stroke_note(stroke, WallNote::Note(3)));
+        assert!(
+            s.wall_meta()
+                .iter()
+                .filter(|m| m.stroke == stroke)
+                .all(|m| m.note == WallNote::Note(3)),
+            "every segment of the stroke carries the note"
+        );
+        assert_eq!(s.stroke_note_setting(stroke), Some(WallNote::Note(3)));
+        assert!(
+            !s.set_stroke_note(stroke + 1, WallNote::Silent),
+            "dead id rejected"
+        );
+        assert_eq!(s.stroke_note_setting(stroke + 1), None);
+        assert_eq!(s.stroke_segment_count(stroke + 1), 0);
+    }
+
+    #[test]
+    fn remove_stroke_keeps_lockstep_and_purges_cooldowns() {
+        let mut s = chime_sim();
+        // Stroke A: two segments; stroke B: one.
+        assert!(s.add_wall_segment(200.0, 300.0, 300.0, 300.0));
+        assert!(s.extend_last_wall_stroke(300.0, 300.0, 400.0, 300.0));
+        assert!(s.add_wall_segment(500.0, 100.0, 500.0, 200.0));
+        let a = s.wall_meta()[0].stroke;
+        let b = s.wall_meta()[2].stroke;
+        // Ring stroke A so it owns a cooldown entry.
+        s.particles[0].x = 250.0;
+        s.particles[0].y = 290.0;
+        s.particles[0].vy = 120.0;
+        let now = Instant::now();
+        let mut chimed = false;
+        for _ in 0..30 {
+            chimed |= !s.step(0.016, now, None).wall_hits.is_empty();
+        }
+        assert!(chimed, "setup must actually strike stroke A");
+        assert!(s.chime_cooldowns.keys().any(|(_, st)| *st == a));
+        assert_eq!(s.remove_stroke(a), 2, "both segments removed");
+        assert_eq!(s.wall_segments().len(), 1);
+        assert_eq!(s.wall_meta().len(), 1, "segments and meta stay lockstep");
+        assert_eq!(s.wall_meta()[0].stroke, b, "the other stroke survives");
+        assert!(
+            s.chime_cooldowns.keys().all(|(_, st)| *st != a),
+            "dead stroke's cooldowns purged"
+        );
+        assert_eq!(s.remove_stroke(a), 0, "dead id removes nothing");
+    }
+
+    #[test]
+    fn inspector_mutators_wake_a_stopped_sim() {
+        let mut s = inspect_sim();
+        let id = s.emitters()[0].id;
+        s.stopped = true;
+        assert!(s.set_emitter_rate(id, 5.0));
+        assert!(!s.stopped(), "mutation wakes the sim");
+        s.stopped = true;
+        let stroke = s.wall_meta()[0].stroke;
+        assert!(s.set_stroke_note(stroke, WallNote::Silent));
+        assert!(!s.stopped());
     }
 }

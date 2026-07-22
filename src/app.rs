@@ -10,9 +10,13 @@ use crate::config::{ColorMode, Config, ELASTICITY_MAX, EXPLOSION_THRESHOLD_MAX, 
 use crate::render::write_png;
 use crate::render::{
     RenderContext, create_render_context, dim_rect, fade_frame, kaleidoscope_frame,
-    render_emitters, render_explosion, render_particles, render_segments, render_wells,
+    render_emitter_highlight, render_emitters, render_explosion, render_particles, render_segments,
+    render_stroke_highlight, render_wells,
 };
-use crate::sim::{MAX_EMITTERS, MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, Simulation, Well};
+use crate::sim::{
+    MAX_EMITTERS, MAX_PINNED_WELLS, MAX_WALL_SEGMENTS, Polarity, SELECT_RADIUS, Selection,
+    Simulation, Well,
+};
 use crate::text::{draw_text, draw_text_centered, measure_text};
 use clap::ValueEnum;
 use std::collections::HashMap;
@@ -177,6 +181,23 @@ pub enum PanelCommand {
     SetPingVolume(i32),
     /// Place an emitter at the click, aimed at the arena center.
     PlaceEmitter(f64, f64),
+    /// Resolve the click to a selection (a miss deselects — in select
+    /// mode a click never bursts).
+    SelectAt(f64, f64),
+    /// Drop the selection.
+    Deselect,
+    /// Set the selected emitter's emission rate (particles/second).
+    SetEmitterRate(u32, f64),
+    /// Set the selected emitter's live-particle cap.
+    SetEmitterCap(u32, i32),
+    /// Re-aim the emitter from its position toward the clicked point.
+    AimEmitterAt(u32, f64, f64),
+    /// Step the stroke's chime note: Auto → degrees → Silent → Auto.
+    CycleStrokeNote(u32),
+    /// Delete one emitter by id.
+    DeleteEmitter(u32),
+    /// Delete one wall stroke (all its segments) by id.
+    DeleteStroke(u32),
     /// Rebuild the simulation with new construction-time options (the
     /// native panel's launch section; the web demo restarts via URL).
     Relaunch {
@@ -395,6 +416,11 @@ pub struct App {
     /// Chime flash intensity per stroke id, decayed each frame;
     /// presentational state, so it lives here and not in the sim.
     wall_flash: HashMap<u32, f32>,
+    /// The inspected emitter or wall stroke, if any; presentational
+    /// state like `wall_flash`. A frame sweep drops it when its id dies.
+    selection: Option<Selection>,
+    /// D is held: the next left click selects instead of bursting.
+    d_down: bool,
     shift_down: bool,
     time_scale: f64,
     bullet_time: BulletTime,
@@ -451,6 +477,8 @@ impl App {
             emitter_anchor: None,
             wall_stroke_open: false,
             wall_flash: HashMap::new(),
+            selection: None,
+            d_down: false,
             shift_down: false,
             time_scale: 1.0,
             cursor: CursorState::new(),
@@ -549,6 +577,17 @@ impl App {
             *v *= decay;
             *v > 0.02
         });
+        // Selection sweep: an id that died this frame (clear-all, reset,
+        // Shift+V/U) drops the selection with it.
+        if let Some(sel) = self.selection {
+            let alive = match sel {
+                Selection::Emitter(id) => sim.emitter(id).is_some(),
+                Selection::WallStroke(id) => sim.stroke_segment_count(id) > 0,
+            };
+            if !alive {
+                self.selection = None;
+            }
+        }
         if events.explosion_started {
             self.audio.play_explosion();
             self.bullet_time.trigger(now);
@@ -642,6 +681,7 @@ impl App {
                 "G hold: gravity well (Shift+G repels)",
                 "W pin well (Shift+W repel, Shift+R clear)",
                 "V hold+drag: draw walls (Shift+V clears)",
+                "D hold+click: select emitter/wall (Esc deselects)",
                 "J comet   O screenshot   E export scene",
                 "Click: burst   Middle: comet   Right-click: explosion",
                 "H cycle HUD   Space/Esc/Q quit",
@@ -685,6 +725,7 @@ impl App {
             .collect();
         let stopped = sim.stopped();
         let paused = self.paused;
+        let selection = self.selection;
         let capture = self.screenshot_requested;
         self.screenshot_requested = false;
 
@@ -701,6 +742,20 @@ impl App {
             render_wells(frame, sim.pinned_wells(), width, height);
             render_segments(frame, sim.wall_segments(), &wall_flash, width, height);
             render_emitters(frame, sim.emitters(), width, height);
+            // Selection highlight: a dedicated amber pass over the flash
+            // pass (a flash-vector sentinel would be ambiguous mid-chime).
+            match selection {
+                Some(Selection::WallStroke(id)) => {
+                    let mask: Vec<bool> = sim.wall_meta().iter().map(|m| m.stroke == id).collect();
+                    render_stroke_highlight(frame, sim.wall_segments(), &mask, width, height);
+                }
+                Some(Selection::Emitter(id)) => {
+                    if let Some(e) = sim.emitter(id) {
+                        render_emitter_highlight(frame, e, width, height);
+                    }
+                }
+                None => {}
+            }
             render_particles(
                 frame,
                 sim.particles(),
@@ -938,6 +993,60 @@ impl App {
                     sim.place_emitter(x, y, dx, dy, EMITTER_DEFAULT_RATE, EMITTER_DEFAULT_CAP);
                 }
             }
+            PanelCommand::SelectAt(x, y) => {
+                self.selection = self
+                    .sim
+                    .as_ref()
+                    .and_then(|sim| sim.select_at(x, y, SELECT_RADIUS));
+            }
+            PanelCommand::Deselect => self.selection = None,
+            PanelCommand::SetEmitterRate(id, rate) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.set_emitter_rate(id, rate);
+                }
+            }
+            PanelCommand::SetEmitterCap(id, cap) => {
+                if let Some(ref mut sim) = self.sim {
+                    sim.set_emitter_cap(id, usize::try_from(cap).unwrap_or(1));
+                }
+            }
+            PanelCommand::AimEmitterAt(id, x, y) => {
+                if let Some(ref mut sim) = self.sim
+                    && let Some(e) = sim.emitter(id)
+                {
+                    let (dx, dy) = (x - e.x, y - e.y);
+                    sim.aim_emitter(id, dx, dy);
+                }
+            }
+            PanelCommand::CycleStrokeNote(id) => {
+                if let Some(ref mut sim) = self.sim
+                    && let Some(note) = sim.stroke_note_setting(id)
+                {
+                    sim.set_stroke_note(id, note.cycled());
+                }
+            }
+            PanelCommand::DeleteEmitter(id) => {
+                if let Some(ref mut sim) = self.sim
+                    && sim.remove_emitter(id)
+                {
+                    println!("Deleted emitter {id}");
+                }
+                if self.selection == Some(Selection::Emitter(id)) {
+                    self.selection = None;
+                }
+            }
+            PanelCommand::DeleteStroke(id) => {
+                if let Some(ref mut sim) = self.sim {
+                    let removed = sim.remove_stroke(id);
+                    if removed > 0 {
+                        println!("Deleted wall stroke {id} ({removed} segments)");
+                    }
+                }
+                self.wall_flash.remove(&id);
+                if self.selection == Some(Selection::WallStroke(id)) {
+                    self.selection = None;
+                }
+            }
             #[cfg(not(target_arch = "wasm32"))]
             PanelCommand::Relaunch {
                 preset,
@@ -1033,6 +1142,9 @@ impl App {
                 self.bullet_time.enabled = self.config.bullet_time;
                 self.time_scale = 1.0;
                 self.paused = false;
+                // Ids restart with the new simulation; a stale selection
+                // could silently alias a fresh entity.
+                self.selection = None;
                 self.sim = Some(Simulation::new(&self.config, width, height));
                 // ...and then the session's touched settings reassert
                 // themselves over the new bundle.
@@ -1178,6 +1290,27 @@ impl App {
             launch_initial_speed: self.config.initial_speed,
             launch_min_particles: self.config.min_particles,
             launch_preset: self.config.preset.clone().unwrap_or_default(),
+            // Pulled fresh by id: a dead id yields None here even before
+            // the frame sweep drops the selection.
+            selection: self.selection.and_then(|sel| match sel {
+                Selection::Emitter(id) => {
+                    sim.emitter(id)
+                        .map(|e| crate::gui::PanelSelection::Emitter {
+                            id,
+                            rate: e.rate,
+                            cap: e.cap,
+                            angle_deg: e.dx.atan2(-e.dy).to_degrees().rem_euclid(360.0),
+                        })
+                }
+                Selection::WallStroke(id) => {
+                    sim.stroke_note_setting(id)
+                        .map(|note| crate::gui::PanelSelection::Stroke {
+                            id,
+                            segments: sim.stroke_segment_count(id),
+                            note,
+                        })
+                }
+            }),
         }
     }
 
@@ -1191,6 +1324,39 @@ impl App {
             return;
         };
         let scene_toml = self.scene_toml();
+        // Pulled fresh by id, like the native panel: a dead id publishes
+        // all-None even before the frame sweep drops the selection.
+        let mut selection_kind = None;
+        let mut selection_id = None;
+        let mut selection_rate = None;
+        let mut selection_cap = None;
+        let mut selection_angle = None;
+        let mut selection_note = None;
+        let mut selection_segments = None;
+        match self.selection {
+            Some(Selection::Emitter(id)) => {
+                if let Some(e) = sim.emitter(id) {
+                    selection_kind = Some("emitter".to_string());
+                    selection_id = Some(id);
+                    selection_rate = Some(e.rate);
+                    selection_cap = Some(e.cap);
+                    selection_angle = Some(e.dx.atan2(-e.dy).to_degrees().rem_euclid(360.0));
+                }
+            }
+            Some(Selection::WallStroke(id)) => {
+                if let Some(note) = sim.stroke_note_setting(id) {
+                    selection_kind = Some("stroke".to_string());
+                    selection_id = Some(id);
+                    selection_note = Some(match note {
+                        crate::presets::WallNote::Auto => "auto".to_string(),
+                        crate::presets::WallNote::Note(n) => format!("degree {n}"),
+                        crate::presets::WallNote::Silent => "silent".to_string(),
+                    });
+                    selection_segments = Some(sim.stroke_segment_count(id));
+                }
+            }
+            None => {}
+        }
         let mut shared = shared.borrow_mut();
         shared.snapshot = crate::web::Snapshot {
             fps: self.fps.current,
@@ -1223,6 +1389,13 @@ impl App {
             spawn_mode: value_name(sim.spawn_mode.to_possible_value()),
             color_mode: value_name(self.color_mode.to_possible_value()),
             hud: self.hud_mode.label().to_string(),
+            selection_kind,
+            selection_id,
+            selection_rate,
+            selection_cap,
+            selection_angle,
+            selection_note,
+            selection_segments,
         };
         shared.scene_toml = scene_toml;
     }
@@ -1246,6 +1419,9 @@ impl App {
             if key_code == KeyCode::KeyV {
                 self.wall_anchor = None;
             }
+            if key_code == KeyCode::KeyD {
+                self.d_down = false;
+            }
             if key_code == KeyCode::KeyU
                 && let Some((ax, ay)) = self.emitter_anchor.take()
             {
@@ -1264,7 +1440,13 @@ impl App {
             // exit — you are mid-gesture, not asking to leave.
             #[cfg(not(target_arch = "wasm32"))]
             KeyCode::Escape if self.gui.is_armed() => self.gui.disarm(),
+            // ...and drops a selection before that: back out of the
+            // inspector first, exit on the next press.
+            KeyCode::Escape if self.selection.is_some() => self.selection = None,
             KeyCode::Space | KeyCode::Escape | KeyCode::KeyQ => event_loop.exit(),
+            // D arms select-on-click while held (not a winit modifier,
+            // so it is tracked by hand on both key edges).
+            KeyCode::KeyD => self.d_down = true,
             KeyCode::KeyG => {
                 // A stopped simulation self-wakes while the well is held.
                 self.held_well = Some(shift_polarity);
@@ -2005,6 +2187,12 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                // Held D turns the click into a pick: it must never fall
+                // through and burst (a miss deselects instead).
+                if button == MouseButton::Left && self.d_down {
+                    self.apply_panel_command(PanelCommand::SelectAt(self.cursor.x, self.cursor.y));
+                    return;
+                }
                 self.handle_mouse(button);
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -2429,5 +2617,111 @@ mod tests {
         assert!(cursor_should_be_visible(true, true, true, idle)); // well held or wall drawing
         assert!(cursor_should_be_visible(false, true, false, idle)); // unfocused
         assert!(cursor_should_be_visible(true, false, false, idle)); // outside window
+    }
+
+    #[test]
+    fn select_click_sets_and_empty_click_clears_selection() {
+        let mut app = test_app();
+        {
+            let sim = app.sim.as_mut().unwrap();
+            assert!(sim.place_emitter(100.0, 100.0, 1.0, 0.0, 2.0, 12));
+        }
+        let id = app.sim.as_ref().unwrap().emitters()[0].id;
+        app.apply_panel_command(PanelCommand::SelectAt(103.0, 100.0));
+        assert_eq!(app.selection, Some(Selection::Emitter(id)));
+        // A miss deselects — and select mode never bursts.
+        let before = app.sim.as_ref().unwrap().particle_count();
+        app.apply_panel_command(PanelCommand::SelectAt(700.0, 500.0));
+        assert_eq!(app.selection, None);
+        assert_eq!(
+            app.sim.as_ref().unwrap().particle_count(),
+            before,
+            "no burst from a select-mode miss"
+        );
+        app.apply_panel_command(PanelCommand::Deselect);
+        assert_eq!(app.selection, None);
+    }
+
+    #[test]
+    fn delete_commands_clear_their_selection_and_flash() {
+        let mut app = test_app();
+        {
+            let sim = app.sim.as_mut().unwrap();
+            assert!(sim.place_emitter(100.0, 100.0, 1.0, 0.0, 2.0, 12));
+            assert!(sim.add_wall_segment(200.0, 300.0, 300.0, 300.0));
+        }
+        let eid = app.sim.as_ref().unwrap().emitters()[0].id;
+        let stroke = app.sim.as_ref().unwrap().wall_meta()[0].stroke;
+
+        app.selection = Some(Selection::Emitter(eid));
+        app.apply_panel_command(PanelCommand::DeleteEmitter(eid));
+        assert_eq!(
+            app.selection, None,
+            "deleting the inspected emitter deselects"
+        );
+        assert!(app.sim.as_ref().unwrap().emitters().is_empty());
+
+        app.selection = Some(Selection::WallStroke(stroke));
+        app.wall_flash.insert(stroke, 1.0);
+        app.apply_panel_command(PanelCommand::DeleteStroke(stroke));
+        assert_eq!(
+            app.selection, None,
+            "deleting the inspected stroke deselects"
+        );
+        assert!(app.sim.as_ref().unwrap().wall_segments().is_empty());
+        assert!(
+            app.wall_flash.is_empty(),
+            "flash entry dies with the stroke"
+        );
+    }
+
+    #[test]
+    fn selection_sweep_drops_dead_ids_at_the_next_frame() {
+        let mut app = test_app();
+        {
+            let sim = app.sim.as_mut().unwrap();
+            assert!(sim.add_wall_segment(200.0, 300.0, 300.0, 300.0));
+        }
+        let stroke = app.sim.as_ref().unwrap().wall_meta()[0].stroke;
+        app.selection = Some(Selection::WallStroke(stroke));
+        // A clear-all bypasses the delete commands' own deselect...
+        app.apply(Command::ClearWalls);
+        // ...so the per-frame sweep catches the dead id.
+        app.simulate(0.016, Instant::now());
+        assert_eq!(app.selection, None, "dead id swept at the next frame");
+    }
+
+    #[test]
+    fn aim_emitter_at_points_the_stream_at_the_click() {
+        let mut app = test_app();
+        {
+            let sim = app.sim.as_mut().unwrap();
+            assert!(sim.place_emitter(100.0, 100.0, 0.0, -1.0, 2.0, 12));
+        }
+        let id = app.sim.as_ref().unwrap().emitters()[0].id;
+        app.apply_panel_command(PanelCommand::AimEmitterAt(id, 300.0, 100.0));
+        let e = *app.sim.as_ref().unwrap().emitter(id).unwrap();
+        assert!(
+            (e.dx - 1.0).abs() < 1e-9 && e.dy.abs() < 1e-9,
+            "aimed from the emitter toward the click"
+        );
+        // A dead id is a no-op, never a panic.
+        app.apply_panel_command(PanelCommand::AimEmitterAt(id + 1, 0.0, 0.0));
+    }
+
+    #[test]
+    fn cycle_stroke_note_steps_the_setting() {
+        let mut app = test_app();
+        {
+            let sim = app.sim.as_mut().unwrap();
+            assert!(sim.add_wall_segment(200.0, 300.0, 300.0, 300.0));
+        }
+        let stroke = app.sim.as_ref().unwrap().wall_meta()[0].stroke;
+        app.apply_panel_command(PanelCommand::CycleStrokeNote(stroke));
+        assert_eq!(
+            app.sim.as_ref().unwrap().stroke_note_setting(stroke),
+            Some(crate::presets::WallNote::Note(0)),
+            "Auto steps to the first pinned degree"
+        );
     }
 }

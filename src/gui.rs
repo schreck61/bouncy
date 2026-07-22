@@ -19,6 +19,7 @@
 //! hit-testing and pixels can never disagree.
 
 use crate::app::{Command, PanelCommand};
+use crate::presets::WallNote;
 use crate::sim::Polarity;
 use crate::text::draw_text;
 
@@ -68,6 +69,12 @@ const SIZE_POINTS: &[(f64, f64)] = &[(0.5, 0.0), (10.0, 1.0)];
 const SPEED_POINTS: &[(f64, f64)] = &[(10.0, 0.0), (1000.0, 0.75), (2000.0, 1.0)];
 /// 0 means "auto" (sized from the window), drawn as such.
 const MIN_PARTICLES_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 1.0)];
+/// Inspector sliders for the selected emitter. Musical rates (a few
+/// notes a second) get most of the track; machine-gun speeds compress
+/// into the top fifth. Bounds match the scene TOML validation.
+const EMITTER_RATE_POINTS: &[(f64, f64)] = &[(0.1, 0.0), (5.0, 0.7), (20.0, 1.0)];
+/// Everyday caps (a hand of live particles) get most of the track.
+const EMITTER_CAP_POINTS: &[(f64, f64)] = &[(1.0, 0.0), (30.0, 0.7), (200.0, 1.0)];
 /// Built-in presets the launch section cycles through; index 0 is
 /// "none". Derived from the preset enum itself — the same source the
 /// web panel's dropdown uses — so the list can never drift.
@@ -97,6 +104,10 @@ pub enum SliderId {
     LaunchSize,
     LaunchSpeed,
     LaunchMinParticles,
+    /// Inspector: the selected emitter's emission rate.
+    EmitterRate,
+    /// Inspector: the selected emitter's live-particle cap.
+    EmitterCap,
 }
 
 /// Identity of an on/off row.
@@ -134,6 +145,32 @@ pub enum ButtonId {
     ExportScene,
     CyclePreset,
     Relaunch,
+    /// Arms select-on-click, the panel twin of hold-D.
+    Select,
+    /// Arms re-aim: the next arena click points the selected emitter.
+    ReAim,
+    /// Steps the selected stroke's note: Auto → degrees → Silent.
+    CycleStrokeNote,
+    /// Deletes the selected entity (either kind).
+    DeleteSelected,
+}
+
+/// The selected entity's live values, pulled fresh by id each frame so
+/// the inspector can never show a dead or stale entity.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum PanelSelection {
+    Emitter {
+        id: u32,
+        rate: f64,
+        cap: usize,
+        /// Aim as compass degrees (0 = up), the scene-export convention.
+        angle_deg: f64,
+    },
+    Stroke {
+        id: u32,
+        segments: usize,
+        note: WallNote,
+    },
 }
 
 /// Everything the panel shows or edits, snapshotted once per frame by
@@ -170,6 +207,8 @@ pub struct PanelState {
     pub launch_initial_speed: f64,
     pub launch_min_particles: Option<u32>,
     pub launch_preset: String,
+    /// The inspected entity, if any (None hides the selected section).
+    pub selection: Option<PanelSelection>,
 }
 
 /// An axis-aligned rectangle in frame coordinates.
@@ -293,6 +332,10 @@ pub struct Gui {
     /// arena click places it (web-panel semantics; a second press or
     /// Esc cancels).
     armed: Option<ButtonId>,
+    /// The emitter the armed Re-aim tool will point, captured when the
+    /// tool arms — `place_armed` has no `PanelState` to consult, and the
+    /// selection could change between arm and click.
+    reaim_target: Option<u32>,
     /// Pending launch options; seeded from the config on first tick.
     launch: LaunchDraft,
     launch_seeded: bool,
@@ -316,6 +359,7 @@ impl Default for Gui {
             handle_grab_x: 0.0,
             handle_moved: false,
             armed: None,
+            reaim_target: None,
             launch: LaunchDraft::default(),
             launch_seeded: false,
         }
@@ -349,6 +393,7 @@ impl Gui {
     /// Cancel the armed placement tool (Esc, or the app's discretion).
     pub fn disarm(&mut self) {
         self.armed = None;
+        self.reaim_target = None;
     }
 
     /// The relaunch command carrying the current draft: only fields the
@@ -390,6 +435,8 @@ impl Gui {
             ButtonId::PinWell => PanelCommand::PinWell(x, y, Polarity::Attract),
             ButtonId::PinRepeller => PanelCommand::PinWell(x, y, Polarity::Repel),
             ButtonId::PlaceEmitter => PanelCommand::PlaceEmitter(x, y),
+            ButtonId::Select => PanelCommand::SelectAt(x, y),
+            ButtonId::ReAim => PanelCommand::AimEmitterAt(self.reaim_target.take()?, x, y),
             // Non-placement ids never arm.
             _ => return None,
         })
@@ -616,6 +663,25 @@ impl Gui {
                             self.launch.min_particles = snapped.round();
                             self.launch.min_touched = true;
                         }
+                        // Inspector sliders carry the selected id; a
+                        // selection that died mid-drag emits nothing.
+                        SliderId::EmitterRate => {
+                            if let Some(PanelSelection::Emitter { id, .. }) = state.selection {
+                                let rate = (snapped * 10.0).round() / 10.0;
+                                if (rate - value).abs() > 1e-9 {
+                                    commands.push(PanelCommand::SetEmitterRate(id, rate));
+                                }
+                            }
+                        }
+                        SliderId::EmitterCap => {
+                            if let Some(PanelSelection::Emitter { id, .. }) = state.selection {
+                                #[allow(clippy::cast_possible_truncation)]
+                                let cap = snapped.round() as i32;
+                                if (f64::from(cap) - value).abs() > 1e-9 {
+                                    commands.push(PanelCommand::SetEmitterCap(id, cap));
+                                }
+                            }
+                        }
                         _ => {
                             if (snapped - value).abs() > 1e-9 {
                                 commands.push(slider_command(drag, snapped));
@@ -638,11 +704,33 @@ impl Gui {
                     if is_placement(pressed) {
                         // Arm (or, pressed again, cancel) the one-shot
                         // placement tool — the arena click does the work.
-                        self.armed = if self.armed == Some(pressed) {
-                            None
+                        // Re-aim captures its target now: the selection
+                        // could change between arm and click.
+                        if self.armed == Some(pressed) {
+                            self.disarm();
+                        } else if pressed == ButtonId::ReAim {
+                            if let Some(PanelSelection::Emitter { id, .. }) = state.selection {
+                                self.armed = Some(pressed);
+                                self.reaim_target = Some(id);
+                            }
                         } else {
-                            Some(pressed)
-                        };
+                            self.armed = Some(pressed);
+                            self.reaim_target = None;
+                        }
+                    } else if pressed == ButtonId::DeleteSelected {
+                        match state.selection {
+                            Some(PanelSelection::Emitter { id, .. }) => {
+                                commands.push(PanelCommand::DeleteEmitter(id));
+                            }
+                            Some(PanelSelection::Stroke { id, .. }) => {
+                                commands.push(PanelCommand::DeleteStroke(id));
+                            }
+                            None => {}
+                        }
+                    } else if pressed == ButtonId::CycleStrokeNote {
+                        if let Some(PanelSelection::Stroke { id, .. }) = state.selection {
+                            commands.push(PanelCommand::CycleStrokeNote(id));
+                        }
                     } else if pressed == ButtonId::CyclePreset {
                         self.launch.preset_idx =
                             (self.launch.preset_idx + 1) % preset_names().len();
@@ -1169,6 +1257,7 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
     );
 
     push_item(&mut out, x, w, Item::Header("actions"), 24.0, &mut y);
+    button_row(&mut out, &[(ButtonId::Select, "Select")], x, w, &mut y);
     button_row(
         &mut out,
         &[(ButtonId::Burst, "Burst"), (ButtonId::Comet, "Comet")],
@@ -1223,6 +1312,90 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         w,
         &mut y,
     );
+
+    if let Some(sel) = state.selection {
+        push_item(&mut out, x, w, Item::Header("selected"), 24.0, &mut y);
+        match sel {
+            PanelSelection::Emitter {
+                id,
+                rate,
+                cap,
+                angle_deg,
+            } => {
+                push_item(
+                    &mut out,
+                    x,
+                    w,
+                    Item::Readout(format!("Emitter #{id}   aim {angle_deg:.0}°")),
+                    17.0,
+                    &mut y,
+                );
+                push_slider(
+                    &mut out,
+                    x,
+                    w,
+                    SliderId::EmitterRate,
+                    "Rate",
+                    EMITTER_RATE_POINTS,
+                    rate,
+                    &[2.0],
+                    format!("{rate:.1}/s"),
+                    &mut y,
+                );
+                #[allow(clippy::cast_precision_loss)]
+                push_slider(
+                    &mut out,
+                    x,
+                    w,
+                    SliderId::EmitterCap,
+                    "Cap",
+                    EMITTER_CAP_POINTS,
+                    cap as f64,
+                    &[12.0],
+                    format!("{cap} live"),
+                    &mut y,
+                );
+                button_row(
+                    &mut out,
+                    &[
+                        (ButtonId::ReAim, "Re-aim"),
+                        (ButtonId::DeleteSelected, "Delete"),
+                    ],
+                    x,
+                    w,
+                    &mut y,
+                );
+            }
+            PanelSelection::Stroke { id, segments, note } => {
+                let plural = if segments == 1 { "" } else { "s" };
+                push_item(
+                    &mut out,
+                    x,
+                    w,
+                    Item::Readout(format!("Wall #{id}   {segments} segment{plural}")),
+                    17.0,
+                    &mut y,
+                );
+                button_row(
+                    &mut out,
+                    &[(
+                        ButtonId::CycleStrokeNote,
+                        &format!("Note: {}", note_label(note)),
+                    )],
+                    x,
+                    w,
+                    &mut y,
+                );
+                button_row(
+                    &mut out,
+                    &[(ButtonId::DeleteSelected, "Delete")],
+                    x,
+                    w,
+                    &mut y,
+                );
+            }
+        }
+    }
 
     push_item(&mut out, x, w, Item::Header("launch"), 24.0, &mut y);
     button_row(
@@ -1486,10 +1659,22 @@ fn slider_command(id: SliderId, value: f64) -> PanelCommand {
         SliderId::LaunchSize | SliderId::LaunchSpeed | SliderId::LaunchMinParticles => {
             unreachable!("launch sliders edit the draft; Apply & relaunch emits")
         }
+        SliderId::EmitterRate | SliderId::EmitterCap => {
+            unreachable!("inspector sliders emit id-carrying commands in the drag arm")
+        }
     }
 }
 
-/// The five buttons that arm a one-shot placement tool.
+/// The chime-note label the stroke inspector shows.
+fn note_label(note: WallNote) -> String {
+    match note {
+        WallNote::Auto => "auto".to_string(),
+        WallNote::Note(n) => format!("degree {n}"),
+        WallNote::Silent => "silent".to_string(),
+    }
+}
+
+/// The buttons that arm a one-shot placement tool.
 fn is_placement(id: ButtonId) -> bool {
     matches!(
         id,
@@ -1499,6 +1684,8 @@ fn is_placement(id: ButtonId) -> bool {
             | ButtonId::PinWell
             | ButtonId::PinRepeller
             | ButtonId::PlaceEmitter
+            | ButtonId::Select
+            | ButtonId::ReAim
     )
 }
 
@@ -1511,6 +1698,8 @@ fn placement_label(id: ButtonId) -> &'static str {
         ButtonId::PinWell => "click to pin well",
         ButtonId::PinRepeller => "click to pin repeller",
         ButtonId::PlaceEmitter => "click to place emitter (aims at center)",
+        ButtonId::Select => "click an emitter or wall to select",
+        ButtonId::ReAim => "click to aim the emitter",
         _ => "",
     }
 }
@@ -1535,6 +1724,10 @@ fn button_command(id: ButtonId, state: &PanelState) -> PanelCommand {
         | ButtonId::PinWell
         | ButtonId::PinRepeller
         | ButtonId::PlaceEmitter
+        | ButtonId::Select
+        | ButtonId::ReAim
+        | ButtonId::CycleStrokeNote
+        | ButtonId::DeleteSelected
         | ButtonId::CyclePreset
         | ButtonId::Relaunch => {
             unreachable!("handled draft-side before dispatch")
@@ -1967,6 +2160,163 @@ mod tests {
             placement_label(ButtonId::PlaceEmitter),
             "click to place emitter (aims at center)"
         );
+    }
+
+    /// Press and release a button by id, returning the release tick's
+    /// commands.
+    fn click_button(gui: &mut Gui, s: &PanelState, id: ButtonId) -> Vec<PanelCommand> {
+        let hit = layout(s, &gui.launch, 800.0 - PANEL_WIDTH, 0.0)
+            .0
+            .iter()
+            .find_map(|laid| match &laid.item {
+                Item::Button { id: bid, hit, .. } if *bid == id => Some(*hit),
+                _ => None,
+            })
+            .expect("button in layout");
+        gui.set_cursor(hit.x + 2.0, hit.y + 2.0);
+        gui.input.pressed = true;
+        gui.tick(0.016, s, 800, 600, false, 0.0);
+        gui.input.released = true;
+        gui.tick(0.016, s, 800, 600, false, 0.0)
+    }
+
+    fn emitter_selected() -> PanelState {
+        PanelState {
+            selection: Some(PanelSelection::Emitter {
+                id: 3,
+                rate: 2.0,
+                cap: 12,
+                angle_deg: 90.0,
+            }),
+            ..state()
+        }
+    }
+
+    fn stroke_selected() -> PanelState {
+        PanelState {
+            selection: Some(PanelSelection::Stroke {
+                id: 5,
+                segments: 4,
+                note: WallNote::Auto,
+            }),
+            ..state()
+        }
+    }
+
+    #[test]
+    fn inspector_rows_appear_only_with_a_selection() {
+        let has = |s: &PanelState, want_slider: Option<SliderId>, want_button: Option<ButtonId>| {
+            let (items, _) = layout(s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0);
+            items.iter().any(|laid| match &laid.item {
+                Item::Slider { id, .. } => Some(*id) == want_slider,
+                Item::Button { id, .. } => Some(*id) == want_button,
+                _ => false,
+            })
+        };
+        let none = state();
+        assert!(!has(&none, Some(SliderId::EmitterRate), None));
+        assert!(!has(&none, None, Some(ButtonId::DeleteSelected)));
+        assert!(!has(&none, None, Some(ButtonId::CycleStrokeNote)));
+        assert!(
+            has(&none, None, Some(ButtonId::Select)),
+            "tool always shown"
+        );
+
+        let emitter = emitter_selected();
+        assert!(has(&emitter, Some(SliderId::EmitterRate), None));
+        assert!(has(&emitter, Some(SliderId::EmitterCap), None));
+        assert!(has(&emitter, None, Some(ButtonId::ReAim)));
+        assert!(has(&emitter, None, Some(ButtonId::DeleteSelected)));
+        assert!(!has(&emitter, None, Some(ButtonId::CycleStrokeNote)));
+
+        let stroke = stroke_selected();
+        assert!(!has(&stroke, Some(SliderId::EmitterRate), None));
+        assert!(has(&stroke, None, Some(ButtonId::CycleStrokeNote)));
+        assert!(has(&stroke, None, Some(ButtonId::DeleteSelected)));
+        assert!(!has(&stroke, None, Some(ButtonId::ReAim)));
+    }
+
+    #[test]
+    fn rate_drag_emits_an_id_carrying_command() {
+        let mut gui = open_gui();
+        let s = emitter_selected();
+        let track = find_slider_track(&s, SliderId::EmitterRate);
+        gui.set_cursor(track.x + track.w / 2.0, track.y + 2.0);
+        gui.input.pressed = true;
+        gui.tick(0.016, &s, 800, 600, false, 0.0);
+        // A live drag tracks the cursor past the track end: clamps to
+        // the top of the range.
+        gui.set_cursor(track.x + track.w + 20.0, track.y + 2.0);
+        let cmds = gui.tick(0.016, &s, 800, 600, false, 0.0);
+        assert!(
+            cmds.iter().any(|c| matches!(c,
+                PanelCommand::SetEmitterRate(3, v) if (v - 20.0).abs() < 1e-9)),
+            "right end of the rate track, addressed to the selected id"
+        );
+        // The selection dying mid-drag stops the stream, no panic.
+        gui.set_cursor(track.x + track.w / 2.0, track.y + 2.0);
+        let cmds = gui.tick(0.016, &state(), 800, 600, false, 0.0);
+        assert!(cmds.is_empty(), "no selection, no command");
+    }
+
+    #[test]
+    fn delete_button_emits_the_selected_kind() {
+        let mut gui = open_gui();
+        let cmds = click_button(&mut gui, &emitter_selected(), ButtonId::DeleteSelected);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::DeleteEmitter(3))),
+            "emitter selection deletes the emitter"
+        );
+        let cmds = click_button(&mut gui, &stroke_selected(), ButtonId::DeleteSelected);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::DeleteStroke(5))),
+            "stroke selection deletes the stroke"
+        );
+    }
+
+    #[test]
+    fn note_button_emits_the_cycle_command() {
+        let mut gui = open_gui();
+        let cmds = click_button(&mut gui, &stroke_selected(), ButtonId::CycleStrokeNote);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::CycleStrokeNote(5)))
+        );
+    }
+
+    #[test]
+    fn select_tool_arms_and_emits_select_at() {
+        let mut gui = open_gui();
+        let cmds = click_button(&mut gui, &state(), ButtonId::Select);
+        assert!(cmds.is_empty(), "arming emits nothing");
+        assert!(gui.is_armed());
+        let placed = gui.place_armed(240.0, 180.0);
+        assert!(matches!(placed, Some(PanelCommand::SelectAt(x, y))
+                if (x - 240.0).abs() < 1e-9 && (y - 180.0).abs() < 1e-9));
+        assert!(!gui.is_armed());
+    }
+
+    #[test]
+    fn reaim_carries_the_arm_time_id() {
+        let mut gui = open_gui();
+        let cmds = click_button(&mut gui, &emitter_selected(), ButtonId::ReAim);
+        assert!(cmds.is_empty(), "arming emits nothing");
+        assert!(gui.is_armed());
+        assert_eq!(gui.reaim_target, Some(3), "target captured at arm time");
+        // Even if the selection has changed by click time, the armed
+        // tool aims the emitter it was armed for.
+        let placed = gui.place_armed(400.0, 300.0);
+        assert!(matches!(placed, Some(PanelCommand::AimEmitterAt(3, x, y))
+                if (x - 400.0).abs() < 1e-9 && (y - 300.0).abs() < 1e-9));
+        assert_eq!(gui.reaim_target, None, "target consumed");
+
+        // Esc-style disarm clears the captured target too.
+        click_button(&mut gui, &emitter_selected(), ButtonId::ReAim);
+        assert_eq!(gui.reaim_target, Some(3));
+        gui.disarm();
+        assert_eq!(gui.reaim_target, None);
     }
 
     #[test]

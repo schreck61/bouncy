@@ -4,6 +4,20 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Inspector — select and edit a single emitter or wall stroke, on both
+  shells. Hold `D` and click an entity (or arm the new panel Select
+  tool), and it lights up with an amber highlight: emitters get
+  rate/cap sliders, a Re-aim tool (click where the stream should
+  point), and Delete; wall strokes get a chime-note cycle (auto → each
+  pentatonic degree → silent) and Delete — the first way to remove one
+  wall or emitter instead of clearing them all. Esc or a click on
+  empty space deselects; a click in select mode never spawns a burst.
+  Deleting an emitter leaves its particles flying. Natively, Esc now
+  backs out in steps — armed tool, then selection, then exit — so
+  leaving the app can take an extra press while inspecting.
+
 ## 1.9.0 — 2026-07-21
 
 - Emitters — the instrument's sequencer clock (roadmap rung 3): pinned

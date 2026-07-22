@@ -488,6 +488,10 @@ pub const CONTROLS: &[(&str, &str)] = &[
         "Place an emitter; the drag aims it (a tap aims at the center)",
     ),
     ("Shift+U", "Clear all emitters"),
+    (
+        "D (hold) + click",
+        "Select an emitter or wall stroke to edit (Esc or empty click deselects)",
+    ),
     ("O", "Save a screenshot (PNG in the working directory)"),
     (
         "E",
