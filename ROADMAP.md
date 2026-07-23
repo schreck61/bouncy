@@ -81,7 +81,9 @@ file only tracks what's ahead.
   (measured right on wasm too, once the pool is capped) with a
   `?par-threshold=N` override; the web pool
   caps at 8 workers (`?threads=N` overrides); the collision sweep
-  dispatches in row chunks (4x workers) instead of per-row; and the
+  dispatches in occupancy-balanced row chunks (cut by the grid's CSR
+  offsets since 1.16.1 — equal-row cuts starved the pool on clumped
+  scenes) instead of per-row; and the
   present path is a WebGL2 textured blit — direct texture upload from
   shared wasm memory, `?cpu` keeps Canvas2D as the escape hatch. The
   ROADMAP's old "hoist the fan-out to one dispatch per frame" idea was

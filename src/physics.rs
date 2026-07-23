@@ -694,9 +694,10 @@ impl SpatialGrid {
     }
 }
 
-/// Parallel tasks per fan-out dispatch: a few per worker so stealing
-/// can balance uneven units (dense clumps concentrate contacts in few
-/// grid rows) without the dispatch allocating O(units) intermediates.
+/// Parallel tasks per fan-out dispatch: a few per worker, so work
+/// stealing can smooth what the occupancy-balanced cuts (see
+/// `balanced_row_chunks`) leave uneven, without the dispatch
+/// allocating O(units) intermediates.
 fn dispatch_task_count(units: usize) -> usize {
     rayon::current_num_threads()
         .saturating_mul(4)
