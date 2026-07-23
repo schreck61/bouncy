@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.16.1 — 2026-07-23
 
 - Fixed: 1.16.0's chunked collision dispatch cut chunks by row count,
   which starved the thread pool when the population clumps into a few
