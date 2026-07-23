@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.16.0 — 2026-07-23
 
 - **Web performance round.** Four coordinated changes, plus the
   instrument to judge them:
