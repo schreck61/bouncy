@@ -426,16 +426,20 @@ The application uses the modern `winit` 0.30 `ApplicationHandler` pattern, split
 - `color.rs` - HSV/RGBA color conversion helpers
 - `app.rs` - Application shell: input handling, HUD, audio dispatch, and event loop glue around the simulation core
 - `sim.rs` - The headless simulation core: particles, spawning, explosions, and their orchestration. No windowing, rendering, or audio — the `App` layer owns those and drives this struct, which keeps every gameplay rule testable. **Every mechanic lands here, with unit tests.**
-- `physics.rs` - Particles, collisions, spatial grid, substepping
+- `physics.rs` - Particles, collisions, spatial grid, substepping (the collision sweep and Barnes-Hut force pass fan out across threads above a tunable population threshold)
 - `explosion.rs` - Expanding-ring explosion mechanics
-- `render.rs` - `RenderContext` abstraction over GPU (pixels/wgpu) and CPU (softbuffer) backends, plus drawing routines
+- `render.rs` - `RenderContext` abstraction over GPU (pixels/wgpu) and CPU (softbuffer) backends natively, and WebGL2 with a Canvas2D fallback on the web, plus drawing routines
 - `audio.rs` - Synthesized sound with optional output device
+- `midi.rs` - MIDI out: the pure note scheduler plus the native (midir) and browser (WebMIDI) port shells
+- `capture.rs` - Chime capture: records the note stream and writes `.mid` + `.wav` (native)
+- `perf.rs` - The `--perf` overlay's rolling frame-phase timing windows
 - `text.rs` - Bitmap text rendering with the embedded font
+- `web.rs` - The WebAssembly shell: the JS control panel's command/snapshot mailbox around the same `App`
 
 Notable implementation details:
 
 - GPU backend uses `ouroboros` for safe self-referential struct (Pixels borrows from Window)
-- Automatic GPU-to-CPU fallback when GPU is unavailable; use `--cpu` to force CPU rendering
+- Automatic GPU-to-CPU fallback when GPU is unavailable (WebGL2 falls back to Canvas2D on the web the same way); use `--cpu` to force the CPU path on either shell
 - The CPU backend scales logical to physical pixels through precomputed nearest-neighbor lookup tables
 - Transient render failures (display sleep, mode changes) skip frames instead of crashing
 - Physics and rendering run in the main event loop, synchronized to VSync
@@ -454,7 +458,7 @@ Notable implementation details:
 cargo test
 ```
 
-Unit tests cover the collision model (momentum/energy conservation, restitution behavior), the spatial grid (validated against brute-force pair detection), explosion mechanics, argument parsing, text rendering, audio synthesis, and the headless simulation core — scenes and presets, emitters and quantize, chimes and MIDI scheduling, the panel command surface, and the divided-arena containment audit with its gated and note-filter variants.
+Unit tests cover the collision model (momentum/energy conservation, restitution behavior), the spatial grid (validated against brute-force pair detection), explosion mechanics, argument parsing, text rendering, audio synthesis, the parallel passes (bit-identical to serial for any thread or chunk count), the perf overlay's timing windows, and the headless simulation core — scenes and presets, emitters and quantize, chimes and MIDI scheduling, the panel command surface, and the divided-arena containment audit with its gated and note-filter variants.
 
 ## License
 
