@@ -16,6 +16,24 @@ use rayon::prelude::*;
 /// usual.
 const THREADS_AVAILABLE: bool = cfg!(any(not(target_arch = "wasm32"), feature = "web-threads"));
 
+/// Rayon fork-join dispatches since the last [`take_par_dispatches`]:
+/// the `--perf` overlay's dispatch metric. Incremented only on the
+/// actually-taken parallel branches; never read by physics, so
+/// determinism is untouched.
+static PAR_DISPATCHES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Note one fork-join dispatch (called at each parallel branch).
+#[inline]
+fn note_par_dispatch() {
+    PAR_DISPATCHES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Read and reset the dispatch counter — the shell calls this once per
+/// frame to attribute dispatches to frames.
+pub fn take_par_dispatches() -> u32 {
+    PAR_DISPATCHES.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 // Physics constants
 /// Downward acceleration (pixels/s²) at --gravity 100.
 pub const GRAVITY: f64 = 100.0;
@@ -347,10 +365,34 @@ pub struct SpatialGrid {
 /// until at most this many particles exceed the binning threshold.
 const MAX_OVERSIZED: usize = 64;
 
-/// Population size at which contact detection fans out across threads.
-/// Below this the whole sweep runs in microseconds and rayon's fork-join
-/// overhead would eat the gain.
-const COLLISION_PARALLEL_THRESHOLD: usize = 1024;
+/// Population size at which the two parallel passes (contact detection
+/// and the Barnes-Hut force pass) fan out across threads. Below it the
+/// work runs in microseconds and rayon's fork-join overhead would eat
+/// the gain. 1024 was measured natively AND confirmed on wasm with the
+/// `--perf` overlay (Chrome, 8-worker pool: parallel beat serial by
+/// ~27% at 1.3k particles and ~44% at 2.5k — the feared wasm fork-join
+/// penalty did not materialize once the pool was capped and dispatches
+/// chunked). `--par-threshold` overrides for other browsers/hardware.
+const PARALLEL_THRESHOLD_DEFAULT: usize = 1024;
+
+/// Runtime override of the fan-out threshold (0 = target default), set
+/// once at launch from `--par-threshold` — the browser A/B knob
+/// (`?par-threshold=N`) that needs no rebuild.
+static PAR_THRESHOLD: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Install the `--par-threshold` override (0 restores the default).
+pub fn set_parallel_threshold(n: usize) {
+    PAR_THRESHOLD.store(n, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The live fan-out threshold both parallel gates compare against.
+#[inline]
+fn parallel_threshold() -> usize {
+    match PAR_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => PARALLEL_THRESHOLD_DEFAULT,
+        n => n,
+    }
+}
 
 /// Forward half of the 3x3 neighborhood (plus the cell itself handled
 /// separately). Visiting only these from each cell yields every adjacent
@@ -560,16 +602,9 @@ impl SpatialGrid {
     /// serial.
     fn detect_contacts(&self, particles: &[Particle]) -> Vec<(u32, u32)> {
         let mut contacts: Vec<(u32, u32)> =
-            if THREADS_AVAILABLE && particles.len() >= COLLISION_PARALLEL_THRESHOLD {
-                (0..self.rows)
-                    .into_par_iter()
-                    .map(|cy| {
-                        let mut row = Vec::new();
-                        self.collect_row_contacts(cy, particles, &mut row);
-                        row
-                    })
-                    .collect::<Vec<_>>()
-                    .concat()
+            if THREADS_AVAILABLE && particles.len() >= parallel_threshold() {
+                note_par_dispatch();
+                self.detect_binned_contacts_chunked(particles, dispatch_task_count(self.rows))
             } else {
                 let mut all = Vec::new();
                 for cy in 0..self.rows {
@@ -597,6 +632,44 @@ impl SpatialGrid {
         }
         contacts
     }
+
+    /// The parallel row sweep, fanned out over `tasks` contiguous row
+    /// chunks instead of one task per row: one Vec allocation per chunk
+    /// (not per row) and bounded split depth per dispatch. Determinism:
+    /// every chunk covers a contiguous ascending row range, chunks are
+    /// collected in ascending chunk order, and `collect_row_contacts`
+    /// has a fixed within-row order — so the concatenated list is
+    /// byte-identical for ANY task count, and therefore any thread
+    /// count.
+    fn detect_binned_contacts_chunked(
+        &self,
+        particles: &[Particle],
+        tasks: usize,
+    ) -> Vec<(u32, u32)> {
+        let chunk = self.rows.div_ceil(tasks.max(1)).max(1);
+        (0..self.rows.div_ceil(chunk))
+            .into_par_iter()
+            .map(|c| {
+                let start = c * chunk;
+                let end = (start + chunk).min(self.rows);
+                let mut out = Vec::new();
+                for cy in start..end {
+                    self.collect_row_contacts(cy, particles, &mut out);
+                }
+                out
+            })
+            .collect::<Vec<_>>()
+            .concat()
+    }
+}
+
+/// Parallel tasks per fan-out dispatch: a few per worker so stealing
+/// can balance uneven units (dense clumps concentrate contacts in few
+/// grid rows) without the dispatch allocating O(units) intermediates.
+fn dispatch_task_count(units: usize) -> usize {
+    rayon::current_num_threads()
+        .saturating_mul(4)
+        .clamp(1, units.max(1))
 }
 
 /// Whether two particles are in collision range (center distance within
@@ -1334,10 +1407,8 @@ const BARNES_HUT_LEAF_CAP: usize = 16;
 /// exceeds the cap here holds effectively coincident particles, which the
 /// softening handles.
 const BARNES_HUT_MAX_DEPTH: u32 = 32;
-/// Population size at which the force pass fans out across threads. Below
-/// this the whole pass runs in well under a millisecond and rayon's
-/// fork-join overhead would eat the gain.
-const BARNES_HUT_PARALLEL_THRESHOLD: usize = 1024;
+// (The force pass shares the fan-out gate: see PARALLEL_THRESHOLD_DEFAULT
+// and parallel_threshold() beside the collision threshold docs.)
 
 /// One quadtree node: a square region with the total mass and center of
 /// mass of the particles inside it. Internal nodes store the index of
@@ -1496,9 +1567,18 @@ fn apply_self_gravity_barnes_hut(particles: &mut [Particle], dt: f64) {
     // thread, where the fork-join overhead would exceed the work. Both
     // paths produce bit-identical results: each particle's accumulation
     // order is its own fixed tree traversal, regardless of scheduling.
-    if THREADS_AVAILABLE && particles.len() >= BARNES_HUT_PARALLEL_THRESHOLD {
+    if THREADS_AVAILABLE && particles.len() >= parallel_threshold() {
+        note_par_dispatch();
+        // min_len caps the split depth at a few tasks per worker (see
+        // dispatch_task_count): fewer per-split map_init stacks and
+        // less steal traffic. The indexed collect keeps results in
+        // particle order, so bit-identity holds for any split.
+        let min_len = particles
+            .len()
+            .div_ceil(dispatch_task_count(particles.len()));
         let accels: Vec<(f64, f64)> = (0..particles.len())
             .into_par_iter()
+            .with_min_len(min_len)
             .map_init(
                 || Vec::with_capacity(64),
                 |stack, i| particle_acceleration(&nodes, &order, particles, i, stack),
@@ -1801,9 +1881,12 @@ mod tests {
         // above the parallel threshold through a single-threaded pool and
         // the default multi-threaded pool: every velocity must match to
         // the bit. This holds because each particle's accumulation order
-        // is its own tree traversal, never a cross-thread reduction.
+        // is its own tree traversal, never a cross-thread reduction. The
+        // 1-thread pool also yields a different with_min_len than the
+        // default pool, so the split-depth cap is proven scheduling-
+        // neutral here too.
         let mut rng = StdRng::seed_from_u64(23);
-        let particles: Vec<Particle> = (0..(BARNES_HUT_PARALLEL_THRESHOLD + 500))
+        let particles: Vec<Particle> = (0..(PARALLEL_THRESHOLD_DEFAULT + 500))
             .map(|_| Particle::new_random(&mut rng, 800, 600, RADIUS, 200.0))
             .collect();
         let clone = |ps: &[Particle]| -> Vec<Particle> {
@@ -1882,6 +1965,101 @@ mod tests {
     }
 
     #[test]
+    fn chunked_row_sweep_is_task_count_invariant() {
+        // The chunked sweep must produce the serial sweep's exact list
+        // for ANY task count: contiguous ascending row chunks, chunk-
+        // order concat, fixed within-row order. This is the invariant
+        // that makes the parallel arm thread-count-independent.
+        let mut rng = StdRng::seed_from_u64(43);
+        let particles: Vec<Particle> = (0..(PARALLEL_THRESHOLD_DEFAULT + 200))
+            .map(|_| {
+                let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+                let r: f64 = 50.0 * rng.random_range(0.0f64..1.0).sqrt();
+                // Random velocities: contact requires APPROACH, so a
+                // static clump would report nothing.
+                let mut p = particle(400.0 + r * angle.cos(), 300.0 + r * angle.sin(), 0.0, 0.0);
+                p.vx = rng.random_range(-100.0..100.0);
+                p.vy = rng.random_range(-100.0..100.0);
+                p
+            })
+            .collect();
+        let mut grid = SpatialGrid::new();
+        grid.build(&particles, 800, 600);
+        let mut serial = Vec::new();
+        for cy in 0..grid.rows {
+            grid.collect_row_contacts(cy, &particles, &mut serial);
+        }
+        assert!(!serial.is_empty(), "the dense clump must actually touch");
+        for tasks in [1, 2, 3, 5, 8, 64, grid.rows] {
+            assert_eq!(
+                grid.detect_binned_contacts_chunked(&particles, tasks),
+                serial,
+                "task count {tasks} must not reorder or change contacts"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_task_count_stays_within_bounds() {
+        assert_eq!(dispatch_task_count(0), 1, "zero units still one task");
+        assert_eq!(dispatch_task_count(1), 1);
+        let threads = rayon::current_num_threads();
+        assert_eq!(
+            dispatch_task_count(usize::MAX),
+            threads * 4,
+            "large unit counts settle at 4x workers"
+        );
+        assert!(dispatch_task_count(3) <= 3, "never more tasks than units");
+    }
+
+    #[test]
+    fn parallel_threshold_override_round_trips() {
+        // Global knob, and tests run concurrently — so the transient
+        // value is a LOW one (7): if another test's pass lands inside
+        // the window it merely fans out earlier, which is
+        // output-identical and satisfies the counter test's >= asserts.
+        // A high transient could instead starve that test's dispatch.
+        set_parallel_threshold(7);
+        assert_eq!(parallel_threshold(), 7);
+        set_parallel_threshold(0);
+        assert_eq!(
+            parallel_threshold(),
+            PARALLEL_THRESHOLD_DEFAULT,
+            "0 = default"
+        );
+    }
+
+    #[test]
+    fn dispatch_counter_counts_only_taken_parallel_branches() {
+        // The counter is process-global and cargo test is concurrent,
+        // so assert monotonic deltas, not absolutes: drain, run a
+        // below-threshold pass (adds nothing from THIS call), then an
+        // above-threshold pass (adds at least one).
+        let mut small: Vec<Particle> = (0..8)
+            .map(|i| particle(40.0 + 20.0 * f64::from(i), 50.0, 0.0, 0.0))
+            .collect();
+        let _ = take_par_dispatches();
+        collide_all(&mut small);
+        // Other tests may race increments in; the small pass itself
+        // contributes zero, so we cannot assert equality — but after a
+        // dense pass the count must be strictly positive.
+        let mut rng = StdRng::seed_from_u64(31);
+        let mut dense: Vec<Particle> = (0..(PARALLEL_THRESHOLD_DEFAULT + 10))
+            .map(|_| {
+                let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+                let r: f64 = 60.0 * rng.random_range(0.0f64..1.0).sqrt();
+                particle(400.0 + r * angle.cos(), 300.0 + r * angle.sin(), 0.0, 0.0)
+            })
+            .collect();
+        let _ = take_par_dispatches();
+        collide_all(&mut dense);
+        assert!(
+            take_par_dispatches() >= 1,
+            "a dense pass dispatches at least once"
+        );
+    }
+
+    #[test]
     fn parallel_contact_detection_is_deterministic() {
         // Seeded simulations must replay identically, so the parallel
         // detection sweep may not depend on thread scheduling: rows are
@@ -1889,8 +2067,12 @@ mod tests {
         // every impulse and separation the serial resolve phase applies —
         // identical for any thread count. Verify positions and velocities
         // to the bit on a dense population above the parallel threshold.
+        // The 1-thread pool below also yields different CHUNK boundaries
+        // than the default pool (dispatch_task_count scales with
+        // current_num_threads), so this doubles as an end-to-end
+        // chunk-count-invariance proof.
         let mut rng = StdRng::seed_from_u64(29);
-        let particles: Vec<Particle> = (0..(COLLISION_PARALLEL_THRESHOLD + 500))
+        let particles: Vec<Particle> = (0..(PARALLEL_THRESHOLD_DEFAULT + 500))
             .map(|_| {
                 let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
                 let r: f64 = 60.0 * rng.random_range(0.0f64..1.0).sqrt();

@@ -228,6 +228,10 @@ pub enum PanelCommand {
     /// twin of the native port cycle).
     #[cfg(target_arch = "wasm32")]
     SetMidiPort(u32),
+    /// The page is about to build a scene download: publish a fresh
+    /// scene TOML with the next snapshot.
+    #[cfg(target_arch = "wasm32")]
+    RequestSceneToml,
     /// One wall segment from the panel's Draw-wall drag tool: a fresh
     /// stroke for the drag's first segment, extending it for the rest
     /// (the same polyline chaining held-V produces).
@@ -455,6 +459,10 @@ pub struct App {
     paused: bool,
     step_once: bool,
     hud_mode: HudMode,
+
+    /// `--perf` phase-timing recorder; `Some` turns on the per-frame
+    /// clocks in `update_and_render` and the HUD block.
+    perf: Option<crate::perf::PerfRecorder>,
     /// Cursor gravity well while G is held (Shift+G repels).
     held_well: Option<Polarity>,
     /// Wall drawing (V held): where the next segment starts, if active.
@@ -510,6 +518,23 @@ pub struct App {
     /// state snapshot flows out, once per frame (see `web.rs`).
     #[cfg(target_arch = "wasm32")]
     web_shared: Option<std::rc::Rc<std::cell::RefCell<crate::web::Shared>>>,
+
+    /// Frames published so far (drives the scene-TOML cadence).
+    #[cfg(target_arch = "wasm32")]
+    frame_index: u64,
+    /// The page asked for a fresh scene TOML (Download click); served
+    /// and cleared by the next `publish_web_snapshot`.
+    #[cfg(target_arch = "wasm32")]
+    scene_toml_requested: bool,
+}
+
+/// Whether this frame publishes a fresh scene TOML: on request
+/// (Download click) or every 30th frame — a ≤0.5 s staleness bound for
+/// cached old pages that never send the request.
+#[cfg(target_arch = "wasm32")]
+fn should_publish_scene(requested: bool, frame: u64) -> bool {
+    const SCENE_TOML_REFRESH_FRAMES: u64 = 30;
+    requested || frame % SCENE_TOML_REFRESH_FRAMES == 0
 }
 
 impl App {
@@ -542,6 +567,11 @@ impl App {
         let capture = config
             .capture
             .then(|| crate::capture::Capture::start(config.bpm, config.chime_timbre));
+        // Read before the struct literal moves `config`.
+        let perf_on = config.perf;
+        // The fan-out threshold override is process context, installed
+        // once here (0 keeps the target default).
+        crate::physics::set_parallel_threshold(config.par_threshold);
         App {
             trails: config.trails,
             color_mode: config.color_mode,
@@ -566,7 +596,14 @@ impl App {
             fps: FpsCounter::new(),
             paused: false,
             step_once: false,
-            hud_mode: HudMode::Hidden,
+            // --perf implies a visible HUD (the overlay lives there);
+            // H still cycles it away.
+            hud_mode: if perf_on {
+                HudMode::Stats
+            } else {
+                HudMode::Hidden
+            },
+            perf: perf_on.then(crate::perf::PerfRecorder::default),
             held_well: None,
             wall_anchor: None,
             emitter_anchor: None,
@@ -595,6 +632,10 @@ impl App {
             capture,
             #[cfg(target_arch = "wasm32")]
             web_shared: None,
+            #[cfg(target_arch = "wasm32")]
+            frame_index: 0,
+            #[cfg(target_arch = "wasm32")]
+            scene_toml_requested: false,
         }
     }
 
@@ -818,6 +859,14 @@ impl App {
             lines.push(flags.join("  "));
         }
 
+        // The --perf block: rolling phase timings and dispatch counts,
+        // accumulated Rust-side every frame (so a throttled or polled
+        // reader still sees spikes in the p95/max columns).
+        if let Some(ref perf) = self.perf {
+            lines.push(String::new());
+            lines.extend(perf.lines());
+        }
+
         if self.hud_mode == HudMode::StatsAndKeys {
             lines.push(String::new());
             // Curated compressed lines (screen space); the canonical list
@@ -843,8 +892,15 @@ impl App {
         lines
     }
 
-    /// Draw the current frame and present it, tolerating transient failures.
-    fn render_frame(&mut self, width: u32, height: u32) {
+    /// Draw the current frame and present it, tolerating transient
+    /// failures. With `--perf`, `sample` receives the raster and
+    /// present phase timings.
+    fn render_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        sample: Option<&mut crate::perf::FrameSample>,
+    ) {
         let Some(ref sim) = self.sim else {
             return;
         };
@@ -885,6 +941,7 @@ impl App {
         self.screenshot_requested = false;
 
         let mut shot: Option<Vec<u8>> = None;
+        let raster_start = sample.as_ref().map(|_| Instant::now());
         render.with_frame(|frame| {
             if trails {
                 fade_frame(frame);
@@ -955,6 +1012,7 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let _ = shot;
 
+        let present_start = sample.as_ref().map(|_| Instant::now());
         match render.present() {
             Ok(()) => self.consecutive_render_failures = 0,
             Err(e) => {
@@ -962,6 +1020,14 @@ impl App {
                 // not crash; give up only if it never recovers.
                 self.consecutive_render_failures += 1;
                 eprintln!("Render failed ({e}); skipping frame");
+            }
+        }
+        if let Some(sample) = sample {
+            // raster spans with_frame; present spans the blit alone.
+            let now = Instant::now();
+            if let (Some(r), Some(p)) = (raster_start, present_start) {
+                sample.raster_ms = p.duration_since(r).as_secs_f64() * 1e3;
+                sample.present_ms = now.duration_since(p).as_secs_f64() * 1e3;
             }
         }
     }
@@ -1011,7 +1077,7 @@ impl App {
             self.warmup_frames -= 1;
             self.last_time = now;
             self.fps.restart(now);
-            self.render_frame(width, height);
+            self.render_frame(width, height, None);
             return;
         }
 
@@ -1041,6 +1107,10 @@ impl App {
         {
             capture.advance(dt);
         }
+        // --perf timing: no clocks at all when the recorder is off.
+        let mut sample = self.perf.is_some().then(crate::perf::FrameSample::default);
+        let sim_start = sample.as_ref().map(|_| Instant::now());
+
         let time_scale = self.time_scale * self.bullet_time.multiplier(now);
         if !self.paused {
             self.simulate(dt * time_scale, now);
@@ -1050,11 +1120,26 @@ impl App {
         }
         self.step_once = false;
 
-        self.render_frame(width, height);
+        if let (Some(s), Some(t0)) = (sample.as_mut(), sim_start) {
+            s.simulate_ms = t0.elapsed().as_secs_f64() * 1e3;
+        }
+
+        self.render_frame(width, height, sample.as_mut());
         self.update_fps_counter();
 
         #[cfg(target_arch = "wasm32")]
-        self.publish_web_snapshot();
+        {
+            let publish_start = sample.as_ref().map(|_| Instant::now());
+            self.publish_web_snapshot();
+            if let (Some(s), Some(t0)) = (sample.as_mut(), publish_start) {
+                s.publish_ms = t0.elapsed().as_secs_f64() * 1e3;
+            }
+        }
+
+        if let (Some(mut s), Some(perf)) = (sample, self.perf.as_mut()) {
+            s.dispatches = crate::physics::take_par_dispatches();
+            perf.record(&s);
+        }
     }
 
     /// Apply every command the JS panel queued since the last frame.
@@ -1248,6 +1333,10 @@ impl App {
                 // is a quiet no-op; the next snapshot re-syncs the list.
                 let _ = crate::midi::web::select_port(index);
             }
+            #[cfg(target_arch = "wasm32")]
+            PanelCommand::RequestSceneToml => {
+                self.scene_toml_requested = true;
+            }
             PanelCommand::DrawWall {
                 x1,
                 y1,
@@ -1433,6 +1522,13 @@ impl App {
         }
         if self.config.verbose {
             args.push("--verbose".into());
+        }
+        if self.config.perf {
+            args.push("--perf".into());
+        }
+        if self.config.par_threshold != 0 {
+            args.push("--par-threshold".into());
+            args.push(format!("{}", self.config.par_threshold).into());
         }
 
         match Config::try_resolve_from(args) {
@@ -1643,7 +1739,14 @@ impl App {
         let Some(ref sim) = self.sim else {
             return;
         };
-        let scene_toml = self.scene_toml();
+        // Scene TOML only when asked (Download click) or on the cadence
+        // fallback for stale pages that never ask — serializing the
+        // whole scene every frame was pure waste (JS reads it only on
+        // download).
+        self.frame_index = self.frame_index.wrapping_add(1);
+        let fresh_scene_toml = should_publish_scene(self.scene_toml_requested, self.frame_index)
+            .then(|| self.scene_toml());
+        self.scene_toml_requested = false;
         // Pulled fresh by id, like the native panel: a dead id publishes
         // all-None even before the frame sweep drops the selection.
         let mut selection_kind = None;
@@ -1753,7 +1856,11 @@ impl App {
             midi_ports: crate::midi::web::ports(),
             midi_port: crate::midi::web::current_port(),
         };
-        shared.scene_toml = scene_toml;
+        // Keep the last published TOML on non-refresh frames — a stale
+        // page reads this between cadence ticks.
+        if let Some(toml) = fresh_scene_toml {
+            shared.scene_toml = toml;
+        }
     }
 
     /// Handle a key press or release: pure input mapping. Everything a
@@ -2525,8 +2632,15 @@ impl ApplicationHandler for App {
         self.fps.restart(Instant::now());
 
         let window = Rc::new(window);
+        // --cpu picks the Canvas2D present path (the web twin of the
+        // native softbuffer fallback) over WebGL2.
         self.render = Some(create_render_context(
-            &window, width, height, width, height, false,
+            &window,
+            width,
+            height,
+            width,
+            height,
+            self.config.cpu,
         ));
         window.request_redraw();
     }
@@ -3414,6 +3528,39 @@ mod tests {
         assert_eq!(app.sim.as_ref().unwrap().beat_div, 4, "invalid div ignored");
         app.apply_panel_command(PanelCommand::SetBeatDiv(8));
         assert_eq!(app.sim.as_ref().unwrap().beat_div, 8);
+    }
+
+    #[test]
+    fn perf_block_appears_only_with_the_flag() {
+        let plain = test_app();
+        let lines = plain.hud_lines(plain.sim.as_ref().unwrap());
+        assert!(
+            !lines.iter().any(|l| l.starts_with("perf")),
+            "no --perf, no block: {lines:?}"
+        );
+
+        let config =
+            Config::try_resolve_from(["bouncy", "--seed", "7", "--mute", "--perf"]).unwrap();
+        let mut app = App::new(config.clone());
+        app.sim = Some(Simulation::new(&config, 800, 600));
+        assert!(
+            app.hud_mode == HudMode::Stats,
+            "--perf implies a visible HUD"
+        );
+        let lines = app.hud_lines(app.sim.as_ref().unwrap());
+        assert!(
+            lines.iter().any(|l| l.starts_with("perf")),
+            "--perf shows the block: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.starts_with("rayon")), "{lines:?}");
+        // Relaunch context: the flag rides the rebuilt args.
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: None,
+            particle_size: None,
+            initial_speed: None,
+            min_particles: None,
+        });
+        assert!(app.config.perf, "--perf survives a panel relaunch");
     }
 
     #[test]

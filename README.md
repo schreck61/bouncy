@@ -76,7 +76,7 @@ cargo run --release -- --spawn-at-collision
 | `--particle-elasticity <VALUE>` | Set particle collision restitution (0.0-1.5); 0.0 = sticks, 1.0 = elastic, >1.0 = adds energy | 1.0 |
 | `--width <N>` | Set window width in pixels (100-7680); must be used with `--height` | Fullscreen |
 | `--height <N>` | Set window height in pixels (100-4320); must be used with `--width` | Fullscreen |
-| `--cpu` | Force CPU rendering (softbuffer) instead of GPU | Off |
+| `--cpu` | Force the CPU present path (softbuffer natively, Canvas2D on the web) instead of GPU/WebGL2 | Off |
 | `--mute` | Start with audio muted | Off |
 | `--music` | Quantize collision pings to a pentatonic scale (energy picks the note) | Off |
 | `--wall-chimes` | Walls play pentatonic notes when particles strike them — longer wall, lower note | Off |
@@ -97,6 +97,8 @@ cargo run --release -- --spawn-at-collision
 | `--bullet-time` | Slow time briefly (bullet time) whenever an explosion ring starts | Off |
 | `--seed <N>` | Seed the random number generator (reproducible starting conditions) | Random |
 | `--verbose` | Print per-second FPS statistics to stdout | Off |
+| `--perf` | Overlay per-frame phase timings (simulate/raster/present) and rayon dispatch counts on the HUD — rolling 120-frame mean/p95/max (`?perf` on the demo) | Off |
+| `--par-threshold <N>` | Population at which physics passes fan out across threads (0 = the measured default, 1024) — an A/B knob for `--perf` | 0 |
 | `--help`, `-h` | Display help information | |
 | `--version`, `-V` | Display version | |
 

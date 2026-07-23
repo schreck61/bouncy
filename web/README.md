@@ -25,6 +25,19 @@ python3 -m http.server 8321 --directory web
 
 `pkg/` is a build artifact (wasm-pack writes its own `.gitignore`).
 
+## Performance knobs
+
+`?perf` overlays per-frame phase timings and rayon dispatch counts on
+the canvas HUD (rolling 120-frame mean/p95/max). The pool defaults to
+`min(hardwareConcurrency, 8)` workers; `?threads=N` overrides it
+uncapped. Note the two baselines are different things: `?threads=1` is
+the multi-threaded bundle driving a single worker, while `?st` swaps in
+the single-threaded bundle (no atomics at all). `?par-threshold=N`
+moves the population at which physics passes fan out (default 1024 —
+measured as right on wasm too once the pool is capped), and `?cpu`
+swaps the WebGL2 present path for the old Canvas2D `putImageData` —
+the console logs which path is live.
+
 ## Build (multi-threaded, optional)
 
 Rayon over wasm threads needs SharedArrayBuffer, which needs a

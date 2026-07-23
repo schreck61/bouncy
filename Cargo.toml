@@ -67,6 +67,9 @@ web-sys = { version = "0.3", features = [
     # WebMIDI backend
     "Navigator", "MidiAccess", "MidiOptions", "MidiOutput",
     "MidiOutputMap", "MidiPort",
+    # WebGL2 present path
+    "WebGl2RenderingContext", "WebGlProgram", "WebGlShader",
+    "WebGlTexture", "WebGlContextAttributes",
 ] }
 
 [lints.clippy]

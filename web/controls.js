@@ -42,7 +42,16 @@ async function loadBouncy() {
       await mt.default({
         module_or_path: new URL(versioned("pkg-mt/bouncy_bg.wasm"), location.href),
       });
-      const threads = navigator.hardwareConcurrency ?? 4;
+      // Pool size: capped below hardwareConcurrency by default — every
+      // fork-join wakes every parked worker, so on many-core machines
+      // the wake cost outruns the short parallel sections; SMT siblings
+      // add little to the bandwidth-bound sweeps. ?threads=N overrides
+      // uncapped for A/B runs (?threads=1 = MT bundle with one worker,
+      // a distinct baseline from ?st's serial bundle).
+      const requested = Number(new URLSearchParams(location.search).get("threads"));
+      const threads = Number.isInteger(requested) && requested > 0
+        ? requested
+        : Math.min(navigator.hardwareConcurrency ?? 4, 8);
       const initPool = async () => {
         await mt.initThreadPool(threads);
         $("threads-note").textContent = `Multi-threaded build: ${threads} threads.`;
@@ -341,11 +350,19 @@ function bind(handle) {
     });
   };
   $("btn-scene").onclick = () => {
-    const toml = handle.scene_toml?.();
-    if (toml) {
-      download(new Blob([toml], { type: "application/toml" }),
-               `bouncy-scene-${Date.now()}.toml`);
-    }
+    // Fresh-on-demand on new bundles (the app serializes the scene
+    // only when asked); old bundles publish continuously, so the read
+    // below is already current (?. degrade). The request drains at the
+    // next frame's start and publishes at its end — two rAFs from now
+    // it has definitely landed.
+    handle.request_scene_toml?.();
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const toml = handle.scene_toml?.();
+      if (toml) {
+        download(new Blob([toml], { type: "application/toml" }),
+                 `bouncy-scene-${Date.now()}.toml`);
+      }
+    }));
   };
   $("btn-share").onclick = async () => {
     await navigator.clipboard.writeText(shareUrl());
@@ -661,10 +678,11 @@ function reflect(s) {
     $("version").textContent = mod.version ? `v${mod.version()}` : "";
     // Loader-only parameters are not CLI options; strip them before the
     // query reaches the config parser (st: force single-threaded;
-    // cb: cache-buster).
+    // cb: cache-buster; threads: pool size).
     const params = new URLSearchParams(location.search);
     params.delete("st");
     params.delete("cb");
+    params.delete("threads");
     // The preset chip comes from the launch URL: presets are
     // construction-time state, so the snapshot has no field for them.
     const preset = params.get("preset");

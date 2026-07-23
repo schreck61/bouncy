@@ -149,8 +149,17 @@ impl WebHandle {
     }
 
     /// The current scene as preset-file TOML (for download/sharing).
+    /// The value refreshes on [`WebHandle::request_scene_toml`] and on
+    /// a coarse cadence; call the request first for an exact snapshot.
     pub fn scene_toml(&self) -> Option<String> {
         self.shared.borrow().scene_toml.clone()
+    }
+
+    /// Ask the app to publish a fresh scene TOML with the next frame's
+    /// snapshot (the panel calls this on Download click, then reads
+    /// [`WebHandle::scene_toml`] two animation frames later).
+    pub fn request_scene_toml(&self) {
+        self.push(WebCommand::RequestSceneToml);
     }
 
     fn push(&self, cmd: WebCommand) {

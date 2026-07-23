@@ -157,7 +157,8 @@ pub struct Config {
     #[arg(long, requires = "width", value_parser = clap::value_parser!(u32).range(100..=4320))]
     pub height: Option<u32>,
 
-    /// Force CPU rendering (softbuffer) instead of GPU
+    /// Force the CPU present path (softbuffer natively, `Canvas2D`
+    /// putImageData on the web) instead of GPU/WebGL2
     #[arg(long)]
     pub cpu: bool,
 
@@ -260,6 +261,18 @@ pub struct Config {
     /// Print per-second FPS statistics to stdout
     #[arg(long)]
     pub verbose: bool,
+
+    /// Overlay per-frame phase timings (simulate/raster/present) and
+    /// rayon dispatch counts on the HUD: rolling 120-frame
+    /// mean/p95/max
+    #[arg(long)]
+    pub perf: bool,
+
+    /// Population at which physics passes fan out across threads
+    /// (0 = target default: 1024 native, 4096 wasm). A/B knob for the
+    /// --perf overlay; harmless without threads
+    #[arg(long, default_value_t = 0, value_name = "N")]
+    pub par_threshold: usize,
 
     /// Scene geometry from a user preset (walls/wells keys); not a CLI
     /// argument — populated during preset resolution.
@@ -962,13 +975,17 @@ mod tests {
         // --particle-size (the "1" eaten as a boolean alias, then clap
         // demanding the missing value), and ?gravity=0 was dropped
         // entirely, silently keeping the 100% default.
-        let args = query_to_args("?particle-size=1&gravity=0&matter=1&flow=true&trails");
+        let args = query_to_args("?particle-size=1&gravity=0&matter=1&flow=true&trails&perf");
         let config = Config::try_resolve_with(&args, None).unwrap();
         assert_eq!(config.particle_size, 1.0);
         assert_eq!(config.gravity, 0);
         assert!(config.matter, "=1 still switches a boolean flag on");
         assert!(config.flow, "=true still switches a boolean flag on");
         assert!(config.trails, "a value-less key still switches a flag on");
+        assert!(config.perf, "?perf turns the overlay on");
+        let args = query_to_args("?par-threshold=4096");
+        let config = Config::try_resolve_with(&args, None).unwrap();
+        assert_eq!(config.par_threshold, 4096, "value flag maps with its value");
 
         // Boolean flags still honor the off aliases.
         let args = query_to_args("?matter=0&flow=false");

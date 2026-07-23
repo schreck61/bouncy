@@ -74,14 +74,26 @@ file only tracks what's ahead.
 
 ## Next headline candidates
 
-- **Web demo performance beyond Chrome.** The demo is currently
-  optimized for Chrome; Firefox frame rates collapse under the
-  per-frame rayon fork-join cost (up to ~8-16 dispatches per frame via
-  substepping) and the Canvas2D `putImageData` present path. Options,
-  roughly in leverage order: hoist the fan-out so a frame dispatches
-  once; raise the parallel thresholds on wasm (the 1024 break-even was
-  measured natively); cap the web thread pool below
-  `hardwareConcurrency`; longer-term, a WebGL/WebGPU present path.
+- **Web demo performance: landed in 1.16.** The `--perf`/`?perf`
+  overlay (phase timings + rayon dispatch counts, rolling 120-frame
+  windows) is the standing instrument; the per-frame scene-TOML
+  serialization is gone; the fan-out threshold stays 1024 everywhere
+  (measured right on wasm too, once the pool is capped) with a
+  `?par-threshold=N` override; the web pool
+  caps at 8 workers (`?threads=N` overrides); the collision sweep
+  dispatches in row chunks (4x workers) instead of per-row; and the
+  present path is a WebGL2 textured blit — direct texture upload from
+  shared wasm memory, `?cpu` keeps Canvas2D as the escape hatch. The
+  ROADMAP's old "hoist the fan-out to one dispatch per frame" idea was
+  judged **infeasible** against rayon-core's sources: idle workers park
+  after ~33 steal rounds (no keep-warm knob) and the frame is a strict
+  serial chain (each substep's contacts depend on the previous one's
+  serial resolution), so the dispatch count stays 1 + substeps; the
+  wins are fewer *eligible* populations, cheaper dispatches, and the
+  present/TOML one-offs. Remaining follow-ons if measurements demand
+  them: a display-size backing store (GPU letterbox via `gl.viewport`,
+  crisper than the CSS upscale), and the frame-in-pool experiment
+  (risky: pins the wasm main thread in a busy-wait).
 - **The emergent instrument: complete.** The staged program that grew
   out of user feedback (walls that play notes turn the sim into an
   Otomata-style generative sequencer) shipped in full across

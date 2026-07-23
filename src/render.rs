@@ -671,10 +671,14 @@ fn scale_map(physical: u32, logical: u32) -> Vec<usize> {
 }
 
 /// Web render context: the same RGBA buffer the drawing routines already
-/// target, blitted into a 2D canvas with `putImageData`. The canvas
-/// backing store is kept at the simulation's logical size; CSS scales the
-/// element for display (letterboxed via `object-fit: contain`), so
-/// presentation cost is the browser's, not ours.
+/// target, presented through one of two paths — a WebGL2 textured blit
+/// (the default: GPU compositing, and on shared-memory builds a direct
+/// texture upload with no JS-side copy) or the original `Canvas2D`
+/// `putImageData` (the `--cpu` escape hatch and the fallback when
+/// WebGL2 is unavailable). The canvas backing store is kept at the
+/// simulation's logical size either way; CSS scales the element for
+/// display (letterboxed via `object-fit: contain`), so upscale cost is
+/// the browser's, not ours.
 #[cfg(target_arch = "wasm32")]
 pub struct RenderContext {
     window: Rc<Window>,
@@ -682,14 +686,67 @@ pub struct RenderContext {
     height: u32,
     buffer: Vec<u8>,
     canvas: web_sys::HtmlCanvasElement,
-    ctx2d: web_sys::CanvasRenderingContext2d,
-    /// A JS-side copy of the frame. `ImageData` cannot wrap a view into
-    /// wasm memory when that memory is shared (the multi-threaded
-    /// build), so every present copies the frame into this ordinary
-    /// `Uint8ClampedArray`, which `image_data` wraps once per size.
-    js_frame: js_sys::Uint8ClampedArray,
-    image_data: web_sys::ImageData,
+    present: PresentPath,
 }
+
+/// The buffer-to-screen half of the web renderer. A canvas commits
+/// permanently to the first context type that `getContext` SUCCEEDS
+/// for, so the choice is made once at creation: `--cpu` goes straight
+/// to `Canvas2D`; otherwise WebGL2 is tried first and a failed attempt
+/// (which leaves the canvas unclaimed) falls back to `Canvas2D`.
+#[cfg(target_arch = "wasm32")]
+enum PresentPath {
+    /// WebGL2: one RGBA8 texture uploaded per frame, drawn as an
+    /// attributeless fullscreen triangle.
+    WebGl {
+        gl: web_sys::WebGl2RenderingContext,
+        /// Kept alive for the context's lifetime; rebound implicitly
+        /// (it is the only texture on unit 0).
+        _texture: web_sys::WebGlTexture,
+        /// `Some` when the SAB-view probe failed (older engines reject
+        /// texture uploads from shared-memory views): uploads then copy
+        /// through this ordinary JS array first — today's copy cost,
+        /// but the GPU draw win remains.
+        staging: Option<js_sys::Uint8Array>,
+    },
+    /// `Canvas2D` `putImageData`, exactly the pre-1.16 path.
+    Canvas2d {
+        ctx2d: web_sys::CanvasRenderingContext2d,
+        /// A JS-side copy of the frame. `ImageData` cannot wrap a view
+        /// into wasm memory when that memory is shared (the
+        /// multi-threaded build), so every present copies the frame
+        /// into this ordinary `Uint8ClampedArray`, which `image_data`
+        /// wraps once per size.
+        js_frame: js_sys::Uint8ClampedArray,
+        image_data: web_sys::ImageData,
+    },
+}
+
+/// Fullscreen-triangle vertex shader: three vertices synthesized from
+/// `gl_VertexID` (no buffers, no attributes), UVs flipped so buffer row
+/// 0 lands at the top of the screen.
+#[cfg(target_arch = "wasm32")]
+const PRESENT_VERT: &str = "#version 300 es
+out vec2 v_uv;
+void main() {
+    vec2 corner = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+    v_uv = vec2(corner.x, 1.0 - corner.y);
+    gl_Position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+}
+";
+
+/// Fragment shader: sample the frame texture; alpha forced to 1.0 (the
+/// trail fade encodes its darkening in RGB — see `fade_frame` — and the
+/// 2D path only looked right because the opaque page background sat
+/// behind it).
+#[cfg(target_arch = "wasm32")]
+const PRESENT_FRAG: &str = "#version 300 es
+precision mediump float;
+uniform sampler2D u_frame;
+in vec2 v_uv;
+out vec4 out_color;
+void main() { out_color = vec4(texture(u_frame, v_uv).rgb, 1.0); }
+";
 
 /// Build the persistent JS frame array + `ImageData` pair for a size.
 #[cfg(target_arch = "wasm32")]
@@ -699,6 +756,163 @@ fn js_frame_pair(width: u32, height: u32) -> (js_sys::Uint8ClampedArray, web_sys
         web_sys::ImageData::new_with_js_u8_clamped_array_and_sh(&js_frame, width, height)
             .expect("ImageData creation failed");
     (js_frame, image_data)
+}
+
+/// Dimensions as the i32 GL entry points want them (sim sizes are far
+/// inside i32 range).
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::cast_possible_wrap)]
+fn gl_size(v: u32) -> i32 {
+    v as i32
+}
+
+/// Allocate (or re-specify, on resize) the frame texture's storage.
+/// A mutable texture on purpose — `texStorage2D` is immutable and could
+/// not be resized in place.
+#[cfg(target_arch = "wasm32")]
+fn gl_alloc_texture(gl: &web_sys::WebGl2RenderingContext, width: u32, height: u32) {
+    use web_sys::WebGl2RenderingContext as Gl;
+    gl.tex_image_2d_with_i32_and_i32_and_i32_and_format_and_type_and_opt_u8_array(
+        Gl::TEXTURE_2D,
+        0,
+        gl_size(Gl::RGBA),
+        gl_size(width),
+        gl_size(height),
+        0,
+        Gl::RGBA,
+        Gl::UNSIGNED_BYTE,
+        None,
+    )
+    .expect("texture allocation failed");
+}
+
+/// Compile one shader stage, mapping failure to the info log.
+#[cfg(target_arch = "wasm32")]
+fn gl_compile(
+    gl: &web_sys::WebGl2RenderingContext,
+    kind: u32,
+    source: &str,
+) -> Result<web_sys::WebGlShader, String> {
+    use web_sys::WebGl2RenderingContext as Gl;
+    let shader = gl.create_shader(kind).ok_or("createShader failed")?;
+    gl.shader_source(&shader, source);
+    gl.compile_shader(&shader);
+    if gl
+        .get_shader_parameter(&shader, Gl::COMPILE_STATUS)
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(shader)
+    } else {
+        Err(gl
+            .get_shader_info_log(&shader)
+            .unwrap_or_else(|| "shader compile failed".to_string()))
+    }
+}
+
+/// Try to build the WebGL2 present path over the canvas. On any `Err`
+/// the canvas is still unclaimed (`getContext("webgl2")` only commits
+/// on success paired with our subsequent setup succeeding — the one
+/// unrecoverable window, a post-context shader failure, implies a
+/// broken GL driver and surfaces as the returned error).
+#[cfg(target_arch = "wasm32")]
+fn try_create_webgl(
+    canvas: &web_sys::HtmlCanvasElement,
+    width: u32,
+    height: u32,
+) -> Result<PresentPath, String> {
+    use web_sys::WebGl2RenderingContext as Gl;
+
+    let attrs = web_sys::WebGlContextAttributes::new();
+    attrs.set_alpha(false);
+    attrs.set_antialias(false);
+    attrs.set_depth(false);
+    attrs.set_stencil(false);
+    let gl = canvas
+        .get_context_with_context_options("webgl2", &attrs)
+        .ok()
+        .flatten()
+        .ok_or("WebGL2 unavailable")?
+        .dyn_into::<Gl>()
+        .map_err(|_| "webgl2 context has unexpected type".to_string())?;
+
+    let program = gl.create_program().ok_or("createProgram failed")?;
+    gl.attach_shader(&program, &gl_compile(&gl, Gl::VERTEX_SHADER, PRESENT_VERT)?);
+    gl.attach_shader(
+        &program,
+        &gl_compile(&gl, Gl::FRAGMENT_SHADER, PRESENT_FRAG)?,
+    );
+    gl.link_program(&program);
+    if !gl
+        .get_program_parameter(&program, Gl::LINK_STATUS)
+        .as_bool()
+        .unwrap_or(false)
+    {
+        return Err(gl
+            .get_program_info_log(&program)
+            .unwrap_or_else(|| "program link failed".to_string()));
+    }
+    gl.use_program(Some(&program));
+
+    let texture = gl.create_texture().ok_or("createTexture failed")?;
+    gl.bind_texture(Gl::TEXTURE_2D, Some(&texture));
+    gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MIN_FILTER, gl_size(Gl::NEAREST));
+    gl.tex_parameteri(Gl::TEXTURE_2D, Gl::TEXTURE_MAG_FILTER, gl_size(Gl::NEAREST));
+    gl.tex_parameteri(
+        Gl::TEXTURE_2D,
+        Gl::TEXTURE_WRAP_S,
+        gl_size(Gl::CLAMP_TO_EDGE),
+    );
+    gl.tex_parameteri(
+        Gl::TEXTURE_2D,
+        Gl::TEXTURE_WRAP_T,
+        gl_size(Gl::CLAMP_TO_EDGE),
+    );
+    gl_alloc_texture(&gl, width, height);
+    gl.viewport(0, 0, gl_size(width), gl_size(height));
+
+    // Probe: upload one pixel from a wasm-side slice. On the shared-
+    // memory build that slice is SharedArrayBuffer-backed — exactly
+    // what pre-AllowShared engines reject — so a failure here routes
+    // every upload through a non-shared staging array instead.
+    let probe: [u8; 4] = [0, 0, 0, 255];
+    let staging = match gl.tex_sub_image_2d_with_i32_and_i32_and_u32_and_type_and_opt_u8_array(
+        Gl::TEXTURE_2D,
+        0,
+        0,
+        0,
+        1,
+        1,
+        Gl::RGBA,
+        Gl::UNSIGNED_BYTE,
+        Some(&probe),
+    ) {
+        Ok(()) => None,
+        Err(_) => Some(js_sys::Uint8Array::new_with_length(width * height * 4)),
+    };
+    Ok(PresentPath::WebGl {
+        gl,
+        _texture: texture,
+        staging,
+    })
+}
+
+/// Build the `Canvas2D` present path (the pre-1.16 renderer, verbatim).
+#[cfg(target_arch = "wasm32")]
+fn create_canvas2d(canvas: &web_sys::HtmlCanvasElement, width: u32, height: u32) -> PresentPath {
+    let ctx2d = canvas
+        .get_context("2d")
+        .ok()
+        .flatten()
+        .expect("2d context unavailable")
+        .dyn_into::<web_sys::CanvasRenderingContext2d>()
+        .expect("2d context has unexpected type");
+    let (js_frame, image_data) = js_frame_pair(width, height);
+    PresentPath::Canvas2d {
+        ctx2d,
+        js_frame,
+        image_data,
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -726,13 +940,57 @@ impl RenderContext {
         f(self.buffer.as_mut_slice())
     }
 
-    /// Blit the frame to the canvas: copy into the JS-side array (shared
-    /// wasm memory cannot back an `ImageData`) and `putImageData`.
+    /// Push the frame to the screen down whichever path this context
+    /// committed to at creation.
     pub fn present(&mut self) -> Result<(), String> {
-        self.js_frame.copy_from(&self.buffer);
-        self.ctx2d
-            .put_image_data(&self.image_data, 0.0, 0.0)
-            .map_err(|_| "putImageData failed".to_string())
+        use web_sys::WebGl2RenderingContext as Gl;
+        match &self.present {
+            PresentPath::WebGl { gl, staging, .. } => {
+                let upload = if let Some(staging) = staging {
+                    // Staged: engines that reject shared-memory views
+                    // get the frame through an ordinary JS array.
+                    staging.copy_from(&self.buffer);
+                    gl.tex_sub_image_2d_with_i32_and_i32_and_u32_and_type_and_opt_array_buffer_view(
+                        Gl::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        gl_size(self.width),
+                        gl_size(self.height),
+                        Gl::RGBA,
+                        Gl::UNSIGNED_BYTE,
+                        Some(staging),
+                    )
+                } else {
+                    // Direct: the GL upload reads straight out of wasm
+                    // memory — no JS-side copy at all.
+                    gl.tex_sub_image_2d_with_i32_and_i32_and_u32_and_type_and_opt_u8_array(
+                        Gl::TEXTURE_2D,
+                        0,
+                        0,
+                        0,
+                        gl_size(self.width),
+                        gl_size(self.height),
+                        Gl::RGBA,
+                        Gl::UNSIGNED_BYTE,
+                        Some(&self.buffer),
+                    )
+                };
+                upload.map_err(|_| "texture upload failed".to_string())?;
+                gl.draw_arrays(Gl::TRIANGLES, 0, 3);
+                Ok(())
+            }
+            PresentPath::Canvas2d {
+                ctx2d,
+                js_frame,
+                image_data,
+            } => {
+                js_frame.copy_from(&self.buffer);
+                ctx2d
+                    .put_image_data(image_data, 0.0, 0.0)
+                    .map_err(|_| "putImageData failed".to_string())
+            }
+        }
     }
 
     /// Map a cursor position to simulation coordinates. winit's web
@@ -744,11 +1002,8 @@ impl RenderContext {
         let dpr = web_sys::window().map_or(1.0, |w| w.device_pixel_ratio());
         let rect = self.canvas.get_bounding_client_rect();
         let (css_w, css_h) = (rect.width().max(1.0), rect.height().max(1.0));
-        // object-fit: contain letterboxes the frame inside the element;
-        // compute the drawn frame's offset and scale within the box.
-        let scale = (css_w / f64::from(self.width)).min(css_h / f64::from(self.height));
-        let off_x = (css_w - f64::from(self.width) * scale) / 2.0;
-        let off_y = (css_h - f64::from(self.height) * scale) / 2.0;
+        let (scale, off_x, off_y) =
+            contain_map(css_w, css_h, f64::from(self.width), f64::from(self.height));
         let sim_x = (x / dpr - off_x) / scale;
         let sim_y = (y / dpr - off_y) / scale;
         (
@@ -762,22 +1017,43 @@ impl RenderContext {
     /// simulation size, not the window.
     pub fn resize_surface(&mut self, _width: u32, _height: u32) {}
 
-    /// Resize the frame to a new simulation size: reallocate the buffer,
-    /// the JS-side frame, and the canvas backing store (live-resize
-    /// support).
+    /// Resize the frame to a new simulation size: reallocate the buffer
+    /// and the canvas backing store, then the present path's own
+    /// storage (live-resize support).
     pub fn resize_sim(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
         self.buffer = vec![0u8; (width as usize) * (height as usize) * 4];
-        (self.js_frame, self.image_data) = js_frame_pair(width, height);
+        // Resizing the canvas also resizes the WebGL drawing buffer...
         self.canvas.set_width(width);
         self.canvas.set_height(height);
+        match &mut self.present {
+            PresentPath::WebGl { gl, staging, .. } => {
+                // ...but GL does NOT track that: re-point the viewport
+                // and re-specify the texture at the new size.
+                gl_alloc_texture(gl, width, height);
+                gl.viewport(0, 0, gl_size(width), gl_size(height));
+                if staging.is_some() {
+                    *staging = Some(js_sys::Uint8Array::new_with_length(width * height * 4));
+                }
+            }
+            PresentPath::Canvas2d {
+                js_frame,
+                image_data,
+                ..
+            } => {
+                (*js_frame, *image_data) = js_frame_pair(width, height);
+            }
+        }
     }
 }
 
 /// Create the web render context over the window's canvas. Signature
 /// mirrors the native constructor so the shell code is target-agnostic;
-/// the physical dimensions and CPU flag are meaningless here.
+/// the physical dimensions are meaningless here. `force_cpu` (`--cpu`)
+/// picks the `Canvas2D` present path — the web twin of the native
+/// softbuffer fallback — without ever touching `getContext("webgl2")`
+/// (a canvas commits to the first context type that succeeds).
 #[cfg(target_arch = "wasm32")]
 pub fn create_render_context(
     window: &Rc<Window>,
@@ -785,7 +1061,7 @@ pub fn create_render_context(
     height: u32,
     _physical_width: u32,
     _physical_height: u32,
-    _force_cpu: bool,
+    force_cpu: bool,
 ) -> RenderContext {
     use winit::platform::web::WindowExtWebSys;
 
@@ -794,29 +1070,53 @@ pub fn create_render_context(
     // element itself.
     canvas.set_width(width);
     canvas.set_height(height);
-    let ctx2d = canvas
-        .get_context("2d")
-        .ok()
-        .flatten()
-        .expect("2d context unavailable")
-        .dyn_into::<web_sys::CanvasRenderingContext2d>()
-        .expect("2d context has unexpected type");
+    let log = |msg: &str| web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(msg));
+    let present = if force_cpu {
+        log("present: Canvas2D [forced]");
+        create_canvas2d(&canvas, width, height)
+    } else {
+        match try_create_webgl(&canvas, width, height) {
+            Ok(path) => {
+                log(match path {
+                    PresentPath::WebGl { staging: None, .. } => "present: WebGL2 (direct upload)",
+                    _ => "present: WebGL2 (staged upload)",
+                });
+                path
+            }
+            Err(e) => {
+                web_sys::console::warn_1(&wasm_bindgen::JsValue::from_str(&format!(
+                    "WebGL2 unavailable ({e}); presenting via Canvas2D"
+                )));
+                create_canvas2d(&canvas, width, height)
+            }
+        }
+    };
     let buffer = vec![0u8; (width as usize) * (height as usize) * 4];
-    let (js_frame, image_data) = js_frame_pair(width, height);
     RenderContext {
         window: Rc::clone(window),
         width,
         height,
         buffer,
         canvas,
-        ctx2d,
-        js_frame,
-        image_data,
+        present,
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+
+/// The `object-fit: contain` mapping: the scale and letterbox offsets
+/// of a `sim_w`×`sim_h` frame drawn inside a `css_w`×`css_h` box.
+/// Shared by the web pointer math (`window_pos_to_sim`) and unit-tested
+/// natively; it becomes load-bearing for a future display-size backing
+/// store (the letterbox would then move into `gl.viewport`).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn contain_map(css_w: f64, css_h: f64, sim_w: f64, sim_h: f64) -> (f64, f64, f64) {
+    let scale = (css_w / sim_w).min(css_h / sim_h);
+    let off_x = (css_w - sim_w * scale) / 2.0;
+    let off_y = (css_h - sim_h * scale) / 2.0;
+    (scale, off_x, off_y)
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Create render context, trying GPU first with CPU fallback (unless `force_cpu` is set).
@@ -870,6 +1170,24 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
+
+    #[test]
+    fn contain_map_letterboxes_like_object_fit() {
+        // Wide box, 4:3 frame: height-limited, bars left and right.
+        let (scale, off_x, off_y) = contain_map(1600.0, 600.0, 800.0, 600.0);
+        assert!((scale - 1.0).abs() < 1e-9);
+        assert!((off_x - 400.0).abs() < 1e-9);
+        assert!(off_y.abs() < 1e-9);
+        // Tall box: width-limited, bars top and bottom.
+        let (scale, off_x, off_y) = contain_map(800.0, 1200.0, 800.0, 600.0);
+        assert!((scale - 1.0).abs() < 1e-9);
+        assert!(off_x.abs() < 1e-9);
+        assert!((off_y - 300.0).abs() < 1e-9);
+        // Exact fit: identity, no bars.
+        let (scale, off_x, off_y) = contain_map(400.0, 300.0, 800.0, 600.0);
+        assert!((scale - 0.5).abs() < 1e-9, "downscale to fit");
+        assert!(off_x.abs() < 1e-9 && off_y.abs() < 1e-9);
+    }
 
     #[test]
     fn stretch_axis_maps_full_physical_range_onto_logical() {

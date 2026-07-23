@@ -25,6 +25,9 @@ pub mod gui;
 // chime_message) compiles everywhere; the midir port shell stays
 // native and the WebMIDI shell wasm, cfg-gated inside the module.
 pub mod midi;
+// Cross-target like midi: pure data structures shared by both shells'
+// frame loops; the clocks live in the shells.
+pub mod perf;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 

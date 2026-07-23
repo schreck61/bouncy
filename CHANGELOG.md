@@ -4,6 +4,49 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- **Web performance round.** Four coordinated changes, plus the
+  instrument to judge them:
+  - `--perf` / `?perf`: a HUD overlay with per-frame phase timings
+    (simulate, raster, present, publish) and rayon dispatch counts as
+    rolling 120-frame mean/p95/max — accumulated Rust-side, so
+    throttled tabs and 30 Hz polls can't hide spikes. Works on both
+    shells; implies a visible HUD (`H` still cycles).
+  - The web shell no longer serializes the entire scene to preset TOML
+    every frame: the Download-scene button now requests a fresh
+    snapshot on click (`request_scene_toml`), with a once-per-30-frames
+    fallback publish for stale cached pages.
+  - Dispatch diet: the web thread pool caps at 8 workers by default
+    (`?threads=N` overrides, uncapped) — measured on a 16-core M-series
+    in Chrome, 16 workers matched 8's mean with worse spikes and 4 was
+    ~25% slower; the collision row sweep now dispatches over contiguous
+    row chunks (~4 per worker) instead of one task per grid row, and
+    the Barnes-Hut pass caps its split depth to match — both proven
+    byte-identical for any task and thread count. A new
+    `--par-threshold`/`?par-threshold=N` knob overrides the parallel
+    fan-out threshold; the overlay's A/B sweeps showed the native 1024
+    default is right on wasm too (parallel beat serial by ~27% at 1.3k
+    and ~44% at 2.5k particles once the pool was capped), so the
+    provisional idea of raising it was dropped. The old roadmap idea of
+    hoisting to one dispatch per frame was judged infeasible (rayon
+    workers park between dispatches with no keep-warm knob; substeps
+    form a strict serial chain).
+  - **WebGL2 present path**: the wasm demo now presents through a
+    textured fullscreen triangle instead of Canvas2D `putImageData`,
+    uploading the frame texture directly from (shared) wasm memory —
+    the per-frame wasm→JS copy is gone on the multi-threaded build
+    (with a probed staging fallback for engines that reject
+    shared-memory uploads). Measured ~3x cheaper per present (p95
+    0.09 ms vs 0.26 ms at 12k particles in Chrome; the gap is expected
+    to matter most in Firefox, whose canvas2d present was the original
+    complaint). `?cpu` forces the old Canvas2D path, the automatic
+    fallback keeps it for machines without WebGL2, and the console
+    logs which path is live. Rendering is pixel-equivalent; pointer
+    math and letterboxing are untouched. At the 12,000-particle cap
+    with self-gravity on, the demo now holds 120 fps with ~5 ms of
+    frame work (sim p95 4.2 ms, raster 1.1 ms, present 0.1 ms).
+
 ## 1.15.0 — 2026-07-22
 
 - **Runtime MIDI ports on both shells.** The native panel gains an
