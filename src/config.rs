@@ -208,6 +208,12 @@ pub struct Config {
     #[arg(long)]
     pub list_midi_ports: bool,
 
+    /// Start recording chimes from the first frame; stopping (Z) or
+    /// quitting writes a .mid and a .wav to the working directory
+    /// (native only)
+    #[arg(long)]
+    pub capture: bool,
+
     /// Mirror the frame 4-fold around the screen center (toggle at runtime
     /// with K)
     #[arg(long)]
@@ -511,6 +517,10 @@ pub const CONTROLS: &[(&str, &str)] = &[
     (
         "Y",
         "Toggle MIDI note sending (native; needs --midi-port at launch)",
+    ),
+    (
+        "Z",
+        "Start/stop capture: chimes to a .mid + .wav in the working directory (native)",
     ),
     ("K", "Toggle kaleidoscope rendering"),
     ("G (hold)", "Gravity well at the cursor; Shift+G repels"),

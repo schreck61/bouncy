@@ -4,6 +4,39 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- The deferred MIDI rungs, all three. **Per-wall MIDI mapping**: a
+  wall's chime strikes can pin a fixed MIDI key (`midi-note = 0-127`)
+  and/or channel (`midi-channel = 1-16`) in scene files or from two new
+  inspector sliders on both shells — MIDI-only, the local chime is
+  untouched; a silent wall with MIDI keys is rejected loudly (it never
+  chimes, so it never sends). **Capture** (`Z`, `--capture`, native):
+  record the chime stream and write both a format-0 `.mid` (the
+  resolved per-wall MIDI stream, 200 ms gates, tempo from quantize) and
+  a `.wav` bounce of the internal synth (which plays degrees, so it
+  ignores `midi-note` overrides — the two files carry the two truths)
+  to the working directory; a quit mid-recording still writes, and the
+  REC HUD line shows elapsed time and notes. **Browser WebMIDI**
+  (Chromium): the demo's Enable MIDI button asks for permission and
+  drives the first available output with the same scheduler as the
+  native port; `Y` gates sending on both shells, non-Chromium browsers
+  simply never show the button, and a denial degrades to a banner.
+  Under the hood the scheduler went channel-aware — voices keyed
+  (channel, key), CC 123 broadcast on connect and targeted per used
+  channel on quit — with the default mapping byte-identical to 1.12.
+- A **Draw wall** panel button on both shells: arm it, then click-drag
+  on the arena to draw (curves and polylines chain into one stroke,
+  exactly like held-V) — which finally makes walls reachable on touch
+  devices, where the keyboard gesture never could. A tool-drawn wall is
+  selected the moment the drag ends, so its chime, filter, and MIDI
+  settings are immediately editable in the inspector. The web panel
+  also now hands keyboard focus back to the canvas after every
+  interaction, so the hotkeys keep working without a burst-costing
+  arena click, and its per-frame readout refresh writes to the DOM
+  only on change — scrolling the panel no longer competes with the
+  simulation for the frame budget.
+
 ## 1.13.0 — 2026-07-22
 
 - Filter walls — a wall stroke can be semipermeable (drawn dashed).

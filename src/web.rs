@@ -82,6 +82,17 @@ pub struct Snapshot {
     pub selection_pass: Option<String>,
     /// Emitter stamped-note label: "none" or "degree D".
     pub selection_emitter_note: Option<String>,
+    /// Stroke MIDI-key label: "auto" or "60 (C4)".
+    pub selection_midi_key: Option<String>,
+    /// Stroke MIDI channel, 1-based like a DAW.
+    pub selection_midi_channel: Option<u32>,
+    /// `WebMIDI`: a browser output port is connected and ready.
+    pub midi_ready: bool,
+    /// `WebMIDI`: the last enable attempt failed (no API, no ports, or
+    /// permission denied).
+    pub midi_failed: bool,
+    /// Note sending is gated on (Y / the panel toggle).
+    pub midi_enabled: bool,
 }
 
 /// The mailbox shared between the running [`App`] and the [`WebHandle`]
@@ -375,6 +386,48 @@ impl WebHandle {
     /// Step the emitter's stamped note: none → degree 0..10 → none.
     pub fn cycle_emitter_note(&self, id: u32) {
         self.push(WebCommand::CycleEmitterNote(id));
+    }
+
+    /// Pin the stroke's MIDI key (negative = the pentatonic auto
+    /// mapping; 0..=127 pins, clamped like the scene TOML).
+    pub fn set_stroke_midi_key(&self, id: u32, key: i32) {
+        let key = u8::try_from(key).ok().map(|k| k.min(127));
+        self.push(WebCommand::SetStrokeMidiKey(id, key));
+    }
+
+    /// Set the stroke's MIDI channel (1-based, like a DAW and the
+    /// scene TOML; clamped to 1..=16).
+    pub fn set_stroke_midi_channel(&self, id: u32, channel: u32) {
+        #[allow(clippy::cast_possible_truncation)]
+        let ch = (channel.clamp(1, 16) - 1) as u8;
+        self.push(WebCommand::SetStrokeMidiChannel(id, ch));
+    }
+
+    /// Draw one wall segment from the panel's Draw-wall drag tool: a
+    /// fresh stroke for the drag's first segment (`extend` false),
+    /// chained onto it for the rest — the same polyline semantics as
+    /// the held-V gesture.
+    pub fn draw_wall(&self, x1: f64, y1: f64, x2: f64, y2: f64, extend: bool) {
+        self.push(WebCommand::DrawWall {
+            x1,
+            y1,
+            x2,
+            y2,
+            extend,
+        });
+    }
+
+    /// Kick off the `WebMIDI` permission request (must come from a user
+    /// gesture, like `enable_audio`). Readiness is asynchronous: watch
+    /// `midi_ready` / `midi_failed` in the polled snapshot.
+    pub fn enable_midi(&self) {
+        self.push(WebCommand::EnableMidi);
+    }
+
+    /// Toggle note sending while the browser port is connected (the
+    /// panel twin of the Y key).
+    pub fn toggle_midi(&self) {
+        self.push(WebCommand::Plain(Command::ToggleMidi));
     }
 
     /// Delete one emitter by id (its particles keep flying).

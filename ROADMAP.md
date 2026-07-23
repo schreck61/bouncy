@@ -56,6 +56,15 @@ file only tracks what's ahead.
   the filter, so spawns, bursts, and matter still treat every wall as
   solid and the divided-arena audit proves a gate leaks exactly its
   grants.
+- **1.14** cleared the deferred MIDI backlog: per-wall MIDI
+  note/channel mapping (`midi-note`/`midi-channel` scene keys +
+  inspector sliders on both shells; the scheduler went channel-aware
+  with the default mapping byte-identical to 1.12), self-contained
+  capture (`Z`/`--capture` writes a standard `.mid` of the resolved
+  stream and a `.wav` bounce of the internal synth — the no-DAW
+  path), and browser WebMIDI (Chromium; the demo's Enable MIDI
+  button drives the first output port through the same scheduler,
+  degrading to a hidden button or a banner everywhere else).
 - **1.3** shipped the browser demo: the same simulation compiled to
   WebAssembly with an HTML control panel over the `Command` dispatch,
   WebAudio, live resize, share links, launch options, and an optional
@@ -73,18 +82,15 @@ file only tracks what's ahead.
   once; raise the parallel thresholds on wasm (the 1024 break-even was
   measured natively); cap the web thread pool below
   `hardwareConcurrency`; longer-term, a WebGL/WebGPU present path.
-- **The emergent instrument: deferred MIDI rungs.** The staged
-  instrument program that grew out of user feedback (walls that play
-  notes turn the sim into an Otomata-style generative sequencer) is
-  now complete — emitters shipped in 1.9.0 with the quantize snap in
-  1.11.0, MIDI out in 1.12.0, and filter walls closed it out in
-  1.13.0 (see "Shipped so far"). What remains from the MIDI rung:
-  browser WebMIDI (Chrome, matching the demo's Chrome-first stance),
-  per-wall MIDI note/channel mapping via scene keys, and a
-  self-contained capture/export path (MIDI file or WAV of the
-  internal synth) for everyone without a DAW — recording the IAC bus
-  in a DAW already covers capture for DAW owners, and strict timing
-  stays the DAW's job.
+- **The emergent instrument: complete.** The staged program that grew
+  out of user feedback (walls that play notes turn the sim into an
+  Otomata-style generative sequencer) shipped in full across
+  1.6–1.14 — chimes, scenes, emitters, the inspector, quantize, MIDI
+  out, filter walls, and finally the deferred MIDI rungs (per-wall
+  mapping, capture, WebMIDI). Nothing from the program remains ahead;
+  possible far-future extensions (MIDI *in*, WAV capture of pings and
+  rumble alongside chimes, browser capture downloads) have not been
+  scoped and belong to user feedback.
 
 ## Smaller / opportunistic
 

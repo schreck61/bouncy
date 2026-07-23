@@ -152,6 +152,9 @@ pub struct WallChime {
     pub energy: f64,
     /// Stereo pan of the contact point (0.0 = left, 1.0 = right).
     pub pan: f64,
+    /// The struck stroke's MIDI mapping, copied here so every sender
+    /// (native port, browser port, capture) resolves one struct.
+    pub midi: WallMidi,
 }
 
 /// Per-segment chime metadata, index-aligned with the segments list.
@@ -165,10 +168,14 @@ pub struct WallMeta {
     /// What the wall lets through (per-stroke uniform, like `note`);
     /// orthogonal to the chime — a silent gate is legal.
     pub filter: WallFilter,
+    /// How this stroke's strikes speak on the MIDI wire (per-stroke
+    /// uniform); orthogonal to the local chime.
+    pub midi: WallMidi,
 }
 
 pub use crate::physics::Polarity;
 pub use crate::physics::WallFilter;
+pub use crate::presets::WallMidi;
 
 /// A gravity well: the transient cursor well (held G) passed into each
 /// step, or a persistent pinned well (W key) stored in the simulation.
@@ -462,6 +469,7 @@ impl Simulation {
                 stroke: self.next_stroke_id,
                 note: wall.note,
                 filter: wall.filter,
+                midi: wall.midi,
             });
             self.next_stroke_id += 1;
         }
@@ -717,6 +725,12 @@ impl Simulation {
         self.wall_meta.iter().map(|m| m.filter).collect()
     }
 
+    /// Per-segment MIDI mappings for scene export, index-aligned like
+    /// the notes and filters (per-stroke uniform, plain copy).
+    pub fn wall_export_midi(&self) -> Vec<WallMidi> {
+        self.wall_meta.iter().map(|m| m.midi).collect()
+    }
+
     /// Filter this frame's raw wall strikes into audible chimes: drop
     /// sub-audible grazes, ring each (particle, stroke) at most once per
     /// frame and per cooldown window, keep each pair's hardest contact,
@@ -761,6 +775,7 @@ impl Simulation {
                     note,
                     energy: hit.energy,
                     pan: (hit.x / width).clamp(0.0, 1.0),
+                    midi: meta.midi,
                 },
             ));
         }
@@ -964,6 +979,7 @@ impl Simulation {
         self.wall_meta.push(WallMeta {
             stroke: self.next_stroke_id,
             note: WallNote::Auto,
+            midi: WallMidi::default(),
             filter: WallFilter::None,
         });
         self.next_stroke_id += 1;
@@ -984,6 +1000,7 @@ impl Simulation {
         self.wall_meta.push(WallMeta {
             stroke: last.stroke,
             note: last.note,
+            midi: last.midi,
             filter: last.filter,
         });
         true
@@ -1206,6 +1223,34 @@ impl Simulation {
         }
         if found {
             self.gate_state.forget_stroke(stroke);
+            self.wake();
+        }
+        found
+    }
+
+    /// A stroke's MIDI mapping, if the stroke is still alive.
+    pub fn stroke_midi_setting(&self, stroke: u32) -> Option<WallMidi> {
+        self.wall_meta
+            .iter()
+            .find(|m| m.stroke == stroke)
+            .map(|m| m.midi)
+    }
+
+    /// Set how every segment of the stroke speaks on the MIDI wire (a
+    /// stroke's mapping is uniform, like its note and filter). Returns
+    /// false if the id is dead or the mapping is out of range (key
+    /// 0..=127, channel 0..=15). Purely a wire-side setting: the local
+    /// chime is untouched.
+    pub fn set_stroke_midi(&mut self, stroke: u32, midi: WallMidi) -> bool {
+        if midi.key.is_some_and(|k| k > 127) || midi.channel > 15 {
+            return false;
+        }
+        let mut found = false;
+        for m in self.wall_meta.iter_mut().filter(|m| m.stroke == stroke) {
+            m.midi = midi;
+            found = true;
+        }
+        if found {
             self.wake();
         }
         found
@@ -4545,6 +4590,7 @@ mod tests {
             x2: 0.9,
             y2: 0.5,
             note: WallNote::Note(7),
+            midi: crate::presets::WallMidi::default(),
             filter: WallFilter::None,
         });
         let s2 = Simulation::new(&cfg, 800, 600);
@@ -4561,6 +4607,7 @@ mod tests {
             y2: 1.0,
             note: WallNote::Auto,
             filter: WallFilter::Gate(3),
+            midi: crate::presets::WallMidi::default(),
         });
         cfg.scene.emitters.push(crate::presets::SceneEmitter {
             x: 0.8,
@@ -4591,6 +4638,7 @@ mod tests {
             x2: 0.35,
             y2: 0.5,
             note: WallNote::Silent,
+            midi: crate::presets::WallMidi::default(),
             filter: WallFilter::None,
         });
         cfg.scene.walls.push(crate::presets::SceneWall {
@@ -4599,6 +4647,7 @@ mod tests {
             x2: 0.75,
             y2: 0.5,
             note: WallNote::Note(5),
+            midi: crate::presets::WallMidi::default(),
             filter: WallFilter::None,
         });
         let mut s = Simulation::new(&cfg, 800, 600);
@@ -5423,6 +5472,54 @@ mod tests {
                 s.particles[0].vx = 0.0;
             }
         }
+    }
+
+    #[test]
+    fn stroke_midi_mapping_validates_and_rides_the_chime_events() {
+        let mut s = filter_sim();
+        let stroke = s.wall_meta()[0].stroke;
+        assert_eq!(s.stroke_midi_setting(stroke), Some(WallMidi::default()));
+        // Validation at the boundary; rejected sets are no-ops.
+        assert!(!s.set_stroke_midi(
+            stroke,
+            WallMidi {
+                key: None,
+                channel: 16
+            }
+        ));
+        assert_eq!(s.stroke_midi_setting(stroke), Some(WallMidi::default()));
+        let mapped = WallMidi {
+            key: Some(48),
+            channel: 2,
+        };
+        assert!(!s.set_stroke_midi(stroke + 99, mapped), "dead id rejected");
+        assert_eq!(s.stroke_midi_setting(stroke + 99), None);
+        assert!(s.set_stroke_midi(stroke, mapped));
+        assert!(
+            s.wall_meta()
+                .iter()
+                .filter(|m| m.stroke == stroke)
+                .all(|m| m.midi == mapped),
+            "every segment of the stroke carries the mapping"
+        );
+        assert_eq!(s.wall_export_midi(), vec![mapped]);
+        // The mapping rides each chime event for the senders.
+        let mut now = Instant::now();
+        let (crossed, chimes) = wall_trip(&mut s, &mut now);
+        assert!(!crossed && chimes > 0, "the trip chimed");
+        s.particles[0].x = 380.0;
+        s.particles[0].vx = 100.0;
+        s.particles[0].vy = 0.0;
+        let mut carried = None;
+        for _ in 0..100 {
+            let ev = s.step(0.01, now, None);
+            now += Duration::from_millis(200);
+            if let Some(chime) = ev.wall_hits.first() {
+                carried = Some(chime.midi);
+                break;
+            }
+        }
+        assert_eq!(carried, Some(mapped), "WallChime carries the mapping");
     }
 
     #[test]

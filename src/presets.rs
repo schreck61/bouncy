@@ -500,6 +500,7 @@ const fn noted(x1: f64, y1: f64, x2: f64, y2: f64, note: u8) -> SceneWall {
         y2,
         note: WallNote::Note(note),
         filter: WallFilter::None,
+        midi: WallMidi::AUTO,
     }
 }
 
@@ -512,6 +513,7 @@ const fn silent(x1: f64, y1: f64, x2: f64, y2: f64) -> SceneWall {
         y2,
         note: WallNote::Silent,
         filter: WallFilter::None,
+        midi: WallMidi::AUTO,
     }
 }
 
@@ -587,6 +589,30 @@ impl WallNote {
     }
 }
 
+/// Per-stroke MIDI overrides (`midi-note` / `midi-channel` in the
+/// TOML): how a wall's chime strikes speak on the wire, natively over
+/// `--midi-port` and in the browser over `WebMIDI`. Orthogonal to the
+/// local chime — the synth still plays the wall's scale degree; only
+/// the MIDI stream is remapped. The default is the fixed 1.12 mapping:
+/// pentatonic auto-key on channel 1.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WallMidi {
+    /// Fixed MIDI key 0..=127 (60 = middle C); `None` derives the key
+    /// from the chime's pentatonic degree.
+    pub key: Option<u8>,
+    /// Zero-based wire channel 0..=15 (rendered 1..=16 in TOML and UI).
+    pub channel: u8,
+}
+
+impl WallMidi {
+    /// The default mapping as a const (usable in `const fn` scene
+    /// helpers): pentatonic auto-key on channel 1.
+    pub const AUTO: WallMidi = WallMidi {
+        key: None,
+        channel: 0,
+    };
+}
+
 /// A wall segment in window-fraction coordinates.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct SceneWall {
@@ -599,6 +625,8 @@ pub struct SceneWall {
     /// What this wall lets through (`gate = N` / `pass-note = D` in the
     /// TOML), orthogonal to how it sounds.
     pub filter: WallFilter,
+    /// How this wall's strikes speak on the MIDI wire.
+    pub midi: WallMidi,
 }
 
 /// One user preset: an optional built-in to inherit from, an optional
@@ -835,6 +863,7 @@ fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>
                     y2: c[3],
                     note: WallNote::Auto,
                     filter: WallFilter::None,
+                    midi: WallMidi::default(),
                 });
             }
             toml::Value::Table(table) => {
@@ -922,6 +951,46 @@ fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>
                 } else {
                     WallFilter::None
                 };
+                if silent && (table.contains_key("midi-note") || table.contains_key("midi-channel"))
+                {
+                    return Err(format!(
+                        "preset '{preset}': a silent wall never chimes, so it \
+                         never sends MIDI — drop 'midi-note'/'midi-channel' or \
+                         the 'silent' key"
+                    ));
+                }
+                let midi_key = match table.get("midi-note") {
+                    None => None,
+                    Some(v) => {
+                        let key = v.as_integer().filter(|k| (0..=127).contains(k));
+                        let Some(key) = key else {
+                            return Err(format!(
+                                "preset '{preset}': wall midi-note must be an \
+                                 integer MIDI key 0-127 (60 = middle C; got {v})"
+                            ));
+                        };
+                        // Bounds-checked to 0-127 above.
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        Some(key as u8)
+                    }
+                };
+                let midi_channel = match table.get("midi-channel") {
+                    None => 0,
+                    Some(v) => {
+                        let ch = v.as_integer().filter(|c| (1..=16).contains(c));
+                        let Some(ch) = ch else {
+                            return Err(format!(
+                                "preset '{preset}': wall midi-channel must be an \
+                                 integer 1-16 (got {v})"
+                            ));
+                        };
+                        // 1-based on disk and in DAWs, 0-based on the wire.
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        {
+                            (ch - 1) as u8
+                        }
+                    }
+                };
                 walls.push(SceneWall {
                     x1: coord("x1")?,
                     y1: coord("y1")?,
@@ -929,6 +998,10 @@ fn parse_scene_walls(preset: &str, value: &toml::Value) -> Result<Vec<SceneWall>
                     y2: coord("y2")?,
                     note,
                     filter,
+                    midi: WallMidi {
+                        key: midi_key,
+                        channel: midi_channel,
+                    },
                 });
             }
             _ => {
@@ -1101,8 +1174,12 @@ pub fn scene_to_toml(
             .map(|w| {
                 // A plain auto wall keeps the legacy array form so
                 // exports stay readable by older binaries and
-                // diff-identical; any note or filter needs the table.
-                if w.note == WallNote::Auto && w.filter == WallFilter::None {
+                // diff-identical; any note, filter, or MIDI mapping
+                // needs the table.
+                if w.note == WallNote::Auto
+                    && w.filter == WallFilter::None
+                    && w.midi == WallMidi::default()
+                {
                     return toml::Value::Array(vec![
                         w.x1.into(),
                         w.y1.into(),
@@ -1132,6 +1209,13 @@ pub fn scene_to_toml(
                     WallFilter::Note(d) => {
                         t.insert("pass-note".into(), i64::from(d).into());
                     }
+                }
+                if let Some(key) = w.midi.key {
+                    t.insert("midi-note".into(), i64::from(key).into());
+                }
+                if w.midi.channel != 0 {
+                    // 1-based on disk, matching the parse.
+                    t.insert("midi-channel".into(), i64::from(w.midi.channel + 1).into());
                 }
                 toml::Value::Table(t)
             })
@@ -1354,6 +1438,7 @@ mod tests {
                 y2: 0.5,
                 note: WallNote::Auto,
                 filter: WallFilter::None,
+                midi: WallMidi::default(),
             }
         );
 
@@ -1392,6 +1477,7 @@ mod tests {
                 y2: 0.4,
                 note: WallNote::Auto,
                 filter: WallFilter::None,
+                midi: WallMidi::default(),
             },
             SceneWall {
                 x1: 0.5,
@@ -1400,6 +1486,7 @@ mod tests {
                 y2: 0.6,
                 note: WallNote::Note(4),
                 filter: WallFilter::None,
+                midi: WallMidi::default(),
             },
             SceneWall {
                 x1: 0.15,
@@ -1408,6 +1495,7 @@ mod tests {
                 y2: 0.8,
                 note: WallNote::Silent,
                 filter: WallFilter::None,
+                midi: WallMidi::default(),
             },
         ];
         let emitters = [SceneEmitter {
@@ -1456,6 +1544,7 @@ mod tests {
                 y2: 1.0,
                 note: WallNote::Auto,
                 filter: WallFilter::Gate(3),
+                midi: WallMidi::default(),
             },
             // A silent gate: pure escapement geometry.
             SceneWall {
@@ -1465,6 +1554,7 @@ mod tests {
                 y2: 0.9,
                 note: WallNote::Silent,
                 filter: WallFilter::Gate(8),
+                midi: WallMidi::default(),
             },
             // A chiming pass-note wall: sounds degree 2, passes degree 5.
             SceneWall {
@@ -1474,6 +1564,7 @@ mod tests {
                 y2: 0.9,
                 note: WallNote::Note(2),
                 filter: WallFilter::Note(5),
+                midi: WallMidi::default(),
             },
         ];
         let emitters = [SceneEmitter {
@@ -1496,6 +1587,95 @@ mod tests {
         let user = parse(&text, Path::new("/test/export.toml")).unwrap();
         assert_eq!(user.presets["routed"].scene.walls, walls);
         assert_eq!(user.presets["routed"].scene.emitters, emitters);
+    }
+
+    #[test]
+    fn midi_wall_keys_round_trip_and_validate() {
+        // Parse: 1-based channel on disk, 0-based in the struct.
+        let user = parse_str(
+            "[rig]\nwalls = [{ x1 = 0.1, y1 = 0.2, x2 = 0.3, y2 = 0.2, \
+             midi-note = 48, midi-channel = 3 }]\n",
+        )
+        .unwrap();
+        let wall = user.presets["rig"].scene.walls[0];
+        assert_eq!(
+            wall.midi,
+            WallMidi {
+                key: Some(48),
+                channel: 2
+            }
+        );
+        // Export writes the same 1-based form and survives a re-parse.
+        let text = scene_to_toml("rig", &[], &[], &user.presets["rig"].scene.walls, &[]);
+        assert!(text.contains("midi-note = 48"), "{text}");
+        assert!(text.contains("midi-channel = 3"), "{text}");
+        let back = parse(&text, Path::new("/test/export.toml")).unwrap();
+        assert_eq!(back.presets["rig"].scene.walls[0], wall);
+        // A mapping composes with a chime note and a filter.
+        let user = parse_str(
+            "[rig]\nwalls = [{ x1 = 0.1, y1 = 0.2, x2 = 0.3, y2 = 0.2, \
+             note = 4, gate = 3, midi-note = 72 }]\n",
+        )
+        .unwrap();
+        let wall = user.presets["rig"].scene.walls[0];
+        assert_eq!(wall.note, WallNote::Note(4));
+        assert_eq!(wall.filter, WallFilter::Gate(3));
+        assert_eq!(wall.midi.key, Some(72));
+        // Channel-only mapping exports without a midi-note key.
+        let text = scene_to_toml(
+            "rig",
+            &[],
+            &[],
+            &[SceneWall {
+                x1: 0.1,
+                y1: 0.2,
+                x2: 0.3,
+                y2: 0.2,
+                note: WallNote::Auto,
+                filter: WallFilter::None,
+                midi: WallMidi {
+                    key: None,
+                    channel: 9,
+                },
+            }],
+            &[],
+        );
+        assert!(!text.contains("midi-note"), "{text}");
+        assert!(text.contains("midi-channel = 10"), "{text}");
+    }
+
+    #[test]
+    fn midi_wall_keys_are_validated_loudly() {
+        let wall = |extra: &str| {
+            format!("[a]\nwalls = [{{ x1 = 0.1, y1 = 0.2, x2 = 0.3, y2 = 0.2, {extra} }}]\n")
+        };
+        let err = parse_str(&wall("midi-note = 128")).unwrap_err();
+        assert!(err.contains("0-127"), "{err}");
+        let err = parse_str(&wall("midi-note = -1")).unwrap_err();
+        assert!(err.contains("0-127"), "{err}");
+        let err = parse_str(&wall("midi-channel = 0")).unwrap_err();
+        assert!(err.contains("1-16"), "{err}");
+        let err = parse_str(&wall("midi-channel = 17")).unwrap_err();
+        assert!(err.contains("1-16"), "{err}");
+        let err = parse_str(&wall("silent = true, midi-note = 48")).unwrap_err();
+        assert!(
+            err.contains("silent") && err.contains("midi-note"),
+            "names both keys: {err}"
+        );
+        let err = parse_str(&wall("silent = true, midi-channel = 3")).unwrap_err();
+        assert!(err.contains("never sends MIDI"), "{err}");
+        // Mapping-free forms parse to the default (auto key, channel 1).
+        let user = parse_str(
+            "[old]\nwalls = [\n  [0.1, 0.2, 0.3, 0.2],\n  { x1 = 0.4, y1 = 0.5, x2 = 0.6, y2 = 0.5, note = 7 },\n]\n",
+        )
+        .unwrap();
+        assert!(
+            user.presets["old"]
+                .scene
+                .walls
+                .iter()
+                .all(|w| w.midi == WallMidi::default())
+        );
     }
 
     #[test]

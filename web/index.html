@@ -57,6 +57,7 @@
         <button id="btn-well" title="then click the canvas to pin a well there">Pin well</button>
         <button id="btn-repel" title="then click the canvas to pin a repeller there">Pin repeller</button>
         <button id="btn-emitter" title="then click the canvas to place an emitter (aims at the arena center)">Emitter</button>
+        <button id="btn-wall" title="then drag on the canvas to draw a wall (works on touch; V-drag does the same)">Wall</button>
       </div>
 
       <div class="row">
@@ -96,6 +97,18 @@
           <div class="row">
             <button id="btn-gate" title="every Nth striking particle passes; the rest bounce and chime">Gate: off</button>
             <button id="btn-pass" title="particles stamped with this note pass; the rest bounce">Pass: off</button>
+          </div>
+          <!-- MIDI mapping sliders: revealed only when the wasm bundle
+               publishes the fields (stale bundles keep this hidden). -->
+          <div id="insp-midi" hidden>
+            <label class="slider">MIDI key <output id="out-midikey">auto</output>
+              <input id="in-midikey" type="range" min="-1" max="127" step="1" value="-1"
+                     title="-1 = auto (pentatonic mapping); 0-127 pins a fixed key (60 = middle C)">
+            </label>
+            <label class="slider">MIDI ch <output id="out-midich">1</output>
+              <input id="in-midich" type="range" min="1" max="16" step="1" value="1"
+                     title="MIDI channel, 1-16">
+            </label>
           </div>
         </div>
         <div class="row">
@@ -141,6 +154,10 @@
 
       <div class="row">
         <button id="btn-sound">Enable sound</button>
+        <!-- Hidden unless the browser has the Web MIDI API (Chromium)
+             AND the wasm bundle publishes the midi fields. -->
+        <button id="btn-midi" hidden
+                title="send wall chimes to a MIDI output port (Chromium; asks for permission)">Enable MIDI</button>
       </div>
 
       <div class="row">

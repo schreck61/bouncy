@@ -189,7 +189,7 @@ fn synth_bell(frequency: f32) -> Vec<f32> {
 /// The chime palette for a timbre: eleven pentatonic degrees in the
 /// requested voice. `Chime` is the original ping, so the default
 /// sounds exactly as it always has.
-fn synth_chime_palette(timbre: ChimeTimbre) -> Vec<Vec<f32>> {
+pub(crate) fn synth_chime_palette(timbre: ChimeTimbre) -> Vec<Vec<f32>> {
     let synth: fn(f32) -> Vec<f32> = match timbre {
         ChimeTimbre::Chime => synth_ping,
         ChimeTimbre::Marimba => synth_marimba,
@@ -238,7 +238,7 @@ fn normalize_energy(energy: f64) -> f32 {
 
 /// Constant-power stereo gains for a pan position (0.0 = left, 1.0 = right).
 #[cfg(not(target_arch = "wasm32"))]
-fn pan_gains(pan: f32) -> (f32, f32) {
+pub(crate) fn pan_gains(pan: f32) -> (f32, f32) {
     let pan = pan.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
     (pan.cos(), pan.sin())
 }

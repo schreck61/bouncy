@@ -88,7 +88,9 @@ function armTool(id, spec) {
   $(id).classList.add("armed");
   $("tool-overlay").hidden = false;
   const chip = $("chip-tool");
-  chip.textContent = `placing ${spec.label} — click the canvas (Esc cancels)`;
+  chip.textContent = spec.drag
+    ? `placing ${spec.label} (Esc cancels)`
+    : `placing ${spec.label} — click the canvas (Esc cancels)`;
   chip.hidden = false;
 }
 
@@ -147,15 +149,65 @@ function bind(handle) {
         }
       },
     },
+    // The one drag-shaped tool: no act — the overlay's pointer
+    // handlers below own it. Works on touch, where held-V cannot.
+    "btn-wall": {
+      label: "wall — drag on the canvas",
+      drag: true,
+    },
   };
   for (const [id, spec] of Object.entries(tools)) {
     $(id).onclick = () => armTool(id, spec);
   }
   $("tool-overlay").onclick = (e) => {
+    // Drag tools are handled by the pointer listeners below; the
+    // click that follows their pointerup must not disarm-and-miss.
+    if (armed && armed.drag) return;
     const pos = armed && clickToSim(e);
     if (pos) armed.act(...pos);
     disarmTool();
   };
+
+  // The wall tool's drag: press anchors, each move past the same 12 px
+  // threshold the native V-drag uses emits a segment (the first opens
+  // a stroke, the rest chain onto it), release ends the stroke and
+  // disarms. Pointer events cover mouse and touch alike.
+  let wallAnchor = null;
+  let wallExtend = false;
+  const overlay = $("tool-overlay");
+  overlay.addEventListener("pointerdown", (e) => {
+    if (!armed || !armed.drag) return;
+    overlay.setPointerCapture(e.pointerId);
+    wallAnchor = clickToSim(e);
+    wallExtend = false;
+  });
+  overlay.addEventListener("pointermove", (e) => {
+    if (!wallAnchor || !armed) return;
+    const pos = clickToSim(e);
+    if (!pos) return;
+    const [x1, y1] = wallAnchor;
+    const [x2, y2] = pos;
+    if (Math.hypot(x2 - x1, y2 - y1) < 12) return;
+    handle.draw_wall?.(x1, y1, x2, y2, wallExtend);
+    wallAnchor = pos;
+    wallExtend = true;
+  });
+  overlay.addEventListener("pointerup", (e) => {
+    if (!wallAnchor) return;
+    // The release point completes the stroke: a fast drag (or a touch
+    // flick) can cross the whole arena between move events, and the
+    // last reach must not be dropped.
+    const pos = clickToSim(e);
+    if (pos) {
+      const [x1, y1] = wallAnchor;
+      const [x2, y2] = pos;
+      if (Math.hypot(x2 - x1, y2 - y1) >= 12) {
+        handle.draw_wall?.(x1, y1, x2, y2, wallExtend);
+      }
+    }
+    wallAnchor = null;
+    disarmTool();
+  });
   // Capture phase: cancel the tool before winit's canvas listener can
   // see the Escape (which would otherwise stop the whole event loop).
   window.addEventListener(
@@ -169,6 +221,16 @@ function bind(handle) {
     },
     true,
   );
+
+  // Enable MIDI: first click asks for permission (gesture-gated, like
+  // Enable sound); once ready, later clicks toggle sending.
+  $("btn-midi").onclick = () => {
+    if (latest.midi_ready) {
+      handle.toggle_midi?.();
+    } else {
+      handle.enable_midi?.();
+    }
+  };
 
   $("btn-clear-wells").onclick = () => handle.clear_wells();
   $("btn-clear-walls").onclick = () => handle.clear_walls();
@@ -210,6 +272,16 @@ function bind(handle) {
   $("in-ecap").oninput = (e) => {
     if (latest.selection_id != null) {
       handle.set_emitter_cap?.(latest.selection_id, Number(e.target.value));
+    }
+  };
+  $("in-midikey").oninput = (e) => {
+    if (latest.selection_id != null) {
+      handle.set_stroke_midi_key?.(latest.selection_id, Number(e.target.value));
+    }
+  };
+  $("in-midich").oninput = (e) => {
+    if (latest.selection_id != null) {
+      handle.set_stroke_midi_channel?.(latest.selection_id, Number(e.target.value));
     }
   };
   $("btn-color").onclick = () => handle.cycle_color_mode();
@@ -278,6 +350,17 @@ function bind(handle) {
   };
 
   $("panel-toggle").onclick = () => $("panel").classList.toggle("open");
+
+  // Hotkeys (V-drag walls, D-select, Y, ...) arrive through winit's
+  // listeners on the canvas, which need DOM focus — where focus starts
+  // on load, and where every panel click yanks it away. Clicking the
+  // arena to get it back would burst, so instead the panel hands focus
+  // straight back after each interaction: the panel is a veneer, never
+  // the focus owner (matching the native shell, where the panel cannot
+  // hold focus at all).
+  const refocusCanvas = () => $("bouncy").focus({ preventScroll: true });
+  $("panel").addEventListener("pointerup", () => setTimeout(refocusCanvas, 0));
+  $("panel-toggle").addEventListener("pointerup", () => setTimeout(refocusCanvas, 0));
   canvas.addEventListener("pointerdown", () => canvas.focus());
 
   // Live resize: the arena tracks the canvas's CSS size (debounced so a
@@ -401,9 +484,23 @@ globalThis.bouncyShareUrl = shareUrl;
 // (re)written only when this changes — outputs update every frame, but
 // rewriting a range input mid-drag would fight the user's thumb.
 let lastSelId = null;
+// The MIDI-failure banner fires once per failure, not every poll.
+let midiFailedShown = false;
 
 // Reflect the snapshot into the panel. Sliders follow the simulation
 // unless the user is mid-drag (their element has focus).
+// Write a text value only when it changed: reflect() runs every
+// animation frame, and unconditional textContent writes — even
+// same-string ones — replace text nodes and dirty layout inside the
+// scrolling panel. During an active scroll that forced layout work
+// competes with the same rAF budget the simulation runs on.
+const textCache = new Map();
+function setText(id, value) {
+  if (textCache.get(id) === value) return;
+  textCache.set(id, value);
+  $(id).textContent = value;
+}
+
 function reflect(s) {
   latest = s;
 
@@ -414,56 +511,82 @@ function reflect(s) {
   $("insp-emitter").hidden = kind !== "emitter";
   $("insp-stroke").hidden = kind !== "stroke";
   if (kind === "emitter") {
-    $("insp-emitter-label").textContent =
-      `Emitter #${s.selection_id} — aim ${Math.round(s.selection_angle)}°`;
-    $("out-erate").textContent = `${s.selection_rate.toFixed(1)}/s`;
-    $("out-ecap").textContent = `${s.selection_cap} live`;
+    setText("insp-emitter-label", `Emitter #${s.selection_id} — aim ${Math.round(s.selection_angle)}°`);
+    setText("out-erate", `${s.selection_rate.toFixed(1)}/s`);
+    setText("out-ecap", `${s.selection_cap} live`);
     if (s.selection_id !== lastSelId) {
       $("in-erate").value = s.selection_rate;
       $("in-ecap").value = s.selection_cap;
     }
     // Pre-1.13 bundle: no emitter-note field yet.
-    $("btn-enote").textContent = `Note: ${s.selection_emitter_note ?? "…"}`;
+    setText("btn-enote", `Note: ${s.selection_emitter_note ?? "…"}`);
   } else if (kind === "stroke") {
     const n = s.selection_segments;
-    $("insp-stroke-label").textContent =
-      `Wall #${s.selection_id} — ${n} segment${n === 1 ? "" : "s"}`;
-    $("btn-note").textContent = `Note: ${s.selection_note}`;
+    setText("insp-stroke-label", `Wall #${s.selection_id} — ${n} segment${n === 1 ? "" : "s"}`);
+    setText("btn-note", `Note: ${s.selection_note}`);
     // Pre-1.13 bundle: no filter fields yet.
-    $("btn-gate").textContent = `Gate: ${s.selection_gate ?? "…"}`;
-    $("btn-pass").textContent = `Pass: ${s.selection_pass ?? "…"}`;
+    setText("btn-gate", `Gate: ${s.selection_gate ?? "…"}`);
+    setText("btn-pass", `Pass: ${s.selection_pass ?? "…"}`);
+    // Pre-1.14 bundle: no MIDI mapping fields — the sliders stay hidden.
+    const hasMidi = s.selection_midi_key != null;
+    $("insp-midi").hidden = !hasMidi;
+    if (hasMidi) {
+      setText("out-midikey", s.selection_midi_key);
+      setText("out-midich", `${s.selection_midi_channel}`);
+      if (s.selection_id !== lastSelId) {
+        $("in-midikey").value = s.selection_midi_key === "auto"
+          ? -1
+          : parseInt(s.selection_midi_key, 10);
+        $("in-midich").value = s.selection_midi_channel;
+      }
+    }
   }
   lastSelId = kind === null ? null : s.selection_id;
-  $("ro-fps").textContent = s.fps.toFixed(0);
-  $("ro-particles").textContent = s.particles.toLocaleString();
-  $("ro-cap").textContent = `of ${s.max_particles.toLocaleString()}`;
-  $("ro-births").textContent = `${s.birth_rate}`;
-  $("ro-size").textContent = `${s.width}×${s.height}`;
-  $("btn-pause").textContent = s.paused ? "Resume" : "Pause";
+  setText("ro-fps", s.fps.toFixed(0));
+  setText("ro-particles", s.particles.toLocaleString());
+  setText("ro-cap", `of ${s.max_particles.toLocaleString()}`);
+  setText("ro-births", `${s.birth_rate}`);
+  setText("ro-size", `${s.width}×${s.height}`);
+  setText("btn-pause", s.paused ? "Resume" : "Pause");
 
   // Status chips: the running/paused/stopped chip is always visible;
   // the rest appear only while their state holds.
   const state = $("chip-state");
-  state.textContent = s.stopped ? "stopped" : s.paused ? "paused" : "running";
-  state.className = `chip ${s.stopped ? "stop" : s.paused ? "pause" : "run"}`;
+  setText("chip-state", s.stopped ? "stopped" : s.paused ? "paused" : "running");
+  const chipClass = `chip ${s.stopped ? "stop" : s.paused ? "pause" : "run"}`;
+  if (state.className !== chipClass) state.className = chipClass;
   $("chip-muted").hidden = !s.muted;
   $("chip-exploding").hidden = !s.exploding;
 
+  // Enable MIDI shows only where the API exists AND the bundle
+  // publishes the fields (a stale wasm keeps it hidden); its label
+  // tracks the async permission state.
+  const midiCapable =
+    typeof navigator.requestMIDIAccess === "function" &&
+    s.midi_ready !== undefined;
+  $("btn-midi").hidden = !midiCapable;
+  if (midiCapable) {
+    setText("btn-midi", s.midi_ready
+      ? (s.midi_enabled ? "MIDI on — pause" : "MIDI paused — send")
+      : "Enable MIDI");
+    if (s.midi_failed && !midiFailedShown) {
+      midiFailedShown = true;
+      fail("MIDI unavailable or permission denied");
+    }
+  }
+
   // Cycle buttons and clear buttons show where they currently stand.
-  $("val-spawn").textContent = s.spawn_mode;
-  $("val-color").textContent = s.color_mode;
-  $("val-hud").textContent = s.hud ?? "…"; // pre-1.3.2 bundle: no field yet
-  $("btn-clear-wells").textContent =
-    s.wells > 0 ? `Clear wells (${s.wells})` : "Clear wells";
-  $("btn-clear-walls").textContent =
-    s.walls > 0 ? `Clear walls (${s.walls})` : "Clear walls";
-  $("btn-clear-emitters").textContent =
-    s.emitters > 0 ? `Clear emitters (${s.emitters})` : "Clear emitters";
+  setText("val-spawn", s.spawn_mode);
+  setText("val-color", s.color_mode);
+  setText("val-hud", s.hud ?? "…"); // pre-1.3.2 bundle: no field yet
+  setText("btn-clear-wells", s.wells > 0 ? `Clear wells (${s.wells})` : "Clear wells");
+  setText("btn-clear-walls", s.walls > 0 ? `Clear walls (${s.walls})` : "Clear walls");
+  setText("btn-clear-emitters", s.emitters > 0 ? `Clear emitters (${s.emitters})` : "Clear emitters");
 
   const follow = (id, value, format) => {
     const el = $(`in-${id}`);
     if (document.activeElement !== el) el.value = value;
-    $(`out-${id}`).textContent = format;
+    setText(`out-${id}`, format);
   };
   follow("gravity", s.gravity, `${s.gravity}%`);
   follow("pelastic", s.particle_elasticity, s.particle_elasticity.toFixed(2));
@@ -477,7 +600,7 @@ function reflect(s) {
   // quantize off on the default grid, never NaN.
   const bpm = s.bpm ?? 0;
   follow("bpm", bpm, bpm === 0 ? "off" : `${bpm.toFixed(0)} bpm`);
-  $("val-beat-div").textContent = `1/${s.beat_div ?? 4}`;
+  setText("val-beat-div", `1/${s.beat_div ?? 4}`);
 
   $("tg-matter").checked = s.matter;
   $("tg-flow").checked = s.flow;
@@ -486,9 +609,9 @@ function reflect(s) {
   $("tg-kaleido").checked = s.kaleidoscope;
   $("tg-music").checked = s.music;
   $("tg-chimes").checked = s.wall_chimes;
-  $("btn-sound").textContent = !s.audio_ready
+  setText("btn-sound", !s.audio_ready
     ? "Enable sound"
-    : s.muted ? "Muted — unmute" : "Sound on — mute";
+    : s.muted ? "Muted — unmute" : "Sound on — mute");
 }
 
 (async () => {
@@ -517,12 +640,23 @@ function reflect(s) {
     globalThis.bouncyHandle = handle;
     bind(handle);
     bindLaunchOptions(mod);
-    const poll = () => {
-      const s = handle.state();
-      if (s) {
-        // width > 0 distinguishes a published snapshot from the default.
-        if (!initialState && s.width > 0) initialState = s;
-        reflect(s);
+    // Poll at ~30 Hz, not every frame: handle.state() serializes the
+    // full snapshot out of wasm into a fresh JS object, and doing that
+    // at display rate is pure allocation churn — readouts updating
+    // 30 times a second read as continuous, and the reclaimed frame
+    // budget belongs to the simulation.
+    const POLL_MS = 33;
+    let lastPoll = 0;
+    const poll = (t) => {
+      if (t - lastPoll >= POLL_MS) {
+        lastPoll = t;
+        const s = handle.state();
+        if (s) {
+          // width > 0 distinguishes a published snapshot from the
+          // default.
+          if (!initialState && s.width > 0) initialState = s;
+          reflect(s);
+        }
       }
       requestAnimationFrame(poll);
     };

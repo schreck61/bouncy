@@ -18,8 +18,12 @@ pub mod sim;
 pub mod text;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub mod gui;
+pub mod capture;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod gui;
+// Cross-target since 1.14: the pure message half (Scheduler,
+// chime_message) compiles everywhere; the midir port shell stays
+// native and the WebMIDI shell wasm, cfg-gated inside the module.
 pub mod midi;
 #[cfg(target_arch = "wasm32")]
 pub mod web;

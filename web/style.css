@@ -67,6 +67,11 @@ canvas#bouncy {
   border-left: 1px solid var(--line);
   padding: 14px 16px 24px;
   overflow-y: auto;
+  /* Own compositor layer + paint containment: panel scrolling must
+     stay off the main thread and never share raster damage with the
+     canvas repainting underneath at frame rate. */
+  will-change: transform;
+  contain: layout paint;
 }
 
 #panel h1 {

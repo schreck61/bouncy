@@ -20,7 +20,7 @@
 
 use crate::app::{Command, PanelCommand};
 use crate::presets::WallNote;
-use crate::sim::{Polarity, WallFilter};
+use crate::sim::{Polarity, WallFilter, WallMidi};
 use crate::text::draw_text;
 
 /// Panel width in simulation pixels.
@@ -78,6 +78,12 @@ const MIN_PARTICLES_POINTS: &[(f64, f64)] = &[(0.0, 0.0), (100.0, 1.0)];
 const EMITTER_RATE_POINTS: &[(f64, f64)] = &[(0.1, 0.0), (5.0, 0.7), (20.0, 1.0)];
 /// Everyday caps (a hand of live particles) get most of the track.
 const EMITTER_CAP_POINTS: &[(f64, f64)] = &[(1.0, 0.0), (30.0, 0.7), (200.0, 1.0)];
+/// Inspector: the selected stroke's MIDI key. −1 is the "auto" sentinel
+/// (pentatonic mapping); 0..=127 pins a key. Linear — every key is one
+/// slider step, and detents catch auto and middle C.
+const STROKE_MIDI_KEY_POINTS: &[(f64, f64)] = &[(-1.0, 0.0), (127.0, 1.0)];
+/// Inspector: the selected stroke's MIDI channel, 1-based like a DAW.
+const STROKE_MIDI_CH_POINTS: &[(f64, f64)] = &[(1.0, 0.0), (16.0, 1.0)];
 /// Built-in presets the launch section cycles through; index 0 is
 /// "none". Derived from the preset enum itself — the same source the
 /// web panel's dropdown uses — so the list can never drift.
@@ -112,6 +118,10 @@ pub enum SliderId {
     EmitterRate,
     /// Inspector: the selected emitter's live-particle cap.
     EmitterCap,
+    /// Inspector: the selected stroke's MIDI key (−1 = auto).
+    StrokeMidiKey,
+    /// Inspector: the selected stroke's MIDI channel (1-based).
+    StrokeMidiChannel,
 }
 
 /// Identity of an on/off row.
@@ -145,6 +155,9 @@ pub enum ButtonId {
     PinWell,
     PinRepeller,
     PlaceEmitter,
+    /// Arms wall drawing: press on the arena anchors, dragging draws
+    /// (the panel twin of held-V), release ends the stroke.
+    PlaceWall,
     ClearWells,
     ClearWalls,
     ClearEmitters,
@@ -189,6 +202,7 @@ pub enum PanelSelection {
         segments: usize,
         note: WallNote,
         filter: WallFilter,
+        midi: WallMidi,
     },
 }
 
@@ -452,7 +466,18 @@ impl Gui {
 
     /// Consume the armed tool with an arena click at `(x, y)`: returns
     /// the placement command and disarms.
+    /// The wall tool is armed (the app routes press/drag/release to
+    /// the V-drag machinery instead of a one-shot placement).
+    pub fn armed_wall(&self) -> bool {
+        self.armed == Some(ButtonId::PlaceWall)
+    }
+
     pub fn place_armed(&mut self, x: f64, y: f64) -> Option<PanelCommand> {
+        // The wall tool is drag-shaped: the app's press/move/release
+        // path owns it, and arming must survive the press.
+        if self.armed == Some(ButtonId::PlaceWall) {
+            return None;
+        }
         let tool = self.armed.take()?;
         Some(match tool {
             ButtonId::Burst => PanelCommand::SpawnBurst(x, y),
@@ -705,6 +730,34 @@ impl Gui {
                                 let cap = snapped.round() as i32;
                                 if (f64::from(cap) - value).abs() > 1e-9 {
                                     commands.push(PanelCommand::SetEmitterCap(id, cap));
+                                }
+                            }
+                        }
+                        SliderId::StrokeMidiKey => {
+                            if let Some(PanelSelection::Stroke { id, .. }) = state.selection {
+                                let stepped = snapped.round();
+                                if (stepped - value).abs() > 1e-9 {
+                                    // −1 is the auto sentinel; 0..=127 pins.
+                                    #[allow(
+                                        clippy::cast_possible_truncation,
+                                        clippy::cast_sign_loss
+                                    )]
+                                    let key = (stepped >= 0.0).then_some(stepped as u8);
+                                    commands.push(PanelCommand::SetStrokeMidiKey(id, key));
+                                }
+                            }
+                        }
+                        SliderId::StrokeMidiChannel => {
+                            if let Some(PanelSelection::Stroke { id, .. }) = state.selection {
+                                let stepped = snapped.round();
+                                if (stepped - value).abs() > 1e-9 {
+                                    // 1-based on the track, 0-based inside.
+                                    #[allow(
+                                        clippy::cast_possible_truncation,
+                                        clippy::cast_sign_loss
+                                    )]
+                                    let ch = (stepped as u8).clamp(1, 16) - 1;
+                                    commands.push(PanelCommand::SetStrokeMidiChannel(id, ch));
                                 }
                             }
                         }
@@ -1362,6 +1415,13 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
     );
     button_row(
         &mut out,
+        &[(ButtonId::PlaceWall, "Draw wall")],
+        x,
+        w,
+        &mut y,
+    );
+    button_row(
+        &mut out,
         &[
             (ButtonId::PlaceEmitter, "Place emitter"),
             (ButtonId::ClearEmitters, "Clear emitters"),
@@ -1457,6 +1517,7 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
                 segments,
                 note,
                 filter,
+                midi,
             } => {
                 let plural = if segments == 1 { "" } else { "s" };
                 push_item(
@@ -1491,6 +1552,31 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
                     ],
                     x,
                     w,
+                    &mut y,
+                );
+                push_slider(
+                    &mut out,
+                    x,
+                    w,
+                    SliderId::StrokeMidiKey,
+                    "MIDI key",
+                    STROKE_MIDI_KEY_POINTS,
+                    midi.key.map_or(-1.0, f64::from),
+                    &[-1.0, 60.0],
+                    midi.key
+                        .map_or_else(|| "auto".to_string(), crate::midi::key_name),
+                    &mut y,
+                );
+                push_slider(
+                    &mut out,
+                    x,
+                    w,
+                    SliderId::StrokeMidiChannel,
+                    "MIDI ch",
+                    STROKE_MIDI_CH_POINTS,
+                    f64::from(midi.channel) + 1.0,
+                    &[1.0],
+                    format!("{}", u32::from(midi.channel) + 1),
                     &mut y,
                 );
                 button_row(
@@ -1768,7 +1854,10 @@ fn slider_command(id: SliderId, value: f64) -> PanelCommand {
         SliderId::LaunchSize | SliderId::LaunchSpeed | SliderId::LaunchMinParticles => {
             unreachable!("launch sliders edit the draft; Apply & relaunch emits")
         }
-        SliderId::EmitterRate | SliderId::EmitterCap => {
+        SliderId::EmitterRate
+        | SliderId::EmitterCap
+        | SliderId::StrokeMidiKey
+        | SliderId::StrokeMidiChannel => {
             unreachable!("inspector sliders emit id-carrying commands in the drag arm")
         }
     }
@@ -1815,6 +1904,7 @@ fn is_placement(id: ButtonId) -> bool {
             | ButtonId::PinWell
             | ButtonId::PinRepeller
             | ButtonId::PlaceEmitter
+            | ButtonId::PlaceWall
             | ButtonId::Select
             | ButtonId::ReAim
     )
@@ -1829,6 +1919,7 @@ fn placement_label(id: ButtonId) -> &'static str {
         ButtonId::PinWell => "click to pin well",
         ButtonId::PinRepeller => "click to pin repeller",
         ButtonId::PlaceEmitter => "click to place emitter (aims at center)",
+        ButtonId::PlaceWall => "drag on the arena to draw a wall",
         ButtonId::Select => "click an emitter or wall to select",
         ButtonId::ReAim => "click to aim the emitter",
         _ => "",
@@ -1861,6 +1952,7 @@ fn button_command(id: ButtonId, state: &PanelState) -> PanelCommand {
         | ButtonId::PinWell
         | ButtonId::PinRepeller
         | ButtonId::PlaceEmitter
+        | ButtonId::PlaceWall
         | ButtonId::Select
         | ButtonId::ReAim
         | ButtonId::CycleStrokeNote
@@ -2340,6 +2432,7 @@ mod tests {
                 segments: 4,
                 note: WallNote::Auto,
                 filter: WallFilter::None,
+                midi: WallMidi::default(),
             }),
             ..state()
         }
@@ -2426,6 +2519,80 @@ mod tests {
             cmds.iter()
                 .any(|c| matches!(c, PanelCommand::CycleStrokeNote(5)))
         );
+    }
+
+    #[test]
+    fn stroke_midi_sliders_appear_only_for_strokes_and_emit_by_id() {
+        // Present for a stroke selection, absent otherwise.
+        let has_slider = |s: &PanelState, want: SliderId| {
+            let (items, _) = layout(s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0);
+            items
+                .iter()
+                .any(|laid| matches!(&laid.item, Item::Slider { id, .. } if *id == want))
+        };
+        assert!(!has_slider(&state(), SliderId::StrokeMidiKey));
+        assert!(!has_slider(&emitter_selected(), SliderId::StrokeMidiKey));
+        let stroke = stroke_selected();
+        assert!(has_slider(&stroke, SliderId::StrokeMidiKey));
+        assert!(has_slider(&stroke, SliderId::StrokeMidiChannel));
+
+        // Start from a pinned key so both directions are real changes:
+        // the drag arm suppresses same-value emissions.
+        let mut pinned = stroke.clone();
+        if let Some(PanelSelection::Stroke { ref mut midi, .. }) = pinned.selection {
+            midi.key = Some(64);
+        }
+        let mut gui = open_gui();
+        let track = find_slider_track(&pinned, SliderId::StrokeMidiKey);
+        gui.set_cursor(track.x, track.y + 2.0);
+        gui.input.pressed = true;
+        let cmds = gui.tick(0.016, &pinned, 800, 600, false, 0.0);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::SetStrokeMidiKey(5, None))),
+            "left end is auto"
+        );
+        gui.input.released = true;
+        gui.tick(0.016, &pinned, 800, 600, false, 0.0);
+        // Near the middle-C detent: the snap catches it exactly.
+        let c4 = track.x + track.w * ((60.0 + 1.0) / 128.0);
+        gui.set_cursor(c4, track.y + 2.0);
+        gui.input.pressed = true;
+        let cmds = gui.tick(0.016, &pinned, 800, 600, false, 0.0);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::SetStrokeMidiKey(5, Some(60)))),
+            "the middle-C detent snaps: {}",
+            cmds.len()
+        );
+        gui.input.released = true;
+        gui.tick(0.016, &pinned, 800, 600, false, 0.0);
+
+        // The channel slider speaks 1-based on the track, 0-based in
+        // the command (right edge is exclusive; land just inside).
+        let track = find_slider_track(&stroke, SliderId::StrokeMidiChannel);
+        gui.set_cursor(track.x + track.w - 1.0, track.y + 2.0);
+        gui.input.pressed = true;
+        let cmds = gui.tick(0.016, &stroke, 800, 600, false, 0.0);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::SetStrokeMidiChannel(5, 15))),
+            "channel 16 on the wire is 15 inside"
+        );
+    }
+
+    #[test]
+    fn wall_tool_arms_and_survives_the_press() {
+        let mut gui = open_gui();
+        let cmds = click_button(&mut gui, &state(), ButtonId::PlaceWall);
+        assert!(cmds.is_empty(), "arming emits nothing");
+        assert!(gui.is_armed() && gui.armed_wall());
+        // The press is not a one-shot placement: place_armed yields no
+        // command and the tool stays armed for the drag.
+        assert!(gui.place_armed(200.0, 300.0).is_none());
+        assert!(gui.armed_wall(), "still armed after the press");
+        gui.disarm();
+        assert!(!gui.armed_wall());
     }
 
     #[test]

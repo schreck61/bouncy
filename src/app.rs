@@ -151,9 +151,13 @@ pub enum Command {
     LaunchComet,
     /// Toggle emitter quantize between off and the last tempo (L).
     ToggleQuantize,
-    /// Toggle MIDI note sending while connected (Y; native only).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Toggle MIDI note sending while connected (Y): the native port
+    /// or the browser's `WebMIDI` output, whichever shell is running.
     ToggleMidi,
+    /// Start/stop chime capture (Z; native only): stopping writes a
+    /// .mid and a .wav to the working directory.
+    #[cfg(not(target_arch = "wasm32"))]
+    ToggleCapture,
 }
 
 /// A control-panel action, shared by every panel surface (the native
@@ -205,6 +209,24 @@ pub enum PanelCommand {
     /// Step the stroke's pass-note: off → degree 0..10 → off. Setting a
     /// pass filter replaces any gate.
     CycleStrokePass(u32),
+    /// Pin the stroke's MIDI key (None = the pentatonic auto-mapping).
+    SetStrokeMidiKey(u32, Option<u8>),
+    /// Set the stroke's zero-based MIDI channel.
+    SetStrokeMidiChannel(u32, u8),
+    /// Kick off the browser's `WebMIDI` permission request (the panel's
+    /// Enable MIDI button; readiness lands via the snapshot).
+    #[cfg(target_arch = "wasm32")]
+    EnableMidi,
+    /// One wall segment from the panel's Draw-wall drag tool: a fresh
+    /// stroke for the drag's first segment, extending it for the rest
+    /// (the same polyline chaining held-V produces).
+    DrawWall {
+        x1: f64,
+        y1: f64,
+        x2: f64,
+        y2: f64,
+        extend: bool,
+    },
     /// Step the emitter's stamped note: none → degree 0..10 → none.
     CycleEmitterNote(u32),
     /// Absolute quantize tempo from the panel slider (0 = off).
@@ -464,8 +486,14 @@ pub struct App {
     /// synth while driving a DAW is a primary use.
     #[cfg(not(target_arch = "wasm32"))]
     midi: Option<crate::midi::MidiOut>,
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Both shells: gates note sending (Y) while the connection — the
+    /// native port or the browser's `WebMIDI` output — stays open.
     midi_enabled: bool,
+
+    /// Chime capture in progress (Z / --capture), if recording. Stop
+    /// or quit writes the files; see `capture.rs`.
+    #[cfg(not(target_arch = "wasm32"))]
+    capture: Option<crate::capture::Capture>,
 
     /// Mailbox shared with the JS control panel: commands flow in, a
     /// state snapshot flows out, once per frame (see `web.rs`).
@@ -496,6 +524,13 @@ impl App {
                     }
                 }
             });
+        // --capture arms recording from the first frame; the tempo and
+        // timbre snapshot uses the launch config, same values the sim
+        // will start with.
+        #[cfg(not(target_arch = "wasm32"))]
+        let capture = config
+            .capture
+            .then(|| crate::capture::Capture::start(config.bpm, config.chime_timbre));
         App {
             trails: config.trails,
             color_mode: config.color_mode,
@@ -544,8 +579,9 @@ impl App {
             },
             #[cfg(not(target_arch = "wasm32"))]
             midi,
-            #[cfg(not(target_arch = "wasm32"))]
             midi_enabled: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            capture,
             #[cfg(target_arch = "wasm32")]
             web_shared: None,
         }
@@ -624,8 +660,22 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             if self.midi_enabled
                 && let Some(ref mut midi) = self.midi
+                && let Some((ch, key, vel)) =
+                    crate::midi::chime_message(chime.note, chime.midi, chime.energy)
             {
-                midi.note_on(chime.note, chime.energy, now);
+                midi.note_on(ch, key, vel, now);
+            }
+            #[cfg(target_arch = "wasm32")]
+            if self.midi_enabled
+                && crate::midi::web::ready()
+                && let Some((ch, key, vel)) =
+                    crate::midi::chime_message(chime.note, chime.midi, chime.energy)
+            {
+                crate::midi::web::note_on(ch, key, vel, now);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(ref mut capture) = self.capture {
+                capture.record(chime);
             }
             self.wall_flash.insert(chime.stroke, 1.0);
         }
@@ -645,6 +695,8 @@ impl App {
         if let Some(ref mut midi) = self.midi {
             midi.flush(now);
         }
+        #[cfg(target_arch = "wasm32")]
+        crate::midi::web::flush(now);
         // Selection sweep: an id that died this frame (clear-all, reset,
         // Shift+V/U) drops the selection with it.
         if let Some(sel) = self.selection {
@@ -726,6 +778,11 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(ref midi) = self.midi {
             lines.push(midi_hud_line(&midi.port_name, self.midi_enabled));
+        }
+        // Capture line only while recording, same logic.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(ref capture) = self.capture {
+            lines.push(capture_hud_line(capture.elapsed(), capture.len()));
         }
 
         let mut flags = Vec::new();
@@ -964,6 +1021,15 @@ impl App {
             }
         }
 
+        // The capture clock runs on unscaled wall time — a bounce is
+        // recorded when the listener heard it, whatever the time-scale
+        // dial says — and pause holds it (no dead air).
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.paused
+            && let Some(ref mut capture) = self.capture
+        {
+            capture.advance(dt);
+        }
         let time_scale = self.time_scale * self.bullet_time.multiplier(now);
         if !self.paused {
             self.simulate(dt * time_scale, now);
@@ -1147,6 +1213,45 @@ impl App {
                     sim.set_stroke_filter(id, next);
                 }
             }
+            PanelCommand::SetStrokeMidiKey(id, key) => {
+                if let Some(ref mut sim) = self.sim
+                    && let Some(midi) = sim.stroke_midi_setting(id)
+                {
+                    sim.set_stroke_midi(id, crate::sim::WallMidi { key, ..midi });
+                }
+            }
+            PanelCommand::SetStrokeMidiChannel(id, channel) => {
+                if let Some(ref mut sim) = self.sim
+                    && let Some(midi) = sim.stroke_midi_setting(id)
+                {
+                    sim.set_stroke_midi(id, crate::sim::WallMidi { channel, ..midi });
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            PanelCommand::EnableMidi => {
+                crate::midi::web::enable();
+            }
+            PanelCommand::DrawWall {
+                x1,
+                y1,
+                x2,
+                y2,
+                extend,
+            } => {
+                if let Some(ref mut sim) = self.sim {
+                    let added = if extend {
+                        sim.extend_last_wall_stroke(x1, y1, x2, y2)
+                    } else {
+                        sim.add_wall_segment(x1, y1, x2, y2)
+                    };
+                    // The freshly drawn stroke is what the user is
+                    // working on: select it so the inspector is live
+                    // the moment the drag ends (and while it grows).
+                    if added && let Some(meta) = sim.wall_meta().last() {
+                        self.selection = Some(Selection::WallStroke(meta.stroke));
+                    }
+                }
+            }
             PanelCommand::CycleEmitterNote(id) => {
                 if let Some(ref mut sim) = self.sim
                     && let Some(e) = sim.emitter(id)
@@ -1299,6 +1404,13 @@ impl App {
         if let Some(ref port) = self.config.midi_port {
             args.push("--midi-port".into());
             args.push(port.into());
+        }
+        // A recording in progress is App-owned and, like the MIDI
+        // connection, survives the relaunch untouched — it simply keeps
+        // rolling across the rebuild. The flag rides along so the
+        // rebuilt Config stays truthful about the process context.
+        if self.capture.is_some() {
+            args.push("--capture".into());
         }
         if self.config.verbose {
             args.push("--verbose".into());
@@ -1493,6 +1605,7 @@ impl App {
                             segments: sim.stroke_segment_count(id),
                             note,
                             filter: sim.stroke_filter_setting(id).unwrap_or(WallFilter::None),
+                            midi: sim.stroke_midi_setting(id).unwrap_or_default(),
                         })
                 }
             }),
@@ -1523,6 +1636,8 @@ impl App {
         let mut selection_gate = None;
         let mut selection_pass = None;
         let mut selection_emitter_note = None;
+        let mut selection_midi_key = None;
+        let mut selection_midi_channel = None;
         match self.selection {
             Some(Selection::Emitter(id)) => {
                 if let Some(e) = sim.emitter(id) {
@@ -1556,6 +1671,12 @@ impl App {
                         WallFilter::Note(d) => format!("degree {d}"),
                         WallFilter::None | WallFilter::Gate(_) => "off".to_string(),
                     });
+                    let midi = sim.stroke_midi_setting(id).unwrap_or_default();
+                    selection_midi_key = Some(
+                        midi.key
+                            .map_or_else(|| "auto".to_string(), crate::midi::key_name),
+                    );
+                    selection_midi_channel = Some(u32::from(midi.channel) + 1);
                 }
             }
             None => {}
@@ -1604,6 +1725,11 @@ impl App {
             selection_gate,
             selection_pass,
             selection_emitter_note,
+            selection_midi_key,
+            selection_midi_channel,
+            midi_ready: crate::midi::web::ready(),
+            midi_failed: crate::midi::web::failed(),
+            midi_enabled: self.midi_enabled,
         };
         shared.scene_toml = scene_toml;
     }
@@ -1701,8 +1827,9 @@ impl App {
             KeyCode::Quote => self.apply(Command::AdjustPingVolume(PING_VOLUME_STEP)),
             KeyCode::KeyI if !repeat => self.apply(Command::ToggleWallChimes),
             KeyCode::KeyL if !repeat => self.apply(Command::ToggleQuantize),
-            #[cfg(not(target_arch = "wasm32"))]
             KeyCode::KeyY if !repeat => self.apply(Command::ToggleMidi),
+            #[cfg(not(target_arch = "wasm32"))]
+            KeyCode::KeyZ if !repeat => self.apply(Command::ToggleCapture),
             KeyCode::KeyK if !repeat => self.apply(Command::ToggleKaleidoscope),
             KeyCode::KeyW if !repeat => self.apply(Command::PinWell(shift_polarity)),
             KeyCode::ArrowUp => self.apply(Command::AdjustGravity(GRAVITY_STEP)),
@@ -1877,9 +2004,12 @@ impl App {
                     }
                 }
             }
-            #[cfg(not(target_arch = "wasm32"))]
             Command::ToggleMidi => {
-                if self.midi.is_some() {
+                #[cfg(not(target_arch = "wasm32"))]
+                let connected = self.midi.is_some();
+                #[cfg(target_arch = "wasm32")]
+                let connected = crate::midi::web::ready();
+                if connected {
                     self.midi_enabled = !self.midi_enabled;
                     println!(
                         "MIDI: {}",
@@ -1890,7 +2020,32 @@ impl App {
                         }
                     );
                 } else {
+                    #[cfg(not(target_arch = "wasm32"))]
                     println!("MIDI: no port connected (launch with --midi-port)");
+                    #[cfg(target_arch = "wasm32")]
+                    println!("MIDI: not enabled (use the panel's Enable MIDI button)");
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::ToggleCapture => {
+                if let Some(capture) = self.capture.take() {
+                    match crate::capture::write_files(&capture) {
+                        Ok((mid, wav)) => println!(
+                            "Capture: {} notes over {:.1} s -> {} + {}",
+                            capture.len(),
+                            capture.elapsed(),
+                            mid.display(),
+                            wav.display()
+                        ),
+                        Err(e) => eprintln!("Capture write failed: {e}"),
+                    }
+                } else {
+                    let (bpm, timbre) = (
+                        self.sim.as_ref().map_or(0.0, |s| s.bpm),
+                        self.config.chime_timbre,
+                    );
+                    self.capture = Some(crate::capture::Capture::start(bpm, timbre));
+                    println!("Capture: recording chimes (Z stops and writes .mid + .wav)");
                 }
             }
             Command::PinWell(polarity) => {
@@ -2012,13 +2167,15 @@ impl App {
             .iter()
             .zip(sim.wall_export_notes())
             .zip(sim.wall_export_filters())
-            .map(|((seg, note), filter)| SceneWall {
+            .zip(sim.wall_export_midi())
+            .map(|(((seg, note), filter), midi)| SceneWall {
                 x1: frac(seg.x1, wf),
                 y1: frac(seg.y1, hf),
                 x2: frac(seg.x2, wf),
                 y2: frac(seg.y2, hf),
                 note,
                 filter,
+                midi,
             })
             .collect();
 
@@ -2193,6 +2350,15 @@ fn midi_hud_line(port: &str, enabled: bool) -> String {
     } else {
         "MIDI: paused  (Y)".to_string()
     }
+}
+
+/// The HUD's capture stats line while recording: elapsed time and the
+/// note count, minute:second like a tape counter.
+#[cfg(not(target_arch = "wasm32"))]
+fn capture_hud_line(elapsed: f64, notes: usize) -> String {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let secs = elapsed as u64;
+    format!("REC {}:{:02}  {notes} notes  (Z)", secs / 60, secs % 60)
 }
 
 /// Cursor auto-hide policy: visible while the window is unfocused, while
@@ -2441,6 +2607,14 @@ impl ApplicationHandler for App {
                     if button == MouseButton::Left && self.gui.on_press_at(w, h) {
                         return;
                     }
+                    // The armed wall tool is drag-shaped: the press
+                    // anchors and the existing V-drag machinery draws
+                    // as the cursor moves; release ends the stroke.
+                    if button == MouseButton::Left && self.gui.armed_wall() {
+                        self.wall_anchor = Some((self.cursor.x, self.cursor.y));
+                        self.wall_stroke_open = false;
+                        return;
+                    }
                     // An armed placement tool claims the next arena
                     // click: place at the cursor, exactly like the web
                     // panel's one-shot tools.
@@ -2465,6 +2639,21 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // Ending a wall-tool drag closes the stroke and disarms;
+                // a press-without-drag (no segments yet) disarms too.
+                if self.gui.armed_wall() && self.wall_anchor.take().is_some() {
+                    self.gui.disarm();
+                    // The new stroke is what the user is working on:
+                    // hand it straight to the inspector.
+                    if self.wall_stroke_open
+                        && let Some(stroke) = self
+                            .sim
+                            .as_ref()
+                            .and_then(|sim| sim.wall_meta().last().map(|m| m.stroke))
+                    {
+                        self.selection = Some(Selection::WallStroke(stroke));
+                    }
+                }
                 self.gui.on_release();
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -2517,6 +2706,21 @@ impl ApplicationHandler for App {
         // repeated render failures) so it is never left hidden.
         if let Some(ref render) = self.render {
             render.window().set_cursor_visible(true);
+        }
+        // A quit mid-recording still delivers the files — the capture
+        // counterpart of MidiOut's note-off flush on drop.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(capture) = self.capture.take() {
+            match crate::capture::write_files(&capture) {
+                Ok((mid, wav)) => println!(
+                    "Capture: {} notes over {:.1} s -> {} + {}",
+                    capture.len(),
+                    capture.elapsed(),
+                    mid.display(),
+                    wav.display()
+                ),
+                Err(e) => eprintln!("Capture write failed: {e}"),
+            }
         }
     }
 }
@@ -2682,6 +2886,24 @@ mod tests {
         });
         assert!(app.config.mute, "mute is process context, not scene");
         assert!(app.audio.is_muted(), "relaunch must not unmute");
+    }
+
+    #[test]
+    fn relaunch_keeps_an_armed_capture_recording() {
+        let mut app = test_app();
+        assert!(!app.config.capture, "test app launches without --capture");
+        app.capture = Some(crate::capture::Capture::start(0.0, app.config.chime_timbre));
+        app.apply_panel_command(PanelCommand::Relaunch {
+            preset: Some("peace".to_string()),
+            particle_size: None,
+            initial_speed: None,
+            min_particles: None,
+        });
+        assert!(app.config.capture, "the flag rides the rebuilt context");
+        assert!(
+            app.capture.is_some(),
+            "the App-owned recording keeps rolling"
+        );
     }
 
     #[test]
@@ -3228,6 +3450,75 @@ mod tests {
         assert_eq!(filter(&app), WallFilter::Note(10));
         app.apply_panel_command(PanelCommand::CycleStrokePass(stroke));
         assert_eq!(filter(&app), WallFilter::None, "wraps back to off");
+    }
+
+    #[test]
+    fn stroke_midi_panel_commands_round_trip_the_setting() {
+        let mut app = test_app();
+        {
+            let sim = app.sim.as_mut().unwrap();
+            assert!(sim.add_wall_segment(200.0, 300.0, 300.0, 300.0));
+        }
+        let stroke = app.sim.as_ref().unwrap().wall_meta()[0].stroke;
+        let midi = |app: &App| {
+            app.sim
+                .as_ref()
+                .unwrap()
+                .stroke_midi_setting(stroke)
+                .unwrap()
+        };
+        app.apply_panel_command(PanelCommand::SetStrokeMidiKey(stroke, Some(48)));
+        assert_eq!(midi(&app).key, Some(48));
+        app.apply_panel_command(PanelCommand::SetStrokeMidiChannel(stroke, 2));
+        let m = midi(&app);
+        assert_eq!(
+            (m.key, m.channel),
+            (Some(48), 2),
+            "the two half-settings compose read-modify-write"
+        );
+        app.apply_panel_command(PanelCommand::SetStrokeMidiKey(stroke, None));
+        let m = midi(&app);
+        assert_eq!((m.key, m.channel), (None, 2), "auto keeps the channel");
+    }
+
+    #[test]
+    fn draw_wall_commands_chain_one_stroke() {
+        let mut app = test_app();
+        app.apply_panel_command(PanelCommand::DrawWall {
+            x1: 100.0,
+            y1: 100.0,
+            x2: 200.0,
+            y2: 100.0,
+            extend: false,
+        });
+        app.apply_panel_command(PanelCommand::DrawWall {
+            x1: 200.0,
+            y1: 100.0,
+            x2: 300.0,
+            y2: 150.0,
+            extend: true,
+        });
+        let sim = app.sim.as_ref().unwrap();
+        assert_eq!(sim.wall_segments().len(), 2);
+        assert_eq!(
+            sim.wall_meta()[0].stroke,
+            sim.wall_meta()[1].stroke,
+            "the drag's segments share one stroke"
+        );
+        // A fresh drag opens a fresh stroke.
+        app.apply_panel_command(PanelCommand::DrawWall {
+            x1: 400.0,
+            y1: 200.0,
+            x2: 500.0,
+            y2: 200.0,
+            extend: false,
+        });
+        let sim = app.sim.as_ref().unwrap();
+        assert_eq!(sim.wall_segments().len(), 3);
+        assert_ne!(sim.wall_meta()[2].stroke, sim.wall_meta()[0].stroke);
+        // The freshly drawn stroke is selected for immediate editing.
+        let last = sim.wall_meta()[2].stroke;
+        assert_eq!(app.selection, Some(Selection::WallStroke(last)));
     }
 
     #[test]

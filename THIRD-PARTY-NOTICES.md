@@ -17,7 +17,7 @@ This file is generated from the dependency graph with
 [cargo-about](https://github.com/EmbarkStudios/cargo-about):
 `cargo about generate about.hbs -o THIRD-PARTY-NOTICES.md`.
 
-- Apache License 2.0: 208 crates
+- Apache License 2.0: 209 crates
 - MIT License: 61 crates
 - BSD 3-Clause "New" or "Revised" License: 2 crates
 - ISC License: 2 crates
@@ -26,6 +26,7 @@ This file is generated from the dependency graph with
 - Creative Commons Zero v1.0 Universal: 1 crate
 - Mozilla Public License 2.0: 1 crate
 - Unicode License v3: 1 crate
+- The Unlicense: 1 crate
 - zlib License: 1 crate
 
 ---
@@ -477,6 +478,7 @@ Used by:
 
 Used by:
 - [as-raw-xcb-connection 1.0.1](https://crates.io/crates/as-raw-xcb-connection/1.0.1)
+- [hound 3.5.1](https://crates.io/crates/hound/3.5.1)
 - [static_assertions 1.1.0](https://crates.io/crates/static_assertions/1.1.0)
 - [x11rb-protocol 0.13.2](https://crates.io/crates/x11rb-protocol/0.13.2)
 - [x11rb 0.13.2](https://crates.io/crates/x11rb/0.13.2)
@@ -6690,6 +6692,25 @@ Except as contained in this notice, the name of a copyright holder shall
 not be used in advertising or otherwise to promote the sale, use or other
 dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
+
+```
+
+## The Unlicense
+
+Used by:
+- [midly 0.5.3](https://crates.io/crates/midly/0.5.3)
+
+```text
+This is free and unencumbered software released into the public domain.
+
+Anyone is free to copy, modify, publish, use, compile, sell, or distribute this software, either in source code form or as a compiled binary, for any purpose, commercial or non-commercial, and by any means.
+
+In jurisdictions that recognize copyright laws, the author or authors of this software dedicate any and all copyright interest in the software to the public domain. We make this dedication for the benefit of the public at large and to the detriment of our heirs and
+successors. We intend this dedication to be an overt act of relinquishment in perpetuity of all present and future rights to this software under copyright law.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+For more information, please refer to <http://unlicense.org/>
 
 ```
 
