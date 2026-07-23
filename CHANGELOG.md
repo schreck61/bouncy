@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.15.0 — 2026-07-22
 
 - **Runtime MIDI ports on both shells.** The native panel gains an
   always-visible `MIDI port` button that cycles none → each output →
