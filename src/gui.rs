@@ -180,6 +180,10 @@ pub enum ButtonId {
     CycleEmitterNote,
     /// Steps the beat-grid resolution: 1 → 2 → 4 → 8 ticks per beat.
     CycleBeatDiv,
+    /// Steps the live MIDI connection through the output ports:
+    /// none → each port → none. Always visible — this is how a session
+    /// launched without --midi-port connects at all.
+    CycleMidiPort,
     /// Deletes the selected entity (either kind).
     DeleteSelected,
 }
@@ -249,6 +253,9 @@ pub struct PanelState {
     /// current sending state.
     pub midi_connected: bool,
     pub midi_enabled: bool,
+    /// The connected port's name, labeling the always-visible port
+    /// cycle button ("none" while disconnected).
+    pub midi_port: Option<String>,
 }
 
 /// An axis-aligned rectangle in frame coordinates.
@@ -1343,6 +1350,19 @@ fn layout(state: &PanelState, draft: &LaunchDraft, panel_x: f64, scroll: f64) ->
         &mut y,
     );
     push_toggle(&mut out, x, w, ToggleId::Mute, "Mute", state.muted, &mut y);
+    button_row(
+        &mut out,
+        &[(
+            ButtonId::CycleMidiPort,
+            &format!(
+                "MIDI port: {}",
+                state.midi_port.as_deref().unwrap_or("none")
+            ),
+        )],
+        x,
+        w,
+        &mut y,
+    );
     if state.midi_connected {
         push_toggle(
             &mut out,
@@ -1943,6 +1963,7 @@ fn button_command(id: ButtonId, state: &PanelState) -> PanelCommand {
             4 => 8,
             _ => 1,
         }),
+        ButtonId::CycleMidiPort => PanelCommand::Plain(Command::CycleMidiPort),
         ButtonId::ClearWalls => PanelCommand::Plain(Command::ClearWalls),
         ButtonId::ClearEmitters => PanelCommand::Plain(Command::ClearEmitters),
         ButtonId::ExportScene => PanelCommand::Plain(Command::ExportScene),
@@ -2722,6 +2743,42 @@ mod tests {
             toggle_command(ToggleId::Midi),
             PanelCommand::Plain(Command::ToggleMidi)
         ));
+    }
+
+    #[test]
+    fn midi_port_button_is_always_visible_and_emits_the_cycle() {
+        let port_label = |s: &PanelState| {
+            layout(s, &LaunchDraft::default(), 800.0 - PANEL_WIDTH, 0.0)
+                .0
+                .iter()
+                .find_map(|laid| match &laid.item {
+                    Item::Button {
+                        id: ButtonId::CycleMidiPort,
+                        label,
+                        ..
+                    } => Some(label.clone()),
+                    _ => None,
+                })
+        };
+        // Visible with no connection — this is the connect path for a
+        // session launched without --midi-port.
+        assert_eq!(port_label(&state()).as_deref(), Some("MIDI port: none"));
+        let connected = PanelState {
+            midi_connected: true,
+            midi_enabled: true,
+            midi_port: Some("IAC Driver Bus 1".to_string()),
+            ..state()
+        };
+        assert_eq!(
+            port_label(&connected).as_deref(),
+            Some("MIDI port: IAC Driver Bus 1")
+        );
+        let mut gui = open_gui();
+        let cmds = click_button(&mut gui, &state(), ButtonId::CycleMidiPort);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PanelCommand::Plain(Command::CycleMidiPort)))
+        );
     }
 
     #[test]

@@ -115,25 +115,25 @@ function clickToSim(e) {
 
 function bind(handle) {
   const canvas = $("bouncy");
-  $("btn-pause").onclick = () => handle.set_paused(!latest.paused);
-  $("btn-step").onclick = () => handle.step_frame();
-  $("btn-reset").onclick = () => handle.reset();
+  $("btn-pause").onclick = () => handle.set_paused?.(!latest.paused);
+  $("btn-step").onclick = () => handle.step_frame?.();
+  $("btn-reset").onclick = () => handle.reset?.();
 
   const tools = {
-    "btn-burst": { label: "burst", act: (x, y) => handle.spawn_burst(x, y) },
-    "btn-comet": { label: "comet", act: (x, y) => handle.launch_comet(x, y) },
-    "btn-well": { label: "well", act: (x, y) => handle.pin_well(x, y, false) },
+    "btn-burst": { label: "burst", act: (x, y) => handle.spawn_burst?.(x, y) },
+    "btn-comet": { label: "comet", act: (x, y) => handle.launch_comet?.(x, y) },
+    "btn-well": { label: "well", act: (x, y) => handle.pin_well?.(x, y, false) },
     "btn-repel": {
       label: "repeller",
-      act: (x, y) => handle.pin_well(x, y, true),
+      act: (x, y) => handle.pin_well?.(x, y, true),
     },
     "btn-emitter": {
       label: "emitter",
-      act: (x, y) => handle.place_emitter(x, y),
+      act: (x, y) => handle.place_emitter?.(x, y),
     },
     "btn-explode": {
       label: "explosion",
-      act: (x, y) => handle.trigger_explosion(x, y),
+      act: (x, y) => handle.trigger_explosion?.(x, y),
     },
     // Inspector tools. Optional-chained: a stale cached wasm bundle
     // without these exports degrades to a no-op click.
@@ -224,6 +224,11 @@ function bind(handle) {
 
   // Enable MIDI: first click asks for permission (gesture-gated, like
   // Enable sound); once ready, later clicks toggle sending.
+  $("midi-port").onchange = (e) => {
+    // Index into the snapshot's midi_ports enumeration (browser port
+    // order is stable within a session).
+    handle.set_midi_port?.(e.target.selectedIndex);
+  };
   $("btn-midi").onclick = () => {
     if (latest.midi_ready) {
       handle.toggle_midi?.();
@@ -232,9 +237,9 @@ function bind(handle) {
     }
   };
 
-  $("btn-clear-wells").onclick = () => handle.clear_wells();
-  $("btn-clear-walls").onclick = () => handle.clear_walls();
-  $("btn-clear-emitters").onclick = () => handle.clear_emitters();
+  $("btn-clear-wells").onclick = () => handle.clear_wells?.();
+  $("btn-clear-walls").onclick = () => handle.clear_walls?.();
+  $("btn-clear-emitters").onclick = () => handle.clear_emitters?.();
 
   // Inspector actions, all addressed to the currently selected id.
   $("btn-deselect").onclick = () => handle.deselect?.();
@@ -284,23 +289,23 @@ function bind(handle) {
       handle.set_stroke_midi_channel?.(latest.selection_id, Number(e.target.value));
     }
   };
-  $("btn-color").onclick = () => handle.cycle_color_mode();
-  $("btn-spawn").onclick = () => handle.cycle_spawn_mode();
-  $("btn-hud").onclick = () => handle.cycle_hud();
+  $("btn-color").onclick = () => handle.cycle_color_mode?.();
+  $("btn-spawn").onclick = () => handle.cycle_spawn_mode?.();
+  $("btn-hud").onclick = () => handle.cycle_hud?.();
   $("btn-fullscreen").onclick = () => {
     if (document.fullscreenElement) document.exitFullscreen();
     else $("stage").requestFullscreen?.();
   };
 
-  $("in-gravity").oninput = (e) => handle.set_gravity(Number(e.target.value));
+  $("in-gravity").oninput = (e) => handle.set_gravity?.(Number(e.target.value));
   $("in-pelastic").oninput = (e) =>
-    handle.set_particle_elasticity(Number(e.target.value));
+    handle.set_particle_elasticity?.(Number(e.target.value));
   $("in-welastic").oninput = (e) =>
-    handle.set_wall_elasticity(Number(e.target.value));
-  $("in-time").oninput = (e) => handle.set_time_scale(Number(e.target.value));
+    handle.set_wall_elasticity?.(Number(e.target.value));
+  $("in-time").oninput = (e) => handle.set_time_scale?.(Number(e.target.value));
   $("in-threshold").oninput = (e) =>
-    handle.set_explosion_threshold(Number(e.target.value));
-  $("in-pings").oninput = (e) => handle.set_ping_volume(Number(e.target.value));
+    handle.set_explosion_threshold?.(Number(e.target.value));
+  $("in-pings").oninput = (e) => handle.set_ping_volume?.(Number(e.target.value));
   // Optional-chained like the inspector controls: a stale cached wasm
   // bundle without the setters degrades to a no-op.
   $("in-bpm").oninput = (e) => handle.set_bpm?.(Number(e.target.value));
@@ -309,24 +314,24 @@ function bind(handle) {
     handle.set_beat_div?.(next);
   };
 
-  $("tg-matter").onchange = () => handle.toggle_matter();
-  $("tg-flow").onchange = () => handle.toggle_flow();
-  $("tg-selfgrav").onchange = () => handle.toggle_self_gravity();
-  $("tg-trails").onchange = () => handle.toggle_trails();
-  $("tg-kaleido").onchange = () => handle.toggle_kaleidoscope();
-  $("tg-music").onchange = (e) => handle.set_music(e.target.checked);
-  $("tg-chimes").onchange = () => handle.toggle_wall_chimes();
+  $("tg-matter").onchange = () => handle.toggle_matter?.();
+  $("tg-flow").onchange = () => handle.toggle_flow?.();
+  $("tg-selfgrav").onchange = () => handle.toggle_self_gravity?.();
+  $("tg-trails").onchange = () => handle.toggle_trails?.();
+  $("tg-kaleido").onchange = () => handle.toggle_kaleidoscope?.();
+  $("tg-music").onchange = (e) => handle.set_music?.(e.target.checked);
+  $("tg-chimes").onchange = () => handle.toggle_wall_chimes?.();
 
   // First click creates the WebAudio engine (must happen synchronously
   // inside the gesture, per autoplay policy) and unmutes; afterwards the
   // button is a plain mute toggle.
   $("btn-sound").onclick = () => {
     if (!latest.audio_ready) {
-      if (!handle.enable_audio()) {
+      if (!handle.enable_audio?.()) {
         fail("WebAudio unavailable in this browser");
       }
     } else {
-      handle.set_muted(!latest.muted);
+      handle.set_muted?.(!latest.muted);
     }
   };
 
@@ -336,7 +341,7 @@ function bind(handle) {
     });
   };
   $("btn-scene").onclick = () => {
-    const toml = handle.scene_toml();
+    const toml = handle.scene_toml?.();
     if (toml) {
       download(new Blob([toml], { type: "application/toml" }),
                `bouncy-scene-${Date.now()}.toml`);
@@ -359,7 +364,16 @@ function bind(handle) {
   // the focus owner (matching the native shell, where the panel cannot
   // hold focus at all).
   const refocusCanvas = () => $("bouncy").focus({ preventScroll: true });
-  $("panel").addEventListener("pointerup", () => setTimeout(refocusCanvas, 0));
+  $("panel").addEventListener("pointerup", (e) => {
+    // Not for <select>s: yanking focus off a select dismisses its
+    // native popup the instant it opens. Focus returns on 'change'
+    // below instead, once a choice has actually been made.
+    if (e.target.closest("select")) return;
+    setTimeout(refocusCanvas, 0);
+  });
+  $("panel").addEventListener("change", (e) => {
+    if (e.target.matches("select")) setTimeout(refocusCanvas, 0);
+  });
   $("panel-toggle").addEventListener("pointerup", () => setTimeout(refocusCanvas, 0));
   canvas.addEventListener("pointerdown", () => canvas.focus());
 
@@ -373,7 +387,7 @@ function bind(handle) {
       const w = Math.round(canvas.clientWidth);
       const h = Math.round(canvas.clientHeight);
       if (w > 0 && h > 0 && (w !== latest.width || h !== latest.height)) {
-        handle.resize(w, h);
+        handle.resize?.(w, h);
       }
     }, 250);
   }).observe(canvas);
@@ -486,6 +500,10 @@ globalThis.bouncyShareUrl = shareUrl;
 let lastSelId = null;
 // The MIDI-failure banner fires once per failure, not every poll.
 let midiFailedShown = false;
+// The port list the dropdown last showed (as JSON): options are
+// rebuilt only when the enumeration changes — rewriting a <select>
+// every frame would fight the user's open menu.
+let lastMidiPorts = null;
 
 // Reflect the snapshot into the panel. Sliders follow the simulation
 // unless the user is mid-drag (their element has focus).
@@ -572,6 +590,26 @@ function reflect(s) {
     if (s.midi_failed && !midiFailedShown) {
       midiFailedShown = true;
       fail("MIDI unavailable or permission denied");
+    }
+  }
+
+  // Port dropdown: revealed once connected, on bundles that publish
+  // the port list (`??` guards a stale wasm). Selection follows the
+  // live connection unless the user has the menu focused.
+  const midiPorts = s.midi_ports ?? [];
+  const portSel = $("midi-port");
+  portSel.hidden = !midiCapable || !s.midi_ready || midiPorts.length === 0;
+  if (!portSel.hidden) {
+    const key = JSON.stringify(midiPorts);
+    if (key !== lastMidiPorts) {
+      lastMidiPorts = key;
+      portSel.replaceChildren(...midiPorts.map((name) => new Option(name)));
+    }
+    if (document.activeElement !== portSel && s.midi_port != null) {
+      const current = midiPorts.indexOf(s.midi_port);
+      if (current >= 0 && portSel.selectedIndex !== current) {
+        portSel.selectedIndex = current;
+      }
     }
   }
 

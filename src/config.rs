@@ -516,7 +516,7 @@ pub const CONTROLS: &[(&str, &str)] = &[
     ),
     (
         "Y",
-        "Toggle MIDI note sending (native; needs --midi-port at launch)",
+        "Toggle MIDI note sending (connect via --midi-port or the panel's MIDI port button)",
     ),
     (
         "Z",

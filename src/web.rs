@@ -93,6 +93,11 @@ pub struct Snapshot {
     pub midi_failed: bool,
     /// Note sending is gated on (Y / the panel toggle).
     pub midi_enabled: bool,
+    /// `WebMIDI`: every output port's name, in the browser's enumeration
+    /// order (the dropdown's option list; empty unless ready).
+    pub midi_ports: Vec<String>,
+    /// `WebMIDI`: the connected port's name, if ready.
+    pub midi_port: Option<String>,
 }
 
 /// The mailbox shared between the running [`App`] and the [`WebHandle`]
@@ -428,6 +433,13 @@ impl WebHandle {
     /// panel twin of the Y key).
     pub fn toggle_midi(&self) {
         self.push(WebCommand::Plain(Command::ToggleMidi));
+    }
+
+    /// Switch the live `WebMIDI` connection to the port at `index` in
+    /// the snapshot's `midi_ports` (the panel dropdown). Live: the old
+    /// port is silenced, the scene never resets.
+    pub fn set_midi_port(&self, index: u32) {
+        self.push(WebCommand::SetMidiPort(index));
     }
 
     /// Delete one emitter by id (its particles keep flying).

@@ -160,6 +160,12 @@
                 title="send wall chimes to a MIDI output port (Chromium; asks for permission)">Enable MIDI</button>
       </div>
 
+      <!-- Hidden until MIDI is connected; full-width so port names fit.
+           Switching is live (the old port is silenced, the scene keeps
+           running). -->
+      <select id="midi-port" hidden
+              title="which MIDI output port receives the chimes (switches live)"></select>
+
       <div class="row">
         <button id="btn-spawn" class="cycle"><small>spawn (B)</small><span id="val-spawn">…</span></button>
         <button id="btn-color" class="cycle"><small>color (C)</small><span id="val-color">…</span></button>

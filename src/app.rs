@@ -154,6 +154,12 @@ pub enum Command {
     /// Toggle MIDI note sending while connected (Y): the native port
     /// or the browser's `WebMIDI` output, whichever shell is running.
     ToggleMidi,
+    /// Step the live MIDI connection through the available output ports:
+    /// none → each port in order → none (panel-only; no hotkey — Y stays
+    /// the sending gate). Switching is live: the old connection drains
+    /// and silences on drop, the new one opens, the scene never resets.
+    #[cfg(not(target_arch = "wasm32"))]
+    CycleMidiPort,
     /// Start/stop chime capture (Z; native only): stopping writes a
     /// .mid and a .wav to the working directory.
     #[cfg(not(target_arch = "wasm32"))]
@@ -217,6 +223,11 @@ pub enum PanelCommand {
     /// Enable MIDI button; readiness lands via the snapshot).
     #[cfg(target_arch = "wasm32")]
     EnableMidi,
+    /// Switch the live `WebMIDI` connection to the port at this index
+    /// in the snapshot's `midi_ports` (the panel dropdown; the browser
+    /// twin of the native port cycle).
+    #[cfg(target_arch = "wasm32")]
+    SetMidiPort(u32),
     /// One wall segment from the panel's Draw-wall drag tool: a fresh
     /// stroke for the drag's first segment, extending it for the rest
     /// (the same polyline chaining held-V produces).
@@ -1231,6 +1242,12 @@ impl App {
             PanelCommand::EnableMidi => {
                 crate::midi::web::enable();
             }
+            #[cfg(target_arch = "wasm32")]
+            PanelCommand::SetMidiPort(index) => {
+                // A stale index (port list changed under the dropdown)
+                // is a quiet no-op; the next snapshot re-syncs the list.
+                let _ = crate::midi::web::select_port(index);
+            }
             PanelCommand::DrawWall {
                 x1,
                 y1,
@@ -1400,10 +1417,12 @@ impl App {
         }
         // The live MIDI connection is App-owned and survives a relaunch
         // untouched; the flag rides along so the rebuilt Config stays
-        // truthful about the process context.
-        if let Some(ref port) = self.config.midi_port {
-            args.push("--midi-port".into());
-            args.push(port.into());
+        // truthful about the process context. The *live* connection is
+        // what travels, not the launch flag — the panel can connect and
+        // disconnect at runtime, and the most recent deliberate act
+        // wins: a session that disconnected must not reconnect here.
+        for arg in midi_relaunch_args(self.midi.as_ref().map(|m| m.port_name.as_str())) {
+            args.push(arg);
         }
         // A recording in progress is App-owned and, like the MIDI
         // connection, survives the relaunch untouched — it simply keeps
@@ -1611,6 +1630,7 @@ impl App {
             }),
             midi_connected: self.midi.is_some(),
             midi_enabled: self.midi_enabled,
+            midi_port: self.midi.as_ref().map(|m| m.port_name.clone()),
         }
     }
 
@@ -1730,6 +1750,8 @@ impl App {
             midi_ready: crate::midi::web::ready(),
             midi_failed: crate::midi::web::failed(),
             midi_enabled: self.midi_enabled,
+            midi_ports: crate::midi::web::ports(),
+            midi_port: crate::midi::web::current_port(),
         };
         shared.scene_toml = scene_toml;
     }
@@ -2021,9 +2043,45 @@ impl App {
                     );
                 } else {
                     #[cfg(not(target_arch = "wasm32"))]
-                    println!("MIDI: no port connected (launch with --midi-port)");
+                    println!(
+                        "MIDI: no port connected (use --midi-port or the panel's MIDI port button)"
+                    );
                     #[cfg(target_arch = "wasm32")]
                     println!("MIDI: not enabled (use the panel's Enable MIDI button)");
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Command::CycleMidiPort => {
+                let ports = crate::midi::MidiOut::ports();
+                if ports.is_empty() {
+                    println!("MIDI: no output ports found");
+                } else {
+                    let current = self.midi.as_ref().map(|m| m.port_name.clone());
+                    match crate::midi::next_port(current.as_deref(), &ports) {
+                        Some(name) => {
+                            // Old connection first: its Drop drains the
+                            // pending note-offs and silences before the
+                            // next port opens. Connect by index, not
+                            // name — names can shadow each other as
+                            // substrings ("Bus 1" / "Bus 10").
+                            self.midi = None;
+                            let index = ports.iter().position(|p| *p == name).unwrap_or(0);
+                            match crate::midi::MidiOut::connect(&index.to_string()) {
+                                Ok(m) => {
+                                    println!("MIDI out: connected to '{}'", m.port_name);
+                                    self.midi = Some(m);
+                                }
+                                Err(e) => {
+                                    eprintln!("MIDI unavailable ({e}); running without MIDI");
+                                }
+                            }
+                        }
+                        None => {
+                            if self.midi.take().is_some() {
+                                println!("MIDI: disconnected");
+                            }
+                        }
+                    }
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -2350,6 +2408,14 @@ fn midi_hud_line(port: &str, enabled: bool) -> String {
     } else {
         "MIDI: paused  (Y)".to_string()
     }
+}
+
+/// The `--midi-port` args a relaunch carries: sourced from the live
+/// connection only, so a launch flag whose port was disconnected at
+/// runtime cannot resurrect itself through the rebuilt Config.
+#[cfg(not(target_arch = "wasm32"))]
+fn midi_relaunch_args(live_port: Option<&str>) -> Vec<std::ffi::OsString> {
+    live_port.map_or_else(Vec::new, |port| vec!["--midi-port".into(), port.into()])
 }
 
 /// The HUD's capture stats line while recording: elapsed time and the
@@ -3255,9 +3321,12 @@ mod tests {
         });
         assert_eq!(app.config.midi_port, None);
 
-        // A configured port survives the rebuilt config even though the
-        // connection itself failed (process context, like --mute).
+        // A configured port whose connection never opened (or was
+        // disconnected from the panel) does NOT survive the rebuild:
+        // the relaunch args follow the live connection, and here there
+        // is none — the stale flag must not resurrect itself.
         let mut app = app_with_bad_midi_port();
+        assert!(app.midi.is_none(), "the bad port never connected");
         app.apply_panel_command(PanelCommand::Relaunch {
             preset: Some("peace".to_string()),
             particle_size: None,
@@ -3265,9 +3334,8 @@ mod tests {
             min_particles: None,
         });
         assert_eq!(
-            app.config.midi_port.as_deref(),
-            Some("no-such-port-zzz"),
-            "midi port rides the relaunch args"
+            app.config.midi_port, None,
+            "no live connection, no --midi-port in the rebuilt config"
         );
     }
 
@@ -3284,6 +3352,22 @@ mod tests {
         // The no-connection case is structural: hud_lines pushes the
         // line inside `if let Some(ref midi)`, so absence needs no
         // sentinel — covered by midi_absent_or_unreachable_never_blocks.
+    }
+
+    #[test]
+    fn relaunch_midi_args_follow_the_live_connection_not_the_flag() {
+        // Runtime-connected (flag or not): the live port travels.
+        assert_eq!(
+            midi_relaunch_args(Some("IAC Driver Bus 1")),
+            vec![
+                std::ffi::OsString::from("--midi-port"),
+                std::ffi::OsString::from("IAC Driver Bus 1"),
+            ]
+        );
+        // Disconnected at runtime: nothing travels, even when the
+        // session was launched with --midi-port — the helper only ever
+        // sees the live connection, so the stale flag cannot leak in.
+        assert!(midi_relaunch_args(None).is_empty());
     }
 
     #[test]

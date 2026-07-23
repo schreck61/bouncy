@@ -138,6 +138,10 @@ button {
   font-size: 12.5px;
   cursor: pointer;
 }
+/* "Fullscreen" is the longest one-word label in the four-button row:
+   trim its side padding so the text never overflows the button. */
+#btn-fullscreen { padding-left: 2px; padding-right: 2px; }
+
 button:hover { border-color: var(--accent); }
 button:active { transform: translateY(1px); }
 
@@ -266,6 +270,21 @@ button.cycle span { display: block; }
   border: 1px solid var(--line);
   border-radius: 5px;
   padding: 4px 6px;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+/* MIDI port dropdown: its own full-width row once connected, so long
+   port names ("IAC Driver Bus 1") never truncate. */
+#midi-port {
+  display: block;
+  width: 100%;
+  margin: 6px 0;
+  background: #0f1319;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 5px 6px;
   font: inherit;
   font-size: 12.5px;
 }

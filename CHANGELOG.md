@@ -4,6 +4,32 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- **Runtime MIDI ports on both shells.** The native panel gains an
+  always-visible `MIDI port` button that cycles none → each output →
+  none, so a session no longer has to decide MIDI at launch; the web
+  panel gains a port dropdown beside Enable MIDI (first port remains
+  the enable default). Switching is **live**: the old connection drains
+  its note-offs and sends CC 123 on every used channel before the new
+  port opens — the scene, walls, and emitters never reset. `--midi-port`
+  keeps its exact meaning (connect at launch, exact selection) and a
+  panel relaunch now carries the *live* connection's port rather than
+  the launch flag, so a session that disconnected stays disconnected.
+  `Y` remains the sending gate on both shells.
+- Web-panel hardening: every `WebHandle` call from the page is now
+  optional-chained, so a stale cached wasm bundle (page newer than
+  bundle, e.g. between a deploy and the browser's cache catching up)
+  degrades to quiet no-ops instead of an on-page TypeError banner —
+  previously only the newer controls had the guard, and an old-enough
+  bundle threw on core sliders like ping volume. Also trimmed the
+  Fullscreen button's side padding so its label can't overflow, and
+  the panel's return-focus-to-canvas behavior (1.14) now exempts
+  `<select>`s — it was dismissing their native popup the instant it
+  opened (the MIDI port picker and the Launch-options preset both) —
+  handing focus back on `change` instead, so hotkeys still resume
+  after a choice.
+
 ## 1.14.0 — 2026-07-22
 
 - The deferred MIDI rungs, all three. **Per-wall MIDI mapping**: a

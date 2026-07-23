@@ -133,11 +133,9 @@ impl Scheduler {
         out
     }
 
-    /// Every pending note-off at once — the disconnect/drop path. The
-    /// caller follows with CC 123 (all notes off) for belt and braces.
-    /// (The browser shell has no disconnect path — the tab's teardown
-    /// is the browser's job — so this pair is native-consumed.)
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    /// Every pending note-off at once — the disconnect path: the native
+    /// drop and the browser's port switch. The caller follows with
+    /// CC 123 (all notes off) for belt and braces.
     pub(crate) fn drain_all(&mut self) -> Vec<[u8; 3]> {
         self.pending
             .drain(..)
@@ -147,7 +145,6 @@ impl Scheduler {
 
     /// Channels that have carried any note this connection, as a
     /// bitmask (bit n = zero-based channel n).
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn used_channels(&self) -> u16 {
         self.used
     }
@@ -177,6 +174,22 @@ fn port_names(out: &midir::MidiOutput) -> Vec<String> {
                 .unwrap_or_else(|_| "(unnamed port)".to_string())
         })
         .collect()
+}
+
+/// The next stop on the panel's port cycle: none → each port in order →
+/// none. A connected port that has vanished from the list (unplugged)
+/// restarts the cycle at the first port. Pure — the caller enumerates
+/// and connects.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn next_port(current: Option<&str>, ports: &[String]) -> Option<String> {
+    let first = ports.first()?;
+    match current {
+        None => Some(first.clone()),
+        Some(name) => match ports.iter().position(|p| p == name) {
+            Some(i) => ports.get(i + 1).cloned(),
+            None => Some(first.clone()),
+        },
+    }
 }
 
 /// A live connection to one MIDI output port: the thin I/O shell around
@@ -314,8 +327,13 @@ pub(crate) mod web {
         Idle,
         /// Permission request in flight.
         Pending,
-        /// Connected to the first available output.
+        /// Connected to an output (the first available at enable; the
+        /// panel dropdown can switch afterward).
         Ready {
+            /// Retained past the connect so the dropdown can re-
+            /// enumerate ports and switch without a fresh permission
+            /// request.
+            access: web_sys::MidiAccess,
             output: web_sys::MidiOutput,
             scheduler: Scheduler,
             send_failed: bool,
@@ -353,10 +371,10 @@ pub(crate) mod web {
         let outcome = try_request().await;
         MIDI.with(|m| {
             *m.borrow_mut() = match outcome {
-                Ok(output) => {
+                Ok((access, output)) => {
                     web_sys::console::log_1(&JsValue::from_str(&format!(
                         "MIDI out: connected to '{}'",
-                        output.name().unwrap_or_else(|| "(unnamed port)".into())
+                        port_label(&output)
                     )));
                     // The predecessor's channels are unknowable —
                     // broadcast, like the native connect.
@@ -364,6 +382,7 @@ pub(crate) mod web {
                         let _ = send_bytes(&output, all_notes_off(channel));
                     }
                     State::Ready {
+                        access,
                         output,
                         scheduler: Scheduler::default(),
                         send_failed: false,
@@ -377,7 +396,7 @@ pub(crate) mod web {
         });
     }
 
-    async fn try_request() -> Result<web_sys::MidiOutput, String> {
+    async fn try_request() -> Result<(web_sys::MidiAccess, web_sys::MidiOutput), String> {
         let navigator = web_sys::window().ok_or("no window")?.navigator();
         let promise = navigator
             .request_midi_access()
@@ -387,19 +406,101 @@ pub(crate) mod web {
             .map_err(|_| "permission denied")?
             .dyn_into::<web_sys::MidiAccess>()
             .map_err(|_| "unexpected MIDIAccess shape")?;
-        // MIDIOutputMap is a read-only maplike: iterate its values via
-        // the JS Map interface to take the first port without knowing
-        // its browser-assigned id.
+        let first = output_list(&access)
+            .into_iter()
+            .next()
+            .ok_or("no MIDI output ports found")?;
+        Ok((access, first))
+    }
+
+    /// Every output port, in the browser's enumeration order (stable
+    /// within a session — the dropdown indexes into this).
+    /// `MIDIOutputMap` is a read-only maplike: iterate its values via the
+    /// JS Map interface, taking ports without knowing their
+    /// browser-assigned ids.
+    fn output_list(access: &web_sys::MidiAccess) -> Vec<web_sys::MidiOutput> {
         let outputs: js_sys::Map = access.outputs().unchecked_into();
-        let first = js_sys::try_iter(&outputs.values())
+        js_sys::try_iter(&outputs.values())
             .ok()
             .flatten()
-            .and_then(|mut it| it.next())
-            .and_then(Result::ok)
-            .ok_or("no MIDI output ports found")?;
-        first
-            .dyn_into::<web_sys::MidiOutput>()
-            .map_err(|_| "unexpected MIDIOutput shape".to_string())
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|v| v.dyn_into::<web_sys::MidiOutput>().ok())
+            .collect()
+    }
+
+    /// A port's display name, with the same fallback the native shell
+    /// uses for unnamed ports.
+    fn port_label(output: &web_sys::MidiOutput) -> String {
+        output.name().unwrap_or_else(|| "(unnamed port)".into())
+    }
+
+    /// Names of every output port, in enumeration order — empty unless
+    /// ready (the dropdown only shows after a successful enable).
+    pub(crate) fn ports() -> Vec<String> {
+        MIDI.with(|m| match *m.borrow() {
+            State::Ready { ref access, .. } => output_list(access).iter().map(port_label).collect(),
+            _ => Vec::new(),
+        })
+    }
+
+    /// The connected port's name, if ready.
+    pub(crate) fn current_port() -> Option<String> {
+        MIDI.with(|m| match *m.borrow() {
+            State::Ready { ref output, .. } => Some(port_label(output)),
+            _ => None,
+        })
+    }
+
+    /// Switch the live connection to the port at `index` in the current
+    /// enumeration. The old port is silenced first (drain + CC 123 on
+    /// every used channel), the new one starts with a fresh scheduler —
+    /// the browser twin of the native panel's port cycle. False when
+    /// not ready or the index is stale.
+    pub(crate) fn select_port(index: u32) -> bool {
+        MIDI.with(|m| {
+            let mut state = m.borrow_mut();
+            let State::Ready {
+                ref access,
+                ref mut output,
+                ref mut scheduler,
+                ref mut send_failed,
+            } = *state
+            else {
+                return false;
+            };
+            let Some(next) = output_list(access).into_iter().nth(index as usize) else {
+                return false;
+            };
+            if next.id() == output.id() {
+                return true;
+            }
+            // Silence the old port before the swap: pending note-offs,
+            // then CC 123 on every channel that carried a note.
+            for msg in scheduler.drain_all() {
+                let _ = send_bytes(output, msg);
+            }
+            let used = scheduler.used_channels();
+            for channel in 0..16 {
+                if used & (1 << channel) != 0 {
+                    let _ = send_bytes(output, all_notes_off(channel));
+                }
+            }
+            // The new port opens like every fresh connect: broadcast
+            // CC 123 (its previous tenant's channels are unknowable).
+            for channel in 0..16 {
+                let _ = send_bytes(&next, all_notes_off(channel));
+            }
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "MIDI out: switched to '{}'",
+                port_label(&next)
+            )));
+            *output = next;
+            *scheduler = Scheduler::default();
+            *send_failed = false;
+            true
+        })
     }
 
     fn send_bytes(output: &web_sys::MidiOutput, msg: [u8; 3]) -> Result<(), JsValue> {
@@ -429,6 +530,7 @@ pub(crate) mod web {
                 ref output,
                 ref mut scheduler,
                 ref mut send_failed,
+                ..
             } = *m.borrow_mut()
             {
                 for msg in scheduler.note_on(channel, key, velocity, now) {
@@ -643,6 +745,34 @@ mod tests {
         assert!(strike(&mut s, NOTE_COUNT, 800.0, Instant::now()).is_empty());
         assert!(s.pending.is_empty(), "nothing scheduled either");
         assert_eq!(s.used_channels(), 0, "no channel marked");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn next_port_cycles_none_through_every_port_and_back() {
+        let ports = vec!["IAC Bus 1".to_string(), "Synth USB".to_string()];
+        assert_eq!(next_port(None, &ports), Some("IAC Bus 1".to_string()));
+        assert_eq!(
+            next_port(Some("IAC Bus 1"), &ports),
+            Some("Synth USB".to_string())
+        );
+        assert_eq!(
+            next_port(Some("Synth USB"), &ports),
+            None,
+            "past the last port the cycle returns to none"
+        );
+        // A single port toggles none <-> that port.
+        let one = vec!["IAC Bus 1".to_string()];
+        assert_eq!(next_port(None, &one), Some("IAC Bus 1".to_string()));
+        assert_eq!(next_port(Some("IAC Bus 1"), &one), None);
+        // No ports: nowhere to go, connected or not.
+        assert_eq!(next_port(None, &[]), None);
+        assert_eq!(next_port(Some("IAC Bus 1"), &[]), None);
+        // The connected port vanished (unplugged): restart at the first.
+        assert_eq!(
+            next_port(Some("Gone USB"), &ports),
+            Some("IAC Bus 1".to_string())
+        );
     }
 
     // Never open a real port in tests: CI runners have none, and a
