@@ -646,12 +646,10 @@ impl SpatialGrid {
         particles: &[Particle],
         tasks: usize,
     ) -> Vec<(u32, u32)> {
-        let chunk = self.rows.div_ceil(tasks.max(1)).max(1);
-        (0..self.rows.div_ceil(chunk))
-            .into_par_iter()
-            .map(|c| {
-                let start = c * chunk;
-                let end = (start + chunk).min(self.rows);
+        let chunks = self.balanced_row_chunks(tasks);
+        chunks
+            .par_iter()
+            .map(|&(start, end)| {
                 let mut out = Vec::new();
                 for cy in start..end {
                     self.collect_row_contacts(cy, particles, &mut out);
@@ -660,6 +658,39 @@ impl SpatialGrid {
             })
             .collect::<Vec<_>>()
             .concat()
+    }
+
+    /// Cut the row range into at most `tasks` contiguous chunks of
+    /// roughly equal OCCUPANCY (bound particles, via the CSR offsets),
+    /// not equal row count. Equal-row chunks starve the pool when the
+    /// population clumps into a few grid rows — the 24k corner-clump
+    /// regime handed nearly all its work to two or three workers and
+    /// ran ~30% slower than per-row splitting; occupancy-balanced cuts
+    /// restore the balance while keeping one Vec per chunk. Chunk
+    /// boundaries depend only on the grid contents, never the thread
+    /// count or schedule, so determinism is untouched.
+    fn balanced_row_chunks(&self, tasks: usize) -> Vec<(usize, usize)> {
+        let total = self.entries.len();
+        let target = total.div_ceil(tasks.max(1)).max(1);
+        let mut chunks = Vec::with_capacity(tasks);
+        let mut start = 0usize;
+        let mut acc = 0usize;
+        for row in 0..self.rows {
+            // Row `row` owns the cells [row*cols, (row+1)*cols): its
+            // occupancy is one CSR-offset subtraction.
+            let row_entries =
+                (self.starts[(row + 1) * self.cols] - self.starts[row * self.cols]) as usize;
+            acc += row_entries;
+            if acc >= target {
+                chunks.push((start, row + 1));
+                start = row + 1;
+                acc = 0;
+            }
+        }
+        if start < self.rows {
+            chunks.push((start, self.rows));
+        }
+        chunks
     }
 }
 
@@ -1995,6 +2026,80 @@ mod tests {
                 grid.detect_binned_contacts_chunked(&particles, tasks),
                 serial,
                 "task count {tasks} must not reorder or change contacts"
+            );
+        }
+
+        // Again with everything packed into one corner (the regime that
+        // exposed the equal-row-chunk imbalance): occupancy-balanced
+        // boundaries land differently, the output must not.
+        let corner: Vec<Particle> = (0..(PARALLEL_THRESHOLD_DEFAULT + 200))
+            .map(|_| {
+                let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+                let r: f64 = 40.0 * rng.random_range(0.0f64..1.0).sqrt();
+                let mut p = particle(
+                    (740.0 + r * angle.cos()).clamp(2.0, 798.0),
+                    (540.0 + r * angle.sin()).clamp(2.0, 598.0),
+                    0.0,
+                    0.0,
+                );
+                p.vx = rng.random_range(-100.0..100.0);
+                p.vy = rng.random_range(-100.0..100.0);
+                p
+            })
+            .collect();
+        grid.build(&corner, 800, 600);
+        let mut corner_serial = Vec::new();
+        for cy in 0..grid.rows {
+            grid.collect_row_contacts(cy, &corner, &mut corner_serial);
+        }
+        assert!(!corner_serial.is_empty());
+        for tasks in [1, 3, 8, 64] {
+            assert_eq!(
+                grid.detect_binned_contacts_chunked(&corner, tasks),
+                corner_serial,
+                "corner clump, task count {tasks}"
+            );
+        }
+    }
+
+    #[test]
+    fn balanced_row_chunks_cover_rows_and_track_occupancy() {
+        // A corner clump: occupancy concentrated in the bottom rows.
+        let mut rng = StdRng::seed_from_u64(47);
+        let particles: Vec<Particle> = (0..2000)
+            .map(|_| {
+                let angle: f64 = rng.random_range(0.0..std::f64::consts::TAU);
+                let r: f64 = 40.0 * rng.random_range(0.0f64..1.0).sqrt();
+                particle(
+                    (740.0 + r * angle.cos()).clamp(2.0, 798.0),
+                    (540.0 + r * angle.sin()).clamp(2.0, 598.0),
+                    0.0,
+                    0.0,
+                )
+            })
+            .collect();
+        let mut grid = SpatialGrid::new();
+        grid.build(&particles, 800, 600);
+        let chunks = grid.balanced_row_chunks(8);
+        // Contiguous, ascending, covering [0, rows) exactly.
+        assert_eq!(chunks.first().unwrap().0, 0);
+        assert_eq!(chunks.last().unwrap().1, grid.rows);
+        for pair in chunks.windows(2) {
+            assert_eq!(pair[0].1, pair[1].0, "no gaps, no overlaps");
+        }
+        // Balance: no chunk may hoard the population. With 8 requested
+        // chunks a perfectly even split holds 1/8; allow 2x slack for
+        // row-boundary rounding, which still forbids the 2-3 chunk
+        // hoarding the corner-clump regression exhibited.
+        let row_count = |a: usize, b: usize| -> usize {
+            (grid.starts[b * grid.cols] - grid.starts[a * grid.cols]) as usize
+        };
+        let total = grid.entries.len();
+        for &(a, b) in &chunks {
+            assert!(
+                row_count(a, b) <= total.div_ceil(8) * 2,
+                "chunk {a}..{b} hoards {} of {total} entries",
+                row_count(a, b)
             );
         }
     }

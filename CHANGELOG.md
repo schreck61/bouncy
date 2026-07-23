@@ -4,6 +4,18 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
+## Unreleased
+
+- Fixed: 1.16.0's chunked collision dispatch cut chunks by row count,
+  which starved the thread pool when the population clumps into a few
+  grid rows — the ~24k corner-clump benchmark regressed ~30% against
+  1.15 (103 → 133 ms/frame). Chunks are now cut by occupancy (the
+  grid's CSR offsets), restoring 1.15 parity on that regime (103 ms)
+  while keeping the round's wins (dense-clump Barnes-Hut ~20% faster
+  than 1.15). Chunk boundaries depend only on grid contents, so
+  determinism is untouched; the invariance tests now also cover a
+  corner-clump distribution.
+
 ## 1.16.0 — 2026-07-23
 
 - **Web performance round.** Four coordinated changes, plus the
