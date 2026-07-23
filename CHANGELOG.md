@@ -4,7 +4,7 @@ Notable changes to Bouncy, by release. Version numbers follow
 [Semantic Versioning](https://semver.org); each release is tagged
 `vX.Y.Z`.
 
-## Unreleased
+## 1.14.0 — 2026-07-22
 
 - The deferred MIDI rungs, all three. **Per-wall MIDI mapping**: a
   wall's chime strikes can pin a fixed MIDI key (`midi-note = 0-127`)
